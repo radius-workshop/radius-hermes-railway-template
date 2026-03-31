@@ -24,6 +24,8 @@ RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     ca-certificates \
     tini \
+    nodejs \
+    npm \
   && rm -rf /var/lib/apt/lists/*
 
 ENV PATH="/opt/venv/bin:${PATH}" \
@@ -37,6 +39,11 @@ COPY --from=builder /opt/hermes-agent /opt/hermes-agent
 WORKDIR /app
 COPY scripts/entrypoint.sh /app/scripts/entrypoint.sh
 RUN chmod +x /app/scripts/entrypoint.sh
+
+COPY scripts/radius /app/scripts/radius
+RUN cd /app/scripts/radius && npm install --omit=dev --no-fund --no-audit
+
+COPY skills /app/skills
 
 ENTRYPOINT ["tini", "--"]
 CMD ["/app/scripts/entrypoint.sh"]
