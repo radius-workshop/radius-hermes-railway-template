@@ -1,0 +1,50 @@
+# Claude Security Review
+#
+# Requires the ANTHROPIC_API_KEY secret:
+#   - Public repos: automatically available via org secret
+#   - Private repos: add as a repo-level secret
+#     (Settings > Secrets and variables > Actions > New repository secret)
+#
+# For full setup instructions, see:
+#   https://github.com/radius-workshop/.github/blob/main/docs/security-review-setup.md
+
+name: Claude Security Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  security-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/checkout@v6
+        with:
+          repository: radius-workshop/.github
+          path: .org-github
+          sparse-checkout: security
+
+      - uses: anthropics/claude-code-security-review@main
+        id: security-review
+        with:
+          claude-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          custom-security-scan-instructions: .org-github/security/custom-scan-instructions.txt
+          false-positive-filtering-instructions: .org-github/security/false-positive-filtering.txt
+
+      - name: Fail if vulnerabilities found
+        if: false  # set to: steps.security-review.outputs.findings-count > 0
+        run: |
+          echo "Found ${{ steps.security-review.outputs.findings-count }} security findings"
+          exit 1
