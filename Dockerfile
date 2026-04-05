@@ -47,7 +47,7 @@ COPY --from=oven/bun:1.3-slim /usr/local/bin/bun /usr/local/bin/bun
 
 WORKDIR /app
 COPY scripts/entrypoint.sh /app/scripts/entrypoint.sh
-RUN chmod +x /app/scripts/entrypoint.sh
+RUN sed -i 's/\r$//' /app/scripts/entrypoint.sh && chmod +x /app/scripts/entrypoint.sh
 
 COPY scripts/radius /app/scripts/radius
 RUN cd /app/scripts/radius && npm install --omit=dev --no-fund --no-audit
