@@ -1,61 +1,74 @@
 # Radius Wallet Skill
 
-This agent has a built-in Radius Testnet wallet. It can check balances and send SBC tokens on behalf of users.
+This agent supports **multiple Radius wallet providers** and can use either local or Para wallets per action.
 
-## Wallet details
+## Wallet model
 
-- Network: Radius Testnet (chain ID 72344)
-- Native token: RUSD (gas)
-- Primary token: SBC (ERC-20, 6 decimals)
-- Explorer: https://testnet.radiustech.xyz
+- Wallet manifest: `RADIUS_WALLET_MANIFEST` (JSON file)
+- Configured wallets come from `RADIUS_WALLETS` (e.g. `local,para`)
+- Default wallet comes from `RADIUS_DEFAULT_WALLET`
 
-The wallet address is available in `RADIUS_WALLET_ADDRESS` environment variable.
+Use this command to inspect wallets:
+
+```bash
+node /app/scripts/radius/cmd-wallets.mjs
+```
 
 ## Available commands (via terminal)
 
-### Check balance
+### List wallets / default wallet
 
 ```bash
-node /app/scripts/radius/balance.mjs
+node /app/scripts/radius/cmd-wallets.mjs
 ```
 
-Output is JSON: `{ address, rusd, sbc }` — print address and balances clearly to the user.
-
-### Check balance of another address
+### Switch default wallet
 
 ```bash
-node /app/scripts/radius/balance.mjs 0xADDRESS
+node /app/scripts/radius/cmd-wallets.mjs --set-default=local
+node /app/scripts/radius/cmd-wallets.mjs --set-default=para
 ```
 
-### Send SBC to an address
+### Check balance (default wallet)
 
 ```bash
-node /app/scripts/radius/send.mjs 0xRECIPIENT AMOUNT
+node /app/scripts/radius/cmd-balance.mjs
 ```
 
-Example: send 10 SBC to 0xabc...
+### Check balance (explicit wallet)
 
 ```bash
-node /app/scripts/radius/send.mjs 0xabc123... 10
+node /app/scripts/radius/cmd-balance.mjs --wallet=local
+node /app/scripts/radius/cmd-balance.mjs --wallet=para
 ```
 
-Output is JSON with `tx_hash` and `status`. Share the tx hash and the explorer link with the user:
-`https://testnet.radiustech.xyz/tx/<tx_hash>`
+### Send SBC (default wallet)
+
+```bash
+node /app/scripts/radius/cmd-send.mjs 0xRECIPIENT AMOUNT
+```
+
+### Send SBC (explicit wallet)
+
+```bash
+node /app/scripts/radius/cmd-send.mjs --wallet=para 0xRECIPIENT 10
+```
+
+### Fund from faucet
+
+```bash
+node /app/scripts/radius/cmd-fund.mjs --wallet=local
+node /app/scripts/radius/cmd-fund.mjs --wallet=para
+node /app/scripts/radius/cmd-fund.mjs --wallet=both
+```
 
 ## Responding to user requests
 
-When a user asks about the wallet, balance, or sending tokens:
+- “show my wallets” / “list wallets” → run `cmd-wallets.mjs`.
+- “show default wallet” → use `cmd-wallets.mjs` and report `defaultWallet`.
+- “use the para wallet” or “use local wallet” → run the requested command with `--wallet=...`.
+- “fund my para wallet” / “fund both wallets” → run `cmd-fund.mjs` with explicit wallet target.
+- “send 10 SBC to 0x... using para” → confirm recipient + amount, then run `cmd-send.mjs --wallet=para ...`.
+- “check local wallet balance” → run `cmd-balance.mjs --wallet=local`.
 
-1. **"What is my wallet address?" / "show wallet"** — print `RADIUS_WALLET_ADDRESS` from env, or run `balance.mjs` and show the address field.
-
-2. **"Check balance" / "how much SBC do I have?"** — run `balance.mjs` and report RUSD and SBC balances.
-
-3. **"Send X SBC to 0x..."** — confirm the recipient and amount with the user first, then run `send.mjs`. Share the tx hash and explorer link.
-
-4. **"Fund wallet" / "get testnet tokens"** — explain that funding happens automatically on first boot. If needed, the user can redeploy to trigger another faucet request, or use the Radius testnet faucet directly at https://testnet.radiustech.xyz.
-
-## Error handling
-
-- If `balance.mjs` fails with "No wallet configured", the wallet has not been initialized yet. Tell the user to check container logs.
-- If `send.mjs` reports "Insufficient SBC balance", tell the user how much they have and that they need more testnet funds.
-- Always show the full tx hash and explorer link on successful sends.
+Always return tx hash + explorer link for sends and funding transactions.

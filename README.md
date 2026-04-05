@@ -12,7 +12,7 @@ This template is worker-only: setup and configuration are done through Railway V
 - First-boot bootstrap from environment variables
 - Persistent Hermes state on a Railway volume at `/data`
 - Telegram, Discord, or Slack support (at least one required)
-- Built-in Radius Testnet wallet (auto-generated on first boot, auto-funded via faucet)
+- Built-in Radius Testnet **multi-wallet** support (local and/or Para, auto-funded via faucet)
 - Agent discovery layer served at `/.well-known/*` — ERC 8004 registration and Cloudflare agent skills discovery
 
 ## How it works
@@ -99,37 +99,48 @@ LLM_MODEL=anthropic/claude-3.5-haiku
 
 Use any model ID supported by your provider. OpenRouter model IDs look like `anthropic/claude-3.5-haiku` or `openai/gpt-4o`.
 
-## Radius wallet
+## Radius wallets
 
-This template includes a built-in Radius Testnet wallet. On first boot, the entrypoint:
+This template supports a Radius wallet registry. You can configure one or both wallet providers:
 
-1. Generates a private key (or uses `RADIUS_PRIVATE_KEY` if you set one).
-2. Persists the key and address under `/data/.hermes/.radius/`.
-3. Requests SBC testnet tokens from the Radius faucet.
-4. Installs a wallet skill so Hermes knows how to use it.
+- `local` (private-key wallet managed on disk)
+- `para` (Para server-side embedded wallet)
 
-The agent can then check balances, send SBC tokens, and show explorer links — all via natural language in chat.
+On boot, `scripts/radius/wallet-init.mjs` initializes every wallet listed in `RADIUS_WALLETS`, stores provider metadata under `/data/.hermes/.radius/wallets/<name>/`, optionally auto-funds selected wallets, and writes a manifest to:
 
-### Radius variables (all optional)
+- `/data/.hermes/.radius/wallets/manifest.json`
+
+Backwards compatibility is preserved for local-only users (`RADIUS_PRIVATE_KEY` still works and legacy `/data/.hermes/.radius/key` + `address` are maintained).
+
+### Radius variables
 
 | Variable | Description |
 |---|---|
-| `RADIUS_PRIVATE_KEY` | BYO private key (`0x...`). Auto-generated if not set. |
-| `RADIUS_WALLET_ADDRESS` | Derived from key automatically. |
-| `RADIUS_AUTO_FUND` | Set to `false` to skip faucet on boot. Default: enabled. |
+| `RADIUS_WALLETS` | Comma-separated configured wallets. Example: `local,para`. |
+| `RADIUS_DEFAULT_WALLET` | Default wallet used when no wallet is explicitly provided. |
+| `RADIUS_AUTO_FUND_ON_BOOT` | `true/false` for faucet funding at boot. |
+| `RADIUS_AUTO_FUND_WALLETS` | Which wallets to auto-fund. Example: `local,para`. |
+| `RADIUS_LOCAL_PRIVATE_KEY` | Optional BYO local private key. |
+| `RADIUS_LOCAL_AUTO_GENERATE` | Auto-generate local key if missing. Default: `true`. |
+| `PARA_API_KEY` | Para Server SDK API key (required for para wallet). |
+| `PARA_ENVIRONMENT` | Para environment (`beta` by default). |
+| `PARA_WALLET_IDENTIFIER` | Stable identifier for Para wallet reuse. |
+| `PARA_WALLET_IDENTIFIER_TYPE` | Default: `CUSTOM_ID`. |
+| `PARA_AUTO_CREATE` | Auto-create Para wallet if it does not exist. |
 
-The wallet key is stored at `/data/.hermes/.radius/key` with permissions `600`. It persists across redeploys via the Railway volume.
+Legacy vars still honored: `RADIUS_PRIVATE_KEY`, `RADIUS_WALLET_ADDRESS`, `RADIUS_AUTO_FUND`.
 
 ### Wallet commands (via chat)
 
-Once deployed, you can ask the agent:
+- *"show my wallets"*
+- *"show default wallet"*
+- *"switch default wallet to para"*
+- *"use the para wallet"*
+- *"check local wallet balance"*
+- *"send 10 SBC to 0x... using para"*
+- *"fund both wallets"*
 
-- *"What is my wallet address?"*
-- *"Check my balance"*
-- *"Send 10 SBC to 0x..."*
-- *"Get testnet tokens"*
-
-The agent runs the preconfigured Node.js scripts at `/app/scripts/radius/` using its terminal tool.
+The agent runs `/app/scripts/radius/cmd-wallets.mjs` (including `--set-default=...`), `cmd-balance.mjs`, `cmd-send.mjs`, and `cmd-fund.mjs`.
 
 ## Agent discovery
 
@@ -228,7 +239,7 @@ hermes pairing list
 2. Writes non-empty env vars to `${HERMES_HOME}/.env`.
 3. Clears empty integer-typed variables from the process environment (prevents `ValueError` in Hermes).
 4. Creates `${HERMES_HOME}/config.yaml` if it doesn't exist.
-5. Initializes Radius wallet if not already done (generates key, calls faucet).
+5. Initializes Radius wallet registry (local and/or para), generates manifest, and optionally funds configured wallets.
 6. Copies all `skills/*.md` files to `${HERMES_HOME}/skills/` (overwrites on each boot).
 7. Copies skills with `published: true` frontmatter to `${HERMES_HOME}/well-known-skills/` in `name/SKILL.md` structure.
 8. Starts the Bun skills server in background (binds `PORT`).
@@ -279,3 +290,14 @@ docker run --rm \
   -v "$(pwd)/.tmpdata:/data" \
   hermes-railway-template
 ```
+
+
+## Onboarding CLI
+
+Generate a deploy-ready env file before first Railway deploy:
+
+```bash
+node scripts/onboarding/init-agent.mjs
+```
+
+The CLI prompts for agent name, provider keys, wallet selection (`local`, `para`, or both), default wallet, and auto-fund selection, then writes `.env.local` or `.env.railway`.

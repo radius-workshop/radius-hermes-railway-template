@@ -74,13 +74,28 @@ fi
 
 validate_platforms
 
-# === Radius: pre-load stored wallet keys into environment ===
-RADIUS_KEY_FILE="${HERMES_HOME}/.radius/key"
-RADIUS_ADDR_FILE="${HERMES_HOME}/.radius/address"
-mkdir -p "${HERMES_HOME}/.radius"
-if [[ -z "${RADIUS_PRIVATE_KEY:-}" && -f "$RADIUS_KEY_FILE" ]]; then
+# === Radius: pre-load stored wallet keys into environment (legacy + registry) ===
+RADIUS_DIR="${HERMES_HOME}/.radius"
+RADIUS_WALLETS_DIR="${RADIUS_DIR}/wallets"
+RADIUS_KEY_FILE="${RADIUS_DIR}/key"
+RADIUS_ADDR_FILE="${RADIUS_DIR}/address"
+LOCAL_KEY_FILE="${RADIUS_WALLETS_DIR}/local/key"
+LOCAL_ADDR_FILE="${RADIUS_WALLETS_DIR}/local/address"
+mkdir -p "$RADIUS_DIR" "$RADIUS_WALLETS_DIR"
+
+export RADIUS_WALLETS="${RADIUS_WALLETS:-local}"
+export RADIUS_DEFAULT_WALLET="${RADIUS_DEFAULT_WALLET:-local}"
+
+if [[ -z "${RADIUS_LOCAL_PRIVATE_KEY:-}" && -f "$LOCAL_KEY_FILE" ]]; then
+  export RADIUS_LOCAL_PRIVATE_KEY="$(cat "$LOCAL_KEY_FILE")"
+  echo "[bootstrap] Loaded stored local Radius wallet key."
+fi
+if [[ -z "${RADIUS_LOCAL_PRIVATE_KEY:-}" && -z "${RADIUS_PRIVATE_KEY:-}" && -f "$RADIUS_KEY_FILE" ]]; then
   export RADIUS_PRIVATE_KEY="$(cat "$RADIUS_KEY_FILE")"
-  echo "[bootstrap] Loaded stored Radius wallet key."
+  echo "[bootstrap] Loaded legacy Radius wallet key."
+fi
+if [[ -z "${RADIUS_WALLET_ADDRESS:-}" && -f "$LOCAL_ADDR_FILE" ]]; then
+  export RADIUS_WALLET_ADDRESS="$(cat "$LOCAL_ADDR_FILE")"
 fi
 if [[ -z "${RADIUS_WALLET_ADDRESS:-}" && -f "$RADIUS_ADDR_FILE" ]]; then
   export RADIUS_WALLET_ADDRESS="$(cat "$RADIUS_ADDR_FILE")"
@@ -103,14 +118,15 @@ for key in \
   TINKER_API_KEY WANDB_API_KEY RL_API_URL GITHUB_TOKEN \
   TERMINAL_ENV TERMINAL_BACKEND TERMINAL_DOCKER_IMAGE TERMINAL_SINGULARITY_IMAGE TERMINAL_MODAL_IMAGE TERMINAL_CWD TERMINAL_TIMEOUT TERMINAL_LIFETIME_SECONDS TERMINAL_CONTAINER_CPU TERMINAL_CONTAINER_MEMORY TERMINAL_CONTAINER_DISK TERMINAL_CONTAINER_PERSISTENT TERMINAL_SANDBOX_DIR TERMINAL_SSH_HOST TERMINAL_SSH_USER TERMINAL_SSH_PORT TERMINAL_SSH_KEY SUDO_PASSWORD \
   WEB_TOOLS_DEBUG VISION_TOOLS_DEBUG MOA_TOOLS_DEBUG IMAGE_TOOLS_DEBUG CONTEXT_COMPRESSION_ENABLED CONTEXT_COMPRESSION_THRESHOLD CONTEXT_COMPRESSION_MODEL HERMES_MAX_ITERATIONS HERMES_TOOL_PROGRESS HERMES_TOOL_PROGRESS_MODE \
-  RADIUS_PRIVATE_KEY RADIUS_WALLET_ADDRESS RADIUS_NETWORK RADIUS_AUTO_FUND
-do
+  RADIUS_PRIVATE_KEY RADIUS_WALLET_ADDRESS RADIUS_NETWORK RADIUS_AUTO_FUND RADIUS_WALLETS RADIUS_DEFAULT_WALLET RADIUS_AUTO_FUND_ON_BOOT RADIUS_AUTO_FUND_WALLETS RADIUS_LOCAL_PRIVATE_KEY RADIUS_LOCAL_AUTO_GENERATE RADIUS_WALLET_MANIFEST \
+  PARA_API_KEY PARA_ENVIRONMENT PARA_WALLET_IDENTIFIER PARA_WALLET_IDENTIFIER_TYPE PARA_AUTO_CREATE PARA_USER_SHARE
+  do
   append_if_set "$key"
 done
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
   echo "[bootstrap] Creating ${CONFIG_FILE}"
-  cat > "$CONFIG_FILE" <<EOF
+  cat > "$CONFIG_FILE" <<CFG
 model: ${LLM_MODEL:-anthropic/claude-3.5-haiku}
 terminal:
   backend: ${TERMINAL_ENV:-${TERMINAL_BACKEND:-local}}
@@ -119,10 +135,9 @@ terminal:
 compression:
   enabled: true
   threshold: 0.85
-EOF
+CFG
 fi
 
-# Ensure model is set in config.yaml (handles existing installs and model changes)
 if [[ -n "${LLM_MODEL:-}" ]]; then
   if grep -q "^model:" "$CONFIG_FILE" 2>/dev/null; then
     sed -i "s|^model:.*|model: ${LLM_MODEL}|" "$CONFIG_FILE"
@@ -141,29 +156,31 @@ fi
 # === Radius: wallet setup ===
 RADIUS_WALLET_MARKER="${HERMES_HOME}/.radius/initialized"
 if command -v node >/dev/null 2>&1; then
-  if [[ ! -f "$RADIUS_WALLET_MARKER" ]]; then
-    echo "[bootstrap] Setting up Radius wallet..."
-    if node /app/scripts/radius/wallet-init.mjs; then
-      date -u +"%Y-%m-%dT%H:%M:%SZ" > "$RADIUS_WALLET_MARKER"
-      # Reload keys generated during init and append to .env for this boot
-      if [[ -f "$RADIUS_KEY_FILE" ]] && ! grep -q "^RADIUS_PRIVATE_KEY=" "$ENV_FILE" 2>/dev/null; then
-        echo "RADIUS_PRIVATE_KEY=$(cat "$RADIUS_KEY_FILE")" >> "$ENV_FILE"
+  echo "[bootstrap] Initializing Radius wallet registry (${RADIUS_WALLETS})..."
+  if node /app/scripts/radius/wallet-init.mjs; then
+    date -u +"%Y-%m-%dT%H:%M:%SZ" > "$RADIUS_WALLET_MARKER"
+    MANIFEST_PATH="${HERMES_HOME}/.radius/wallets/manifest.json"
+    if [[ -f "$MANIFEST_PATH" ]]; then
+      export RADIUS_WALLET_MANIFEST="$MANIFEST_PATH"
+      if ! grep -q "^RADIUS_WALLET_MANIFEST=" "$ENV_FILE" 2>/dev/null; then
+        echo "RADIUS_WALLET_MANIFEST=${MANIFEST_PATH}" >> "$ENV_FILE"
       fi
-      if [[ -f "$RADIUS_ADDR_FILE" ]] && ! grep -q "^RADIUS_WALLET_ADDRESS=" "$ENV_FILE" 2>/dev/null; then
-        echo "RADIUS_WALLET_ADDRESS=$(cat "$RADIUS_ADDR_FILE")" >> "$ENV_FILE"
-      fi
-      echo "[bootstrap] Radius wallet ready: $(cat "$RADIUS_ADDR_FILE" 2>/dev/null || echo 'unknown')"
-    else
-      echo "[bootstrap] WARNING: Radius wallet setup failed. Will retry on next boot." >&2
     fi
+
+    if [[ -f "$RADIUS_ADDR_FILE" ]] && ! grep -q "^RADIUS_WALLET_ADDRESS=" "$ENV_FILE" 2>/dev/null; then
+      echo "RADIUS_WALLET_ADDRESS=$(cat "$RADIUS_ADDR_FILE")" >> "$ENV_FILE"
+    fi
+    if [[ -f "$RADIUS_KEY_FILE" ]] && ! grep -q "^RADIUS_PRIVATE_KEY=" "$ENV_FILE" 2>/dev/null; then
+      echo "RADIUS_PRIVATE_KEY=$(cat "$RADIUS_KEY_FILE")" >> "$ENV_FILE"
+    fi
+    echo "[bootstrap] Radius wallets ready."
   else
-    echo "[bootstrap] Radius wallet already initialized: ${RADIUS_WALLET_ADDRESS:-unknown}"
+    echo "[bootstrap] WARNING: Radius wallet setup failed. Will retry on next boot." >&2
   fi
 else
   echo "[bootstrap] WARNING: Node.js not found, skipping Radius wallet setup." >&2
 fi
 
-# Install Radius skill into Hermes skills directory
 SKILLS_DIR="${HERMES_HOME}/skills"
 mkdir -p "$SKILLS_DIR"
 for skill_file in /app/skills/*.md; do
@@ -172,7 +189,6 @@ for skill_file in /app/skills/*.md; do
   echo "[bootstrap] Installed skill: $(basename "$skill_file")"
 done
 
-# Populate .well-known skills directory — only skills with `published: true` in frontmatter
 WELL_KNOWN_SKILLS_DIR="${HERMES_HOME}/well-known-skills"
 mkdir -p "$WELL_KNOWN_SKILLS_DIR"
 for skill_file in /app/skills/*.md; do
@@ -190,8 +206,6 @@ if [[ -z "${TELEGRAM_ALLOWED_USERS:-}${DISCORD_ALLOWED_USERS:-}${SLACK_ALLOWED_U
   fi
 fi
 
-# Unset integer-typed env vars that are empty or whitespace-only to prevent
-# int() parsing failures in hermes-agent (e.g. HERMES_MAX_ITERATIONS).
 for key in \
   HERMES_MAX_ITERATIONS HERMES_NOUS_MIN_KEY_TTL_SECONDS \
   CONTEXT_COMPRESSION_THRESHOLD \
