@@ -1,6 +1,27 @@
+---
+name: radius-wallet
+description: Built-in Radius Testnet wallet — check balances, send SBC tokens, show wallet address
+published: true
+---
+
 # Radius Wallet Skill
 
-This agent has a built-in Radius Testnet wallet. It can check balances and send SBC tokens on behalf of users.
+This agent has a built-in Radius Testnet wallet. Use this skill any time the user asks about their wallet, balance, address, tokens, or anything Radius-related.
+
+## When to use this skill
+
+Use this skill whenever the user asks anything like:
+
+- "what is my wallet" / "show my wallet" / "my wallet address"
+- "what is my radius wallet" / "radius wallet" / "show radius wallet"
+- "check my balance" / "what's my balance" / "how much do I have"
+- "get my wallet balance" / "wallet balance"
+- "how much SBC" / "how much RUSD" / "my tokens"
+- "send tokens" / "send SBC" / "transfer SBC"
+- "fund wallet" / "get testnet tokens" / "get SBC"
+- "radius" (when used in the context of a wallet or blockchain query)
+
+**Default behavior:** At the start of any session, proactively mention that a Radius Testnet wallet is available if the user seems to be exploring what the agent can do.
 
 ## Wallet details
 
@@ -9,7 +30,7 @@ This agent has a built-in Radius Testnet wallet. It can check balances and send 
 - Primary token: SBC (ERC-20, 6 decimals)
 - Explorer: https://testnet.radiustech.xyz
 
-The wallet address is available in `RADIUS_WALLET_ADDRESS` environment variable.
+The wallet address is stored in the `RADIUS_WALLET_ADDRESS` environment variable.
 
 ## Available commands (via terminal)
 
@@ -44,11 +65,9 @@ Output is JSON with `tx_hash` and `status`. Share the tx hash and the explorer l
 
 ## Responding to user requests
 
-When a user asks about the wallet, balance, or sending tokens:
+1. **"What is my wallet?" / "what is my radius wallet?" / "show wallet"** — print `RADIUS_WALLET_ADDRESS` from env, or run `balance.mjs` and show the address field.
 
-1. **"What is my wallet address?" / "show wallet"** — print `RADIUS_WALLET_ADDRESS` from env, or run `balance.mjs` and show the address field.
-
-2. **"Check balance" / "how much SBC do I have?"** — run `balance.mjs` and report RUSD and SBC balances.
+2. **"Check balance" / "get my wallet balance" / "how much SBC do I have?"** — run `balance.mjs` and report RUSD and SBC balances.
 
 3. **"Send X SBC to 0x..."** — confirm the recipient and amount with the user first, then run `send.mjs`. Share the tx hash and explorer link.
 

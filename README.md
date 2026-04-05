@@ -67,6 +67,47 @@ Set at least one messaging platform:
 | `DISCORD_BOT_TOKEN` | Discord bot token |
 | `SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN` | Slack (both required) |
 
+## Discord bot setup
+
+If you're using Discord, you need to create a bot application and enable the correct intents before the token will work.
+
+### 1. Create the bot
+
+1. Go to [discord.com/developers/applications](https://discord.com/developers/applications) and click **New Application**.
+2. Give it a name, then open the **Bot** tab on the left sidebar.
+3. Click **Reset Token** to generate your bot token — copy it now (you won't see it again without resetting). This goes in `DISCORD_BOT_TOKEN`.
+
+### 2. Enable privileged intents
+
+Still on the **Bot** tab, scroll down to **Privileged Gateway Intents** and enable:
+
+- **Server Members Intent** — required for the bot to see guild members
+- **Message Content Intent** — required for the bot to read message content (without this, Hermes receives empty messages)
+
+Click **Save Changes**. Skipping this step is the most common reason Discord bots connect but never respond.
+
+### 3. Invite the bot to your server
+
+1. Go to the **OAuth2 → URL Generator** tab.
+2. Under **Scopes**, check `bot`.
+3. Under **Bot Permissions**, check at minimum: `Send Messages`, `Read Message History`, `View Channels`.
+4. Copy the generated URL at the bottom and open it in your browser.
+5. Select your server and click **Authorize**.
+
+### 4. Get your Discord user ID
+
+To populate `DISCORD_ALLOWED_USERS`, you need your Discord user ID (a large integer, not your username):
+
+1. In Discord, go to **Settings → Advanced** and enable **Developer Mode**.
+2. Right-click your name anywhere in Discord and select **Copy User ID**.
+
+Use that value in Railway:
+```
+DISCORD_ALLOWED_USERS=123456789012345678
+```
+
+---
+
 ## Recommended variables
 
 ### Allowlists (strongly recommended)
