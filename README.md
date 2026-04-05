@@ -271,7 +271,7 @@ hermes pairing list
 4. Creates `${HERMES_HOME}/config.yaml` if it doesn't exist.
 5. Initializes Radius wallet if not already done (generates key, calls faucet).
 6. Copies all `skills/*.md` files to `${HERMES_HOME}/skills/` (overwrites on each boot).
-7. Copies skills with `published: true` frontmatter to `${HERMES_HOME}/well-known-skills/` in `name/SKILL.md` structure.
+7. Copies skills with `published: true` frontmatter to `${HERMES_HOME}/skills/` in `name/SKILL.md` structure.
 8. Starts the Bun skills server in background (binds `PORT`).
 9. Starts `hermes gateway` in foreground.
 

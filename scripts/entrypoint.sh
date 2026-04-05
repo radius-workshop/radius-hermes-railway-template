@@ -163,7 +163,7 @@ else
   echo "[bootstrap] WARNING: Node.js not found, skipping Radius wallet setup." >&2
 fi
 
-# Install Radius skill into Hermes skills directory
+# Install bundled skills into Hermes skills directory
 SKILLS_DIR="${HERMES_HOME}/skills"
 mkdir -p "$SKILLS_DIR"
 for skill_file in /app/skills/*.md; do
@@ -172,8 +172,31 @@ for skill_file in /app/skills/*.md; do
   echo "[bootstrap] Installed skill: $(basename "$skill_file")"
 done
 
+# Install remote Radius skills — refreshed on every boot, cached if unavailable
+declare -A REMOTE_SKILLS=(
+  [radius-dev]="https://docs.radiustech.xyz/skills/radius-dev.md"
+  [dripping-faucet]="https://docs.radiustech.xyz/skills/dripping-faucet.md"
+)
+for skill_name in "${!REMOTE_SKILLS[@]}"; do
+  skill_url="${REMOTE_SKILLS[$skill_name]}"
+  skill_path="${SKILLS_DIR}/${skill_name}.md"
+  tmp_path="${skill_path}.tmp"
+  if curl -fsSL --max-time 15 -o "$tmp_path" "$skill_url" 2>/dev/null; then
+    mv "$tmp_path" "$skill_path"
+    echo "[bootstrap] Installed remote skill: ${skill_name}"
+  else
+    rm -f "$tmp_path"
+    if [[ -f "$skill_path" ]]; then
+      echo "[bootstrap] WARNING: Could not refresh remote skill ${skill_name} — using cached version." >&2
+    else
+      echo "[bootstrap] WARNING: Could not download remote skill ${skill_name}." >&2
+    fi
+  fi
+done
+
 # Populate .well-known skills directory — only skills with `published: true` in frontmatter
-WELL_KNOWN_SKILLS_DIR="${HERMES_HOME}/well-known-skills"
+# Sources: bundled skills only (remote skills are not published via well-known)
+WELL_KNOWN_SKILLS_DIR="${HERMES_HOME}/skills"
 mkdir -p "$WELL_KNOWN_SKILLS_DIR"
 for skill_file in /app/skills/*.md; do
   [[ -f "$skill_file" ]] || continue
