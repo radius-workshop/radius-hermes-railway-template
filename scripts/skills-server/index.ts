@@ -179,7 +179,15 @@ app.get("/.well-known/agent-registration.json", (c) => {
   c.header("Access-Control-Allow-Origin", "*");
   c.header("Cache-Control", "public, max-age=60");
 
-  const walletAddress = process.env.RADIUS_WALLET_ADDRESS;
+  let walletAddress = process.env.RADIUS_WALLET_ADDRESS;
+  const manifestPath = process.env.RADIUS_WALLET_MANIFEST ?? '/data/.hermes/.radius/wallets/manifest.json';
+  if (!walletAddress && existsSync(manifestPath)) {
+    try {
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+      const selected = (manifest.wallets || []).find((w: any) => w.name === manifest.defaultWallet) ?? manifest.wallets?.[0];
+      walletAddress = selected?.address;
+    } catch {}
+  }
   const agentName = process.env.AGENT_NAME ?? "Hermes Agent";
 
   const registration: Record<string, unknown> = {
