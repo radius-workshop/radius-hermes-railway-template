@@ -20,8 +20,8 @@ RUN pip install --no-cache-dir -e "/opt/hermes-agent[messaging,cron,cli,pty]"
 
 FROM oven/bun:1.3-slim AS bun-builder
 
-WORKDIR /app/scripts/skills-server
-COPY scripts/skills-server/package.json ./
+WORKDIR /app/scripts/agent-server
+COPY scripts/agent-server/package.json ./
 RUN bun install --frozen-lockfile 2>/dev/null || bun install
 
 
@@ -63,8 +63,8 @@ RUN git clone --depth 1 https://github.com/radius-workshop/linear-claude-skill /
   && npm run build \
   && npm prune --omit=dev
 
-COPY scripts/skills-server /app/scripts/skills-server
-COPY --from=bun-builder /app/scripts/skills-server/node_modules /app/scripts/skills-server/node_modules
+COPY scripts/agent-server /app/scripts/agent-server
+COPY --from=bun-builder /app/scripts/agent-server/node_modules /app/scripts/agent-server/node_modules
 
 COPY skills /app/skills
 

@@ -1,8 +1,9 @@
 // index.ts (Bun v1.3 runtime)
 import { Hono } from "hono";
 import { readFileSync, existsSync, readdirSync, statSync } from "fs";
-import { createHash } from "crypto";
+import { createHash, createHmac } from "crypto";
 import { join } from "path";
+import { setupAuth, issueToken, jwtAuth, getDid, getDidDocument } from "./auth.ts";
 
 const app = new Hono();
 
@@ -175,6 +176,17 @@ app.on(
   }
 );
 
+app.get("/.well-known/did.json", (c) => {
+  const doc = getDidDocument();
+  if (!doc) return c.json({ error: "Not ready" }, 503);
+
+  c.header("Access-Control-Allow-Origin", "*");
+  c.header("Cache-Control", "public, max-age=600");
+  c.header("Content-Type", "application/did+json");
+
+  return c.json(doc);
+});
+
 app.get("/.well-known/agent-registration.json", (c) => {
   c.header("Access-Control-Allow-Origin", "*");
   c.header("Cache-Control", "public, max-age=60");
@@ -201,7 +213,68 @@ app.get("/.well-known/agent-registration.json", (c) => {
     registration.owner = walletAddress;
   }
 
+  const did = getDid();
+  if (did) registration.did = did;
+
   return c.json(registration);
+});
+
+app.get("/.well-known/agent-card.json", (c) => {
+  c.header("Access-Control-Allow-Origin", "*");
+  c.header("Cache-Control", "public, max-age=60");
+
+  const agentName = process.env.AGENT_NAME ?? "Hermes Agent";
+  const did = getDid();
+  const webhookEnabled = process.env.WEBHOOK_ENABLED === "true";
+
+  const skillsIndex = JSON.parse(getIndex());
+  const skills = (skillsIndex.skills ?? []).map((s: Record<string, unknown>) => ({
+    id: s.name,
+    name: s.name,
+    description: s.description ?? "",
+    tags: [],
+    input_modes: ["text/plain"],
+    output_modes: ["text/plain"],
+  }));
+
+  const card: Record<string, unknown> = {
+    name: agentName,
+    description:
+      process.env.AGENT_DESCRIPTION ??
+      `${agentName} — AI agent powered by Hermes`,
+    version: "1.0.0",
+    provider: {
+      name: agentName,
+      url: BASE_URL,
+      ...(did ? { did } : {}),
+    },
+    supported_interfaces: [
+      {
+        protocol_binding: "JSONRPC",
+        url: `${BASE_URL}/a2a`,
+        protocol_version: "1.0",
+      },
+    ],
+    capabilities: {
+      streaming: false,
+      push_notifications: webhookEnabled,
+      extended_agent_card: false,
+    },
+    default_input_modes: ["text/plain"],
+    default_output_modes: ["text/plain"],
+    skills,
+    security_schemes: {
+      bearer_jwt: {
+        type: "http",
+        scheme: "bearer",
+        bearerFormat: "JWT",
+        description:
+          "DID-signed JWT (ES256K / did:key). Obtain via POST /token or sign with your own did:key identity.",
+      },
+    },
+  };
+
+  return c.json(card);
 });
 
 app.get("/", (c) => {
@@ -336,7 +409,7 @@ app.get("/", (c) => {
 });
 
 if (process.env.DEBUG_SKILLS === "1") {
-  app.get("/debug/skills", (c) => {
+  app.get("/debug/skills", jwtAuth, (c) => {
     try {
       return c.json({
         SKILLS_ROOT,
@@ -352,8 +425,174 @@ if (process.env.DEBUG_SKILLS === "1") {
   });
 }
 
+// POST /a2a — A2A JSON-RPC 2.0 endpoint, bridges to Hermes webhook
+app.post("/a2a", jwtAuth, async (c) => {
+  const webhookSecret = process.env.WEBHOOK_SECRET;
+  if (!webhookSecret) {
+    return c.json(
+      {
+        jsonrpc: "2.0",
+        id: null,
+        error: { code: -32603, message: "Webhook not configured on this agent" },
+      },
+      503
+    );
+  }
+
+  let body: Record<string, unknown>;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json(
+      { jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } },
+      400
+    );
+  }
+
+  if (body.jsonrpc !== "2.0" || !body.method) {
+    return c.json(
+      { jsonrpc: "2.0", id: body.id ?? null, error: { code: -32600, message: "Invalid Request" } },
+      400
+    );
+  }
+
+  const { id, method, params } = body as {
+    id: unknown;
+    method: string;
+    params: Record<string, unknown>;
+  };
+
+  if (method !== "message/send") {
+    return c.json({
+      jsonrpc: "2.0",
+      id,
+      error: { code: -32004, message: "This operation is not supported" },
+    });
+  }
+
+  const message = params?.message as Record<string, unknown> | undefined;
+  if (!message) {
+    return c.json({
+      jsonrpc: "2.0",
+      id,
+      error: { code: -32602, message: "Invalid params: missing message" },
+    });
+  }
+
+  // Flatten A2A message parts to plain text
+  const text = ((message.parts ?? []) as Record<string, unknown>[])
+    .filter((p) => typeof p.text === "string")
+    .map((p) => p.text as string)
+    .join("\n")
+    .trim();
+
+  if (!text) {
+    return c.json({
+      jsonrpc: "2.0",
+      id,
+      error: { code: -32602, message: "Invalid params: no text content in message parts" },
+    });
+  }
+
+  // Extract caller DID from the already-verified JWT (safe — jwtAuth ran first)
+  const issuerDid = (() => {
+    try {
+      const [, b64] = (c.req.header("Authorization") ?? "").slice(7).trim().split(".");
+      const pl = JSON.parse(Buffer.from(b64, "base64url").toString("utf8"));
+      return typeof pl.iss === "string" ? pl.iss : null;
+    } catch {
+      return null;
+    }
+  })();
+
+  const taskId = crypto.randomUUID();
+  const contextId = (message.context_id as string | undefined) ?? taskId;
+
+  const webhookPayload = JSON.stringify({
+    text,
+    context_id: contextId,
+    task_id: taskId,
+    ...(issuerDid ? { issuer_did: issuerDid } : {}),
+  });
+
+  const sig = createHmac("sha256", webhookSecret).update(webhookPayload).digest("hex");
+  const webhookPort = process.env.WEBHOOK_PORT ?? "8644";
+
+  try {
+    const webhookRes = await fetch(`http://localhost:${webhookPort}/webhooks/a2a`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Webhook-Signature": sig,
+      },
+      body: webhookPayload,
+    });
+    if (!webhookRes.ok) {
+      console.error(`[a2a] Hermes webhook returned ${webhookRes.status}`);
+      return c.json({
+        jsonrpc: "2.0",
+        id,
+        error: { code: -32603, message: `Webhook delivery failed: HTTP ${webhookRes.status}` },
+      }, 502);
+    }
+  } catch (err) {
+    console.error("[a2a] Hermes webhook delivery failed:", err);
+    return c.json({
+      jsonrpc: "2.0",
+      id,
+      error: {
+        code: -32603,
+        message:
+          "Could not reach agent backend — ensure WEBHOOK_ENABLED=true and WEBHOOK_SECRET is set",
+      },
+    }, 503);
+  }
+
+  return c.json({
+    jsonrpc: "2.0",
+    id,
+    result: {
+      id: taskId,
+      context_id: contextId,
+      status: {
+        state: "TASK_STATE_SUBMITTED",
+        timestamp_ms: Date.now(),
+      },
+    },
+  });
+});
+
+// POST /token — exchange JWT_API_KEY for a signed Bearer token
+app.post("/token", async (c) => {
+  const apiKey = process.env.JWT_API_KEY;
+  if (!apiKey) return c.json({ error: "Not found" }, 404);
+
+  const provided = c.req.header("X-Api-Key");
+  if (!provided || provided !== apiKey) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  let sub = "client";
+  try {
+    const body = await c.req.json();
+    if (typeof body?.sub === "string") sub = body.sub;
+  } catch {
+    // empty or non-JSON body is fine
+  }
+
+  const token = await issueToken(sub);
+  return c.json({ token });
+});
+
+// GET /health — liveness check, requires JWT
+app.get("/health", jwtAuth, (c) => {
+  return c.json({ status: "ok", uptime: Math.floor(process.uptime()) });
+});
+
+await setupAuth(BASE_URL);
+
 const port = Number(process.env.PORT ?? 3000);
-console.log(`[skills-server] Listening on port ${port}, BASE_URL=${BASE_URL}`);
+console.log(`[agent-server] Listening on port ${port}, BASE_URL=${BASE_URL}`);
 
 Bun.serve({
   port,

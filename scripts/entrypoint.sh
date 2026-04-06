@@ -103,7 +103,8 @@ for key in \
   TINKER_API_KEY WANDB_API_KEY RL_API_URL GITHUB_TOKEN BYTEROVER_API_KEY BYTEROVER_LOCAL LINEAR_API_KEY LINEAR_TEAM_ID LINEAR_PROJECT_ID \
   TERMINAL_ENV TERMINAL_BACKEND TERMINAL_DOCKER_IMAGE TERMINAL_SINGULARITY_IMAGE TERMINAL_MODAL_IMAGE TERMINAL_CWD TERMINAL_TIMEOUT TERMINAL_LIFETIME_SECONDS TERMINAL_CONTAINER_CPU TERMINAL_CONTAINER_MEMORY TERMINAL_CONTAINER_DISK TERMINAL_CONTAINER_PERSISTENT TERMINAL_SANDBOX_DIR TERMINAL_SSH_HOST TERMINAL_SSH_USER TERMINAL_SSH_PORT TERMINAL_SSH_KEY SUDO_PASSWORD \
   WEB_TOOLS_DEBUG VISION_TOOLS_DEBUG MOA_TOOLS_DEBUG IMAGE_TOOLS_DEBUG CONTEXT_COMPRESSION_ENABLED CONTEXT_COMPRESSION_THRESHOLD CONTEXT_COMPRESSION_MODEL HERMES_MAX_ITERATIONS HERMES_TOOL_PROGRESS HERMES_TOOL_PROGRESS_MODE \
-  RADIUS_PRIVATE_KEY RADIUS_WALLET_ADDRESS RADIUS_NETWORK RADIUS_AUTO_FUND
+  RADIUS_PRIVATE_KEY RADIUS_WALLET_ADDRESS RADIUS_NETWORK RADIUS_AUTO_FUND \
+  WEBHOOK_ENABLED WEBHOOK_PORT WEBHOOK_SECRET
 do
   append_if_set "$key"
 done
@@ -120,6 +121,41 @@ compression:
   enabled: true
   threshold: 0.85
 EOF
+fi
+
+# === A2A: inject webhook route when WEBHOOK_SECRET is configured ===
+if [[ -n "${WEBHOOK_SECRET:-}" ]] && is_true "${WEBHOOK_ENABLED:-}"; then
+  if ! grep -q "a2a:" "$CONFIG_FILE" 2>/dev/null; then
+    echo "[bootstrap] Configuring A2A webhook route in config.yaml..."
+    python3 - <<'PYEOF'
+import yaml, os, sys
+cfg_file = os.environ['HERMES_HOME'] + '/config.yaml'
+secret = os.environ['WEBHOOK_SECRET']
+try:
+    with open(cfg_file) as f:
+        cfg = yaml.safe_load(f) or {}
+except Exception:
+    cfg = {}
+(cfg
+    .setdefault('platforms', {})
+    .setdefault('webhook', {})
+    .setdefault('extra', {})
+    .setdefault('routes', {})
+)['a2a'] = {
+    'events': ['*'],
+    'secret': secret,
+    'prompt': '{text}',
+}
+with open(cfg_file, 'w') as f:
+    yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
+print('[bootstrap] A2A webhook route added to config.yaml.')
+PYEOF
+    if [[ $? -ne 0 ]]; then
+      echo "[bootstrap] WARNING: Could not auto-configure A2A webhook route. Add it manually to config.yaml." >&2
+    fi
+  else
+    echo "[bootstrap] A2A webhook route already present in config.yaml."
+  fi
 fi
 
 # Ensure model is set in config.yaml (handles existing installs and model changes)
@@ -263,8 +299,8 @@ for key in \
   fi
 done
 
-echo "[bootstrap] Starting skills server..."
-bun /app/scripts/skills-server/index.ts &
+echo "[bootstrap] Starting agent server..."
+bun /app/scripts/agent-server/index.ts &
 
 echo "[bootstrap] Starting Hermes gateway..."
 exec hermes gateway

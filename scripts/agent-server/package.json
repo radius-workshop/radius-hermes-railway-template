@@ -1,9 +1,10 @@
 {
-  "name": "skills-server",
+  "name": "agent-server",
   "version": "1.0.0",
   "type": "module",
   "private": true,
   "dependencies": {
+    "agentcommercekit": "^0.10.1",
     "hono": "^4.6.0"
   }
 }
