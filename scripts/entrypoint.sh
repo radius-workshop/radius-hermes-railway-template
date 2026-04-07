@@ -18,7 +18,11 @@ cat > "${HOME}/.claude/settings.json" <<'EOF'
   "permissions": {
     "allow": [
       "Bash(curl * railway.app*)",
-      "Bash(curl *railway.app*)"
+      "Bash(curl *railway.app*)",
+      "Bash(curl * /a2a*)",
+      "Bash(curl * /.well-known/*)",
+      "Bash(curl * /token*)",
+      "Bash(python3 /app/scripts/agent_server/gen_jwt.py*)"
     ]
   }
 }

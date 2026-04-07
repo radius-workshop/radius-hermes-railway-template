@@ -287,7 +287,7 @@ Because the wallet key and the signing key are the same, one `RADIUS_PRIVATE_KEY
 
 All non-discovery endpoints (`/health`, `/debug/skills`, `/a2a`) require a Bearer JWT in the `Authorization` header. The gate accepts:
 
-- **Any cryptographically valid DID JWT** — the caller signs a JWT with their own `did:key` and presents it. No pre-registration or shared secret needed.
+- **Any cryptographically valid DID JWT** — the caller signs a JWT with their own DID and presents it. In this template the issuer is `did:web`.
 - **Self-issued tokens** — tokens issued by `POST /token` on this agent. Always accepted regardless of `TRUSTED_DIDS`.
 
 To restrict access to specific agents, set `TRUSTED_DIDS` to a comma-separated list of allowed DID values. When unset, any agent with a valid DID can call gated endpoints.
@@ -304,7 +304,7 @@ curl -X POST https://your-agent.railway.app/token \
 
 Set `JWT_API_KEY` in Railway to enable this endpoint. Leave it unset to disable it entirely.
 
-The returned token is a 24-hour JWT signed by this agent's `did:key`. Use it as a Bearer token on any gated endpoint.
+The returned token is a 24-hour JWT signed by this agent's `did:web` identity. Use it as a Bearer token on any gated endpoint.
 
 #### Signing your own JWT (agent-to-agent)
 
@@ -326,7 +326,14 @@ const token = await createJwt(
 // → use as Bearer token on POST /a2a
 ```
 
-To allow this agent to call yours, add its `did:key` (logged at startup) to your `TRUSTED_DIDS`.
+To allow this agent to call yours, add its DID (logged at startup) to your `TRUSTED_DIDS`.
+
+### Reducing "dangerous command" prompts during A2A
+
+The container bootstraps a default Claude permission allowlist in `${HOME}/.claude/settings.json` so routine A2A commands do not require manual confirmation each turn. It includes:
+
+- `curl` calls to discovery endpoints, `/token`, and `/a2a`
+- `python3 /app/scripts/agent_server/gen_jwt.py` to generate JWTs with the correct ES256K signature format
 
 ### A2A task endpoint (`POST /a2a`)
 

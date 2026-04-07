@@ -15,6 +15,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
+from urllib.parse import unquote
 
 import httpx
 import uvicorn
@@ -43,6 +44,20 @@ def _get_base_url() -> str:
 
 
 BASE_URL = _get_base_url()
+
+
+def _did_web_to_base_url(did: str) -> Optional[str]:
+    """Convert a did:web identifier to its HTTPS base URL."""
+    if not isinstance(did, str) or not did.startswith("did:web:"):
+        return None
+    did_path = did.split("#", 1)[0][8:]
+    if not did_path:
+        return None
+    parts = did_path.split(":")
+    host = unquote(parts[0]).replace("%3A", ":")
+    if len(parts) == 1:
+        return f"https://{host}"
+    return f"https://{host}/{'/'.join(parts[1:])}"
 
 # ——— Skills index ———
 
@@ -452,11 +467,13 @@ async def handle_a2a(request: Request, auth: dict = Depends(jwt_auth_dep)):
     task_id = str(uuid.uuid4())
     context_id = message.get("context_id", task_id)
 
+    issuer_did_url = _did_web_to_base_url(issuer_did) if issuer_did else None
     webhook_payload = json.dumps({
         "text": text,
         "context_id": context_id,
         "task_id": task_id,
         **({"issuer_did": issuer_did} if issuer_did else {}),
+        **({"issuer_did_url": issuer_did_url} if issuer_did_url else {}),
     })
 
     sig = hmac.new(
