@@ -18,6 +18,16 @@ from urllib.parse import unquote
 
 import httpx
 import uvicorn
+from a2a.types import (
+    InternalError,
+    InvalidParamsError,
+    InvalidRequestError,
+    JSONParseError,
+    JSONRPCError,
+    JSONRPCRequest,
+    JSONRPCSuccessResponse,
+    MethodNotFoundError,
+)
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 
@@ -81,6 +91,18 @@ def _resolve_mode(method: str) -> str:
     if method in {"message/send", "message/stream"} and _direct_available():
         return "direct"
     return "delegated"
+
+
+def _rpc_error_response(rpc_id, error_obj: JSONRPCError, status_code: int = 200) -> JSONResponse:
+    return JSONResponse(
+        {"jsonrpc": "2.0", "id": rpc_id, "error": error_obj.model_dump(by_alias=True, exclude_none=True)},
+        status_code=status_code,
+    )
+
+
+def _rpc_success_response(rpc_id, result) -> JSONResponse:
+    payload = JSONRPCSuccessResponse(id=rpc_id, result=result)
+    return JSONResponse(payload.model_dump(by_alias=True, exclude_none=True))
 
 
 def _did_web_to_base_url(did: str) -> Optional[str]:
@@ -319,12 +341,12 @@ async def index():
 async def _handle_delegated(rpc_id, message: dict, issuer_did: str | None):
     webhook_secret = os.environ.get("WEBHOOK_SECRET")
     if not webhook_secret:
-        return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32603, "message": "Webhook not configured on this agent"}}, status_code=503)
+        return _rpc_error_response(rpc_id, InternalError(message="Webhook not configured on this agent"), status_code=503)
 
     parts = message.get("parts") or []
     text = "\n".join(p["text"] for p in parts if isinstance(p.get("text"), str)).strip()
     if not text:
-        return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32602, "message": "Invalid params: no text content in message parts"}})
+        return _rpc_error_response(rpc_id, InvalidParamsError(message="Invalid params: no text content in message parts"))
 
     task_id = str(uuid.uuid4())
     context_id = message.get("context_id", task_id)
@@ -346,15 +368,22 @@ async def _handle_delegated(rpc_id, message: dict, issuer_did: str | None):
                 headers={"Content-Type": "application/json", "X-Webhook-Signature": sig},
             )
         if not webhook_res.is_success:
-            return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32603, "message": f"Webhook delivery failed: HTTP {webhook_res.status_code}"}}, status_code=502)
+            return _rpc_error_response(
+                rpc_id,
+                InternalError(message=f"Webhook delivery failed: HTTP {webhook_res.status_code}"),
+                status_code=502,
+            )
     except Exception:
-        return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32603, "message": "Could not reach agent backend — ensure WEBHOOK_ENABLED=true and WEBHOOK_SECRET is set"}}, status_code=503)
+        return _rpc_error_response(
+            rpc_id,
+            InternalError(message="Could not reach agent backend — ensure WEBHOOK_ENABLED=true and WEBHOOK_SECRET is set"),
+            status_code=503,
+        )
 
-    return JSONResponse({
-        "jsonrpc": "2.0",
-        "id": rpc_id,
-        "result": {"id": task_id, "context_id": context_id, "status": {"state": "TASK_STATE_SUBMITTED", "timestamp_ms": int(time.time() * 1000)}},
-    })
+    return _rpc_success_response(
+        rpc_id,
+        {"id": task_id, "context_id": context_id, "status": {"state": "TASK_STATE_SUBMITTED", "timestamp_ms": int(time.time() * 1000)}},
+    )
 
 
 @app.post("/a2a")
@@ -362,33 +391,42 @@ async def handle_a2a(request: Request, auth: dict = Depends(jwt_auth_dep)):
     try:
         body = await request.json()
     except Exception:
-        return JSONResponse({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}, status_code=400)
+        return _rpc_error_response(None, JSONParseError(message="Parse error"), status_code=400)
+
+    try:
+        parsed_request = JSONRPCRequest.model_validate(body)
+        body = parsed_request.model_dump(by_alias=True, exclude_none=True)
+    except Exception:
+        return _rpc_error_response(body.get("id") if isinstance(body, dict) else None, InvalidRequestError(), status_code=400)
 
     if body.get("jsonrpc") != "2.0" or not body.get("method"):
-        return JSONResponse({"jsonrpc": "2.0", "id": body.get("id"), "error": {"code": -32600, "message": "Invalid Request"}}, status_code=400)
+        return _rpc_error_response(body.get("id"), InvalidRequestError(message="Invalid Request"), status_code=400)
 
     rpc_id = body.get("id")
     method = body.get("method")
     params = body.get("params") or {}
     message = params.get("message")
     if not message:
-        return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32602, "message": "Invalid params: missing message"}})
+        return _rpc_error_response(rpc_id, InvalidParamsError(message="Invalid params: missing message"))
 
     mode = _resolve_mode(method)
     if method not in {"message/send", "message/stream"}:
-        return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32004, "message": "This operation is not supported"}})
+        return _rpc_error_response(rpc_id, MethodNotFoundError(message="This operation is not supported"))
 
     if mode == "delegated":
         if method == "message/stream":
-            return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32004, "message": "message/stream is only supported in direct mode"}})
+            return _rpc_error_response(rpc_id, MethodNotFoundError(message="message/stream is only supported in direct mode"))
         return await _handle_delegated(rpc_id, message, auth.get("issuer"))
 
     if not _a2a_bridge:
-        return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32603, "message": "Direct A2A bridge is unavailable; set HERMES_API_KEY"}}, status_code=503)
+        return _rpc_error_response(
+            rpc_id, InternalError(message="Direct A2A bridge is unavailable; set HERMES_API_KEY"), status_code=503
+        )
 
     try:
         if method == "message/send":
-            return JSONResponse(await _a2a_bridge.handle_send(rpc_id, message))
+            send_payload = await _a2a_bridge.handle_send(rpc_id, message)
+            return _rpc_success_response(rpc_id, send_payload.get("result"))
 
         async def _sse():
             try:
@@ -396,15 +434,15 @@ async def handle_a2a(request: Request, auth: dict = Depends(jwt_auth_dep)):
                     yield f"data: {json.dumps(event)}\n\n"
             except Exception:
                 logger.exception("Direct A2A streaming failure")
-                err = {"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32603, "message": "Internal processing error"}}
+                err = {"jsonrpc": "2.0", "id": rpc_id, "error": InternalError(message="Internal processing error").model_dump(exclude_none=True)}
                 yield f"data: {json.dumps(err)}\n\n"
 
         return StreamingResponse(_sse(), media_type="text/event-stream")
     except ValueError:
-        return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32602, "message": "Invalid params"}})
+        return _rpc_error_response(rpc_id, InvalidParamsError(message="Invalid params"))
     except Exception:
         logger.exception("Direct A2A failure")
-        return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32603, "message": "Internal processing error"}})
+        return _rpc_error_response(rpc_id, InternalError(message="Internal processing error"))
 
 
 @app.get("/files/{file_path:path}")

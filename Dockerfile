@@ -24,6 +24,7 @@ RUN pip install --no-cache-dir \
   "pyjwt[crypto]>=2.8.0" \
   "cryptography>=41.0.0" \
   "httpx>=0.25.0" \
+  "a2a-sdk>=0.3.0" \
   "web3>=6.0.0" \
   "requests>=2.28.0"
 

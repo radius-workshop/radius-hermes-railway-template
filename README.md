@@ -338,6 +338,7 @@ The container bootstraps a default Claude permission allowlist in `${HOME}/.clau
 ### A2A endpoint (`POST /a2a`)
 
 The `/a2a` endpoint accepts [A2A](https://github.com/a2aproject/A2A) JSON-RPC 2.0 requests and now supports two execution modes controlled by `A2A_MODE`.
+Request/response validation and JSON-RPC envelope shaping are implemented with the official [`a2a-sdk`](https://github.com/a2aproject/a2a-python) models for protocol compliance.
 
 **Direct mode (`A2A_MODE=direct`)**
 
