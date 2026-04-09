@@ -34,7 +34,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Res
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from a2a_bridge import A2ABridge
 from auth import get_did, get_did_document, issue_token, jwt_auth_dep, setup_auth
-from hermes_client import HermesClient
+from hermes_client import HermesClient, HermesUnavailableError, HermesUpstreamError
 from url_utils import get_base_url
 
 logging.basicConfig(level=logging.INFO)
@@ -206,6 +206,15 @@ app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None)
 
 @app.middleware("http")
 async def _cors_skills(request: Request, call_next):
+    if request.url.path == "/a2a" and request.method == "OPTIONS":
+        return Response(
+            status_code=204,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Authorization, Content-Type",
+            },
+        )
     if request.url.path.startswith("/.well-known/agent-skills/"):
         if request.method == "OPTIONS":
             return Response(status_code=204, headers={"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS", "Access-Control-Allow-Headers": "Content-Type"})
@@ -379,6 +388,25 @@ async def _handle_delegated(rpc_id, message: dict, issuer_did: str | None):
     )
 
 
+def _hermes_error_response(rpc_id, exc: Exception) -> JSONResponse:
+    if isinstance(exc, HermesUnavailableError):
+        logger.warning("Direct A2A cannot reach Hermes backend: %s", exc)
+        return _rpc_error_response(
+            rpc_id,
+            InternalError(message="Hermes backend is unreachable. Check HERMES_URL and HERMES_API_KEY."),
+            status_code=503,
+        )
+    if isinstance(exc, HermesUpstreamError):
+        logger.warning("Direct A2A Hermes upstream returned an error: %s", exc)
+        return _rpc_error_response(
+            rpc_id,
+            InternalError(message=str(exc)),
+            status_code=502,
+        )
+    logger.exception("Direct A2A failure")
+    return _rpc_error_response(rpc_id, InternalError(message="Internal processing error"))
+
+
 @app.post("/a2a")
 async def handle_a2a(request: Request, auth: dict = Depends(jwt_auth_dep)):
     try:
@@ -418,13 +446,28 @@ async def handle_a2a(request: Request, auth: dict = Depends(jwt_auth_dep)):
 
     try:
         if method == "message/send":
-            send_payload = await _a2a_bridge.handle_send(rpc_id, message)
-            return _rpc_success_response(rpc_id, send_payload.get("result"))
+            try:
+                send_payload = await _a2a_bridge.handle_send(rpc_id, message)
+                return _rpc_success_response(rpc_id, send_payload.get("result"))
+            except HermesUnavailableError:
+                # In auto mode, degrade to delegated task submission if direct mode backend is down.
+                if A2A_MODE == "auto":
+                    return await _handle_delegated(rpc_id, message, auth.get("issuer"))
+                raise
 
         async def _sse():
             try:
                 async for event in _a2a_bridge.stream_events(rpc_id, message):
                     yield f"data: {json.dumps(event)}\n\n"
+            except (HermesUnavailableError, HermesUpstreamError) as exc:
+                if isinstance(exc, HermesUnavailableError):
+                    logger.warning("Direct A2A streaming cannot reach Hermes backend: %s", exc)
+                    message_text = "Hermes backend is unreachable. Check HERMES_URL and HERMES_API_KEY."
+                else:
+                    logger.warning("Direct A2A streaming Hermes upstream returned an error: %s", exc)
+                    message_text = str(exc)
+                err = {"jsonrpc": "2.0", "id": rpc_id, "error": InternalError(message=message_text).model_dump(exclude_none=True)}
+                yield f"data: {json.dumps(err)}\n\n"
             except Exception:
                 logger.exception("Direct A2A streaming failure")
                 err = {"jsonrpc": "2.0", "id": rpc_id, "error": InternalError(message="Internal processing error").model_dump(exclude_none=True)}
@@ -433,9 +476,8 @@ async def handle_a2a(request: Request, auth: dict = Depends(jwt_auth_dep)):
         return StreamingResponse(_sse(), media_type="text/event-stream")
     except ValueError:
         return _rpc_error_response(rpc_id, InvalidParamsError(message="Invalid params"))
-    except Exception:
-        logger.exception("Direct A2A failure")
-        return _rpc_error_response(rpc_id, InternalError(message="Internal processing error"))
+    except Exception as exc:
+        return _hermes_error_response(rpc_id, exc)
 
 
 @app.get("/files/{file_path:path}")
