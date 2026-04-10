@@ -24,6 +24,7 @@ This repository is a batteries-included Hermes template. Assume these bundled re
 - `skills/*.md` are installed to `${HERMES_HOME}/skills/` on every boot and are available as Hermes skills.
 - `plugins/*` are installed to `${HERMES_HOME}/plugins/` on every boot.
 - `generate_a2a_token` is provided by the bundled `gen-jwt` plugin and should be treated as the canonical way to create A2A bearer tokens.
+- `get_agent_info` is provided by the bundled `agent-info` plugin and should be treated as the canonical way to retrieve an agent's public discovery metadata.
 - `radius_wallet_address`, `radius_balance`, `radius_send_sbc`, and `radius_tx_status` are provided by the bundled `radius-cast` plugin and should be treated as the canonical way to perform Radius wallet actions.
 - `/app/scripts/radius/*` contains the built-in Radius wallet scripts.
 - `/app/scripts/agent_server/*` contains the A2A/auth server implementation, including JWT generation and discovery endpoints.
@@ -121,4 +122,4 @@ The DID is logged at startup and also available at `GET /.well-known/did.json` �
 | `403 Signature verification failed` | Custom JWT code used DER encoding | Call `generate_a2a_token()` — never write JWT signing code |
 | `403 JWT missing iss claim` | `iss` omitted from JWT payload | Call `generate_a2a_token()` — never hand-craft the payload |
 | `403 DID not trusted` | Caller's DID not in `TRUSTED_DIDS` | Add the caller's DID to the remote agent's `TRUSTED_DIDS` Railway variable |
-| `404 on /token` | Remote agent has no `JWT_API_KEY` set | Use DID JWT path (Option B) or ask operator to set `JWT_API_KEY` |
+| `404 on /token` | Remote agent has no `JWT_API_KEY` or `JWT_EXCHANGE_KEY` set | Use DID JWT path (Option B) or ask operator to set one of those vars |

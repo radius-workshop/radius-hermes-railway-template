@@ -1,0 +1,5 @@
+name: a2a-send
+version: "1.0.0"
+description: "Send outbound A2A messages with sender-side correlation logging"
+provides_tools:
+  - send_a2a_message

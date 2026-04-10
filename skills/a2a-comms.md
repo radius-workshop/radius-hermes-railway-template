@@ -21,6 +21,24 @@ Use `token` as the `Authorization: Bearer` value. Use `did` if you need to share
 
 This agent can communicate with other agents that implement the A2A (Agent-to-Agent) protocol. Use this skill to delegate tasks to remote agents, discover their capabilities, and explain how this agent itself is configured to receive calls from other agents.
 
+## Preferred outbound path
+
+Use the bundled `send_a2a_message` tool when you want to submit a task to another agent. It wraps token generation / exchange, sends the A2A request, and logs sender-side correlation fields such as:
+
+- `rpc_id`
+- `a2a_message_id`
+- `context_id`
+- returned `a2a_task_id`
+- remote agent URL
+
+Example:
+
+```text
+send_a2a_message({"agent":"https://other-agent.example","task":"Run this analysis"})
+```
+
+If `A2A_PEER_URL` is set, the `agent` argument can be omitted.
+
 ## When to use this skill
 
 Use this skill whenever:
@@ -55,7 +73,7 @@ Content-Type: application/json
 ```
 
 **Authentication** — callers either:
-1. Exchange an API key for a short-lived JWT at `POST {BASE_URL}/token` (requires `X-Api-Key` header matching `JWT_API_KEY`)
+1. Exchange an API key for a short-lived JWT at `POST {BASE_URL}/token` (requires `X-Api-Key` header matching `JWT_API_KEY` or `JWT_EXCHANGE_KEY`)
 2. Present a self-signed DID JWT if the agent's `TRUSTED_DIDS` is open or includes their DID
 
 The `BASE_URL` is derived from `PUBLIC_URL` or `RAILWAY_PUBLIC_DOMAIN`. Share this URL with any agent operator who wants to call this agent.
@@ -224,7 +242,7 @@ When both are set, you can get a token and send a task without asking the user f
 | HTTP 401 / missing Bearer | No auth token provided | Get a token first via `/token` |
 | HTTP 403 / "Signature verification failed" | JWT was signed with wrong encoding — custom scripts produce DER format which always fails | Call `generate_a2a_token()`. Never write JWT signing code. |
 | HTTP 403 / DID not trusted | Your DID isn't in the remote's `TRUSTED_DIDS` | Fetch this agent's DID (`curl $PUBLIC_URL/.well-known/did.json \| python3 -c "import sys,json; print(json.load(sys.stdin)['id'])"`), share it with the remote operator to add to their `TRUSTED_DIDS`, or get an API key |
-| HTTP 404 on `/token` | Remote hasn't set `JWT_API_KEY` | Ask the remote agent operator to configure it |
+| HTTP 404 on `/token` | Remote hasn't set `JWT_API_KEY` or `JWT_EXCHANGE_KEY` | Ask the remote agent operator to configure one of them |
 | JSON-RPC `-32603` "Webhook not configured" | Remote agent's `WEBHOOK_SECRET` isn't set | Remote agent needs `WEBHOOK_ENABLED=true` and `WEBHOOK_SECRET` in Railway variables |
 | JSON-RPC `-32603` "Could not reach agent backend" | Remote Hermes webhook is down | Remote agent should check their container logs |
 | `curl: Connection refused` | Agent URL is wrong or service is down | Verify the URL and that the remote service is running |
