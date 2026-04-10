@@ -16,6 +16,9 @@ This template is worker-only: setup and configuration are done through Railway V
 - Agent discovery layer served at `/.well-known/*` — ERC 8004 registration, Cloudflare agent skills discovery, and A2A agent card
 - Agent-to-agent (A2A) communication with two execution modes: direct (inline `message/send` + `message/stream`) and delegated (webhook-backed async submission)
 - Persistent cryptographic identity derived from the wallet key — the same `RADIUS_PRIVATE_KEY` signs both transactions and JWTs
+- Built-in discovery aggregation tool via `get_agent_info`
+- Built-in outbound A2A helper via `send_a2a_message` with sender-side correlation logging
+- Railway-friendly observability: structured JSON logs from the agent server plus forwarded Hermes harness log files
 
 ## How it works
 
@@ -56,6 +59,75 @@ That clears the persisted Railway volume paths used by Hermes before deploying:
 - `/data/.claude`
 
 This resets agent memory, sessions, pairing state, ByteRover state, workspace files, and the persisted Radius wallet.
+
+## Example prompts
+
+As soon as the agent is live, these are good first prompts to try in chat.
+
+The bundled public Radius-facing skills are installed both as normal flat skills and under the Hermes catalog-style `radius` bucket:
+
+- `radius-wallet`
+- `radius-dev`
+- `dripping-faucet`
+- `a2a-comms`
+
+`radius-wallet` and `a2a-comms` are template-owned. `radius-dev` and `dripping-faucet` are sourced from the vendored upstream Radius skills repo at deploy time.
+
+### Radius wallet and funding
+
+- *"What is my wallet address?"*
+- *"Check my Radius wallet balance."*
+- *"How much SBC and RUSD do I have right now?"*
+- *"Show me my wallet address and give me the testnet explorer link."*
+- *"Do I already have testnet funds, or do I need to use the faucet?"*
+- *"How do I get more Radius testnet funds?"*
+- *"Explain the difference between SBC and RUSD in this wallet."*
+
+### Radius transactions
+
+- *"Send 0.001 SBC to 0x1234... and show me the transaction hash."*
+- *"Before sending, tell me if I have enough balance to send 5 SBC."*
+- *"What would happen if I tried to send more SBC than I have?"*
+- *"Check the status of this Radius transaction: 0xabc..."*
+
+### Radius developer questions
+
+- *"What is Radius, and what can this agent do with it?"*
+- *"Give me the Radius Testnet chain ID, RPC URL, and explorer."*
+- *"How is Radius different from Ethereum for app developers?"*
+- *"What fee assumptions should I avoid when building on Radius?"*
+- *"Show me the correct network settings for Radius Testnet and mainnet."*
+
+### Agent-to-agent workflows
+
+- *"What is this agent's DID?"*
+- *"Show me this agent's public discovery information."*
+- *"What can another A2A agent learn from this agent card?"*
+- *"Send a task to https://<other-agent>/a2a asking it to introduce itself."*
+- *"Use the outbound A2A tool to ask the peer agent what skills it has."*
+- *"Continue the existing A2A conversation with the peer agent and ask for a status update."*
+
+### Payments between agents
+
+- *"Ask the peer agent for its wallet address."*
+- *"Send Agent 2 a small amount of SBC on testnet and tell me the tx hash."*
+- *"Delegate a task to the peer agent, then summarize the A2A correlation ids you used."*
+- *"Explain how an A2A task id, message id, and context id relate to each other here."*
+
+### Memory and operator context
+
+- *"What durable things can you remember between sessions?"*
+- *"Remember that this wallet belongs to the demo operator."*
+- *"Record this transaction and describe why it happened."*
+
+### Optional Linear prompts
+
+If `LINEAR_API_KEY` is set, these are useful immediately:
+
+- *"List my Linear teams."*
+- *"Show my current Linear projects."*
+- *"Create a Linear issue for improving Railway observability."*
+- *"Summarize open issues related to A2A or logging."*
 
 ## Railway deploy instructions
 
@@ -205,7 +277,7 @@ Once deployed, you can ask the agent:
 - *"Send 10 SBC to 0x..."*
 - *"Get testnet tokens"*
 
-The agent runs the preconfigured Node.js scripts at `/app/scripts/radius/` using its terminal tool.
+The preferred interface is the bundled `radius-cast` plugin tools. The underlying wallet bootstrap and fallback scripts live under `/app/scripts/radius/`.
 
 ## Linear integration
 
@@ -255,6 +327,48 @@ Inbound delegation — assigning Linear issues to the agent or @mentioning it in
 
 This template runs a lightweight Python/FastAPI HTTP server alongside Hermes that serves agent discovery endpoints at `/.well-known/*`. It binds to Railway's `PORT`, so once you generate a public domain in Railway (Settings → Networking → Generate Domain), the endpoints are live automatically.
 
+## Logging in Railway
+
+This template emits two complementary log streams into Railway:
+
+- **Agent server logs** from `scripts/agent_server/main.py` are written as single-line JSON to stdout/stderr. These cover A2A auth, request validation, direct vs delegated routing, fallback behavior, and request timing.
+- **Hermes harness logs** from `${HERMES_HOME}/logs/agent.log` and `errors.log` are tailed by `scripts/entrypoint.sh` and forwarded into Railway output with prefixes like `[hermes:agent.log] ...`.
+
+This split is intentional:
+
+- Railway's Log Explorer can parse the JSON agent-server logs into filterable fields such as `@event`, `@request_id`, `@rpc_id`, `@rpc_method`, `@a2a_mode`, `@issuer_did`, `@context_id`, `@status_code`, and `@duration_ms`.
+- Hermes's own file logs provide the higher-level harness/tool execution trail that is often missing from plain HTTP access logs.
+
+Useful Railway filters after deploy:
+
+- `@event:a2a.request`
+- `@event:a2a.direct`
+- `@event:a2a.delegated`
+- `@event:auth.jwt_rejected`
+- `@request_id:<id>`
+- `@context_id:<context-id>`
+- `@issuer_did:did:web:...`
+- `@outcome:error`
+
+If you want to disable Hermes log-file forwarding, set:
+
+```bash
+HERMES_FORWARD_LOG_FILES=false
+```
+
+`gateway.log` forwarding is disabled by default because Hermes often mirrors the same gateway events into both `agent.log` and `gateway.log`, which creates duplicate Railway entries. If you explicitly want the extra stream, set:
+
+```bash
+HERMES_FORWARD_GATEWAY_LOG=true
+```
+
+The FastAPI server also disables uvicorn access logs by default so Railway shows the structured request log line instead of both the structured line and the plain `INFO ... "GET /health"` access line.
+
+References:
+
+- [Railway Logs documentation](https://docs.railway.com/observability/logs)
+- [Hermes CLI log files documentation](https://hermes-agent.nousresearch.com/docs/reference/cli-commands?_highlight=logging#log-files)
+
 ### Endpoints
 
 | Path | Auth | Spec | Description |
@@ -270,6 +384,13 @@ This template runs a lightweight Python/FastAPI HTTP server alongside Hermes tha
 **`agent-registration.json`** advertises this agent's on-chain identity per ERC 8004. It includes the wallet address derived from `RADIUS_WALLET_ADDRESS`, the agent's `did:web`, x402 payment support, Radius network RPC endpoints, and faucet URLs. Customize the agent name with `AGENT_NAME`.
 
 **`agent-skills/index.json`** lets other agents and tools enumerate what this agent can do. Each entry includes the skill name, description, a URL to fetch the full skill document, and a SHA-256 content digest so consumers can detect updates.
+
+In this template, the bundled published Radius-facing skills are also installed into the Hermes catalog-style `radius` bucket under `${HERMES_HOME}/skills/radius/...` so UIs that group by skill path can show them together:
+
+- `radius-wallet`
+- `radius-dev`
+- `dripping-faucet`
+- `a2a-comms`
 
 ### Publishing a skill
 
@@ -315,6 +436,26 @@ On first boot, a secp256k1 keypair is derived from `RADIUS_PRIVATE_KEY` (the sam
 The `did:web` method means the DID is resolvable over HTTPS — any agent that knows the domain can fetch `/.well-known/did.json`, retrieve the public key, and verify signatures without any pre-shared secrets.
 
 Because the wallet key and the signing key are the same, one `RADIUS_PRIVATE_KEY` gives you an Ethereum address for payments and a DID for verifiable agent identity.
+
+### Aggregating discovery metadata
+
+The bundled `agent-info` plugin exposes a `get_agent_info` tool that retrieves the public discovery bundle for an agent in one call:
+
+```text
+get_agent_info()
+get_agent_info({"agent":"https://other-agent.example"})
+get_agent_info({"agent":"did:web:other-agent.example","include_skill_docs":false})
+```
+
+It aggregates:
+
+- `/.well-known/agent-card.json`
+- `/.well-known/agent-skills/index.json`
+- published `SKILL.md` documents
+- `/.well-known/agent-registration.json`
+- `/.well-known/did.json`
+
+If no `agent` argument is supplied, the tool defaults to the current agent.
 
 ### JWT gate
 
@@ -372,6 +513,20 @@ The container bootstraps a default Claude permission allowlist in `${HOME}/.clau
 
 The `/a2a` endpoint accepts [A2A](https://github.com/a2aproject/A2A) JSON-RPC 2.0 requests and now supports two execution modes controlled by `A2A_MODE`.
 Request/response validation and JSON-RPC envelope shaping are implemented with the official [`a2a-sdk`](https://github.com/a2aproject/a2a-python) models for protocol compliance.
+
+For outbound A2A calls initiated by this agent, prefer the bundled `send_a2a_message` tool rather than raw `curl`. It records sender-side correlation fields in Hermes logs, including:
+
+- `rpc_id`
+- `a2a_message_id`
+- `context_id`
+- returned `a2a_task_id`
+- remote agent URL
+
+Example:
+
+```text
+send_a2a_message({"agent":"https://other-agent.example","task":"Run this analysis"})
+```
 
 **Direct mode (`A2A_MODE=direct`)**
 
@@ -435,7 +590,7 @@ The caller's DID (from the JWT `iss` claim) is forwarded to Hermes in the webhoo
 | Variable | Description |
 |---|---|
 | `A2A_MODE` | `auto` (default), `direct`, or `delegated`. |
-| `HERMES_API_KEY` | Required for direct mode. Used as Bearer auth to Hermes OpenAI endpoint. |
+| `HERMES_API_KEY` | Required for direct mode. Used as Bearer auth to Hermes OpenAI endpoint. If unset, the bridge also accepts `API_SERVER_KEY`. |
 | `HERMES_URL` | Hermes OpenAI-compatible base URL. Default: `http://127.0.0.1:8642`. |
 | `HERMES_MODEL` | Model name for direct bridge requests. Default: `hermes-agent`. |
 | `HERMES_TIMEOUT` | Direct bridge timeout in seconds. Default: `120`. |
@@ -498,7 +653,7 @@ Each agent's DID and wallet address are logged at startup and available at `/.we
 | Variable | Description |
 |---|---|
 | `A2A_MODE` | `auto` (default), `direct`, or `delegated`. Controls routing behavior for `/a2a`. |
-| `HERMES_API_KEY` | Required for direct mode. Hermes OpenAI-compatible API key. |
+| `HERMES_API_KEY` | Required for direct mode. Hermes OpenAI-compatible API key. If unset, the bridge also accepts `API_SERVER_KEY`. |
 | `HERMES_URL` | Hermes OpenAI-compatible base URL. Defaults to `http://127.0.0.1:8642`. |
 | `HERMES_MODEL` | Model name for direct bridge requests. Defaults to `hermes-agent`. |
 | `HERMES_TIMEOUT` | Direct bridge timeout in seconds. Defaults to `120`. |
@@ -507,7 +662,7 @@ Each agent's DID and wallet address are logged at startup and available at `/.we
 | `WEBHOOK_SECRET` | Required to enable the A2A bridge. HMAC key for Hermes webhook authentication. |
 | `WEBHOOK_ENABLED` | Set to `true` to start the Hermes webhook server. |
 | `WEBHOOK_PORT` | Hermes webhook server port. Defaults to `8644`. |
-| `JWT_API_KEY` | Enables `POST /token`. Callers present this key to receive a signed JWT. |
+| `JWT_API_KEY` | Enables `POST /token`. Callers present this key to receive a signed JWT. `JWT_EXCHANGE_KEY` is also accepted for backward compatibility. |
 | `TRUSTED_DIDS` | Comma-separated DID allowlist. When set, only these DIDs (plus self-issued tokens) can call gated endpoints. Leave unset to accept any valid DID JWT. |
 | `A2A_PEER_URL` | URL of a pre-configured peer agent. Used by the `a2a-comms` skill as the default call target. |
 | `A2A_PEER_API_KEY` | API key for the peer's `/token` endpoint, if they require one. |
@@ -596,13 +751,14 @@ hermes pairing list
 4. Creates `${HERMES_HOME}/config.yaml` if it doesn't exist.
 5. Initializes Radius wallet if not already done (generates key, calls faucet).
 6. Copies all local `skills/*.md` files to `${HERMES_HOME}/skills/` (overwrites on each boot).
-7. Copies vendored Radius marketplace skills from the `radiustechsystems/skills` repo into `${HERMES_HOME}/skills/`, preserving their upstream directory layout and creating flat `.md` aliases.
+7. Copies vendored Radius marketplace skills from the `radiustechsystems/skills` repo into `${HERMES_HOME}/skills/`, preserving their upstream directory layout and creating flat `.md` aliases. The `radius-dev` and `dripping-faucet` skills are sourced from this vendored upstream copy.
 8. Copies bundled plugins from `plugins/*` to `${HERMES_HOME}/plugins/`.
-9. Enables the bundled `gen-jwt` and `radius-cast` plugin toolsets so A2A auth and Radius wallet tools are available immediately.
+9. Enables the bundled `gen-jwt`, `a2a-send`, and `radius-cast` plugin toolsets so A2A auth, outbound A2A calls, and Radius wallet tools are available immediately.
 10. Links `HERMES.md`, `.hermes.md`, `AGENTS.md`, `README.md`, `skills/`, `plugins/`, and `scripts/` into `${MESSAGING_CWD}` so gateway sessions see the bundled project context immediately. The three context files are force-overwritten on each boot.
 11. Copies published skills to `${HERMES_HOME}/well-known-skills/` for skill discovery endpoints.
 12. Starts the FastAPI agent server in background (binds `PORT`).
-13. Starts `hermes gateway` in foreground.
+13. Starts log forwarders for `${HERMES_HOME}/logs/agent.log` and `errors.log` unless `HERMES_FORWARD_LOG_FILES=false`. `gateway.log` is opt-in via `HERMES_FORWARD_GATEWAY_LOG=true`.
+14. Starts `hermes gateway` and supervises it alongside the agent server so Railway sees both logging layers.
 
 ## Troubleshooting
 
@@ -615,13 +771,16 @@ Provider/key mismatch. Set `HERMES_INFERENCE_PROVIDER` explicitly (e.g. `openrou
 **Bot connected but no replies**
 Check `TELEGRAM_ALLOWED_USERS` / `DISCORD_ALLOWED_USERS` / `SLACK_ALLOWED_USERS`. Your user ID must be in the list, or set `GATEWAY_ALLOW_ALL_USERS=true` (not recommended for public bots).
 
+**Railway only shows HTTP access lines**
+Make sure you're on a deployment with the updated entrypoint. The template now forwards Hermes log files into Railway output and emits structured JSON from the agent server. Search Railway logs for `@event:a2a.request` or text like `[hermes:agent.log]`.
+
 **Data lost after redeploy**
 Verify the Railway volume is mounted at `/data` in your service settings. Without the volume, state is lost on every deploy.
 
 **Radius wallet not initialized**
-Check deploy logs for `[radius]` lines. If Node.js errors appear, SSH in and run:
+Check deploy logs for `[radius]` lines. If wallet initialization appears to have failed, SSH in and run:
 ```bash
-node /app/scripts/radius/wallet-init.mjs
+python3 /app/scripts/radius/wallet_init.py
 ```
 
 **Skill not updating after edits**

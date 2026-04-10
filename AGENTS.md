@@ -7,6 +7,7 @@ This repository is a batteries-included Hermes template. Treat the bundled files
 - `HERMES.md` contains the Hermes-specific project instructions and A2A/JWT rules.
 - `skills/*.md` are bundled agent skills. Read the relevant skill before using the associated capability.
 - `plugins/gen-jwt` provides the `generate_a2a_token` tool used for A2A bearer tokens.
+- `plugins/agent-info` provides the `get_agent_info` tool used to retrieve an agent's public discovery metadata.
 - `plugins/radius-cast` provides Foundry-backed Radius wallet tools for address lookup, balances, transfers, and tx status.
 - `scripts/radius/*` contains the built-in Radius wallet scripts.
 - `scripts/agent_server/*` contains the HTTP agent server, A2A bridge, auth, DID, and discovery implementation.

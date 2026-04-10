@@ -35,6 +35,73 @@ is_true() {
   esac
 }
 
+TAIL_PIDS=()
+
+start_log_forwarder() {
+  local file_path="$1"
+  local stream="${2:-stdout}"
+  local label
+  label="$(basename "$file_path")"
+
+  touch "$file_path"
+
+  if [[ "$stream" == "stderr" ]]; then
+    (
+      tail -n 0 -F "$file_path" 2>/dev/null \
+        | while IFS= read -r line; do
+            printf '[hermes:%s] %s\n' "$label" "$line" >&2
+          done
+    ) &
+  else
+    (
+      tail -n 0 -F "$file_path" 2>/dev/null \
+        | while IFS= read -r line; do
+            printf '[hermes:%s] %s\n' "$label" "$line"
+          done
+    ) &
+  fi
+
+  TAIL_PIDS+=("$!")
+}
+
+start_hermes_log_forwarders() {
+  if ! is_true "${HERMES_FORWARD_LOG_FILES:-true}"; then
+    echo "[bootstrap] Hermes log forwarding disabled."
+    return
+  fi
+
+  local logs_dir="${HERMES_HOME}/logs"
+  mkdir -p "$logs_dir"
+
+  echo "[bootstrap] Forwarding Hermes log files from ${logs_dir} to Railway stdout/stderr..."
+  start_log_forwarder "${logs_dir}/agent.log" "stdout"
+  start_log_forwarder "${logs_dir}/errors.log" "stderr"
+
+  if is_true "${HERMES_FORWARD_GATEWAY_LOG:-false}"; then
+    echo "[bootstrap] Forwarding gateway.log as an additional Hermes log stream."
+    start_log_forwarder "${logs_dir}/gateway.log" "stdout"
+  fi
+}
+
+cleanup() {
+  local exit_code="${1:-0}"
+
+  for pid in "${TAIL_PIDS[@]:-}"; do
+    kill "$pid" 2>/dev/null || true
+  done
+
+  if [[ -n "${GATEWAY_PID:-}" ]]; then
+    kill "$GATEWAY_PID" 2>/dev/null || true
+  fi
+
+  if [[ -n "${AGENT_PID:-}" ]]; then
+    kill "$AGENT_PID" 2>/dev/null || true
+  fi
+
+  wait 2>/dev/null || true
+  exit "$exit_code"
+}
+
 validate_platforms() {
   local count=0
 
@@ -105,6 +172,10 @@ fi
 
 # === Agent server: auto-generate HERMES_API_KEY if not provided ===
 HERMES_API_KEY_FILE="${HERMES_HOME}/.hermes_api_key"
+if [[ -z "${HERMES_API_KEY:-}" && -n "${API_SERVER_KEY:-}" ]]; then
+  export HERMES_API_KEY="${API_SERVER_KEY}"
+  echo "[bootstrap] Using API_SERVER_KEY as HERMES_API_KEY for the A2A direct bridge."
+fi
 if [[ -z "${HERMES_API_KEY:-}" && -f "$HERMES_API_KEY_FILE" ]]; then
   export HERMES_API_KEY="$(cat "$HERMES_API_KEY_FILE")"
   echo "[bootstrap] Loaded stored Hermes API key."
@@ -288,7 +359,7 @@ try:
 except Exception:
     cfg = {}
 ts = cfg.get('toolsets', [])
-required = {'gen-jwt', 'radius-cast'}
+required = {'gen-jwt', 'radius-cast', 'a2a-send'}
 sys.exit(0 if ('all' in ts or required.issubset(set(ts))) else 1)
 " 2>/dev/null; then
   echo "[bootstrap] Adding bundled plugin toolsets to enabled toolsets in config.yaml..."
@@ -301,7 +372,7 @@ try:
 except Exception:
     cfg = {}
 toolsets = cfg.get('toolsets', [])
-required_toolsets = ['gen-jwt', 'radius-cast']
+required_toolsets = ['gen-jwt', 'radius-cast', 'a2a-send']
 if 'all' not in toolsets:
     changed = False
     for toolset in required_toolsets:
@@ -321,8 +392,21 @@ SKILLS_DIR="${HERMES_HOME}/skills"
 mkdir -p "$SKILLS_DIR"
 for skill_file in /app/skills/*.md; do
   [[ -f "$skill_file" ]] || continue
-  cp "$skill_file" "${SKILLS_DIR}/$(basename "$skill_file")"
-  echo "[bootstrap] Installed skill: $(basename "$skill_file")"
+  skill_basename="$(basename "$skill_file")"
+  skill_name="${skill_basename%.md}"
+  cp "$skill_file" "${SKILLS_DIR}/${skill_basename}"
+
+  case "$skill_name" in
+    radius-wallet|a2a-comms)
+      target_dir="${SKILLS_DIR}/radius/${skill_name}"
+      mkdir -p "$target_dir"
+      cp "$skill_file" "${target_dir}/SKILL.md"
+      echo "[bootstrap] Installed skill: ${skill_basename} (category: radius)"
+      ;;
+    *)
+      echo "[bootstrap] Installed skill: ${skill_basename}"
+      ;;
+  esac
 done
 
 # Install vendored Radius marketplace skills while preserving their upstream
@@ -338,6 +422,16 @@ if [[ -d "$VENDORED_SKILLS_ROOT" ]]; then
     cp -r "$skill_dir" "$target_dir"
     if [[ -f "${target_dir}/SKILL.md" ]]; then
       cp "${target_dir}/SKILL.md" "${SKILLS_DIR}/${skill_name}.md"
+
+      case "$skill_name" in
+        radius-dev|dripping-faucet)
+          category_dir="${SKILLS_DIR}/radius/${skill_name}"
+          mkdir -p "$category_dir"
+          cp "${target_dir}/SKILL.md" "${category_dir}/SKILL.md"
+          echo "[bootstrap] Installed vendored skill: ${skill_name} (category: radius)"
+          continue
+          ;;
+      esac
     fi
     echo "[bootstrap] Installed vendored skill: ${skill_name}"
   done
@@ -390,8 +484,8 @@ WELL_KNOWN_SKILLS_DIR="${HERMES_HOME}/well-known-skills"
 mkdir -p "$WELL_KNOWN_SKILLS_DIR"
 for skill_file in /app/skills/*.md; do
   [[ -f "$skill_file" ]] || continue
-  grep -q "^published: true" "$skill_file" || continue
   skill_name="$(basename "$skill_file" .md)"
+  grep -q "^published: true" "$skill_file" || continue
   mkdir -p "${WELL_KNOWN_SKILLS_DIR}/${skill_name}"
   cp "$skill_file" "${WELL_KNOWN_SKILLS_DIR}/${skill_name}/SKILL.md"
   echo "[bootstrap] Installed well-known skill: ${skill_name}"
@@ -473,5 +567,28 @@ _wait_for_agent_server() {
 
 _wait_for_agent_server || true
 
+start_hermes_log_forwarders
+
 echo "[bootstrap] Starting Hermes gateway..."
-exec hermes gateway
+hermes gateway &
+GATEWAY_PID=$!
+
+trap 'cleanup $?' EXIT INT TERM
+
+if ! wait -n "$AGENT_PID" "$GATEWAY_PID"; then
+  status=$?
+else
+  status=0
+fi
+
+if ! kill -0 "$AGENT_PID" 2>/dev/null; then
+  echo "[bootstrap] ERROR: Agent server exited." >&2
+  status=1
+fi
+
+if ! kill -0 "$GATEWAY_PID" 2>/dev/null; then
+  echo "[bootstrap] ERROR: Hermes gateway exited." >&2
+  status=1
+fi
+
+cleanup "$status"
