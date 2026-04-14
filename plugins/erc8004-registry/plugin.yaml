@@ -1,0 +1,10 @@
+name: erc8004-registry
+version: "1.0.0"
+description: "Deterministic ERC-8004 registry tools for Radius networks"
+provides_tools:
+  - erc8004_get_registration
+  - erc8004_list_registrations
+  - erc8004_get_registry_stats
+  - erc8004_register_self
+  - erc8004_register_agent
+  - erc8004_update_agent_uri

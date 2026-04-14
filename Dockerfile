@@ -74,6 +74,7 @@ RUN git clone --depth 1 https://github.com/radius-workshop/linear-claude-skill /
 RUN git clone --depth 1 https://github.com/radiustechsystems/skills.git /app/vendor/radius-skills
 
 COPY scripts/agent_server /app/scripts/agent_server
+COPY erc8004_registry /app/erc8004_registry
 
 COPY HERMES.md /app/HERMES.md
 COPY AGENTS.md /app/AGENTS.md

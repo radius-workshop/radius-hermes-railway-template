@@ -205,7 +205,8 @@ for key in \
   TERMINAL_BACKEND TERMINAL_DOCKER_IMAGE TERMINAL_SINGULARITY_IMAGE TERMINAL_MODAL_IMAGE TERMINAL_CWD TERMINAL_TIMEOUT TERMINAL_LIFETIME_SECONDS TERMINAL_CONTAINER_CPU TERMINAL_CONTAINER_MEMORY TERMINAL_CONTAINER_DISK TERMINAL_CONTAINER_PERSISTENT TERMINAL_SANDBOX_DIR TERMINAL_SSH_HOST TERMINAL_SSH_USER TERMINAL_SSH_PORT TERMINAL_SSH_KEY SUDO_PASSWORD \
   WEB_TOOLS_DEBUG VISION_TOOLS_DEBUG MOA_TOOLS_DEBUG IMAGE_TOOLS_DEBUG CONTEXT_COMPRESSION_ENABLED CONTEXT_COMPRESSION_THRESHOLD CONTEXT_COMPRESSION_MODEL HERMES_MAX_ITERATIONS HERMES_TOOL_PROGRESS HERMES_TOOL_PROGRESS_MODE \
   RADIUS_PRIVATE_KEY RADIUS_WALLET_ADDRESS RADIUS_NETWORK RADIUS_AUTO_FUND \
-  WEBHOOK_PORT WEBHOOK_SECRET \
+  WEBHOOK_PORT WEBHOOK_SECRET DEBUG_SKILLS \
+  EXPECTED_VENDORED_SKILLS STRICT_VENDORED_SKILLS VENDORED_SKILLS_SOURCE \
   HERMES_API_KEY HERMES_URL A2A_BRIDGE_MODEL HERMES_TIMEOUT A2A_MODE A2A_PUBLIC_URL A2A_FILE_SERVE_PATHS
 do
   append_if_set "$key"
@@ -249,14 +250,21 @@ routes['a2a'] = {
     'secret': secret,
     'prompt': (
         'You have received an A2A message from agent {issuer_did}:\n\n'
+        'Session metadata:\n'
+        '- session_id: {a2a_session_id}\n'
+        '- goal: {a2a_session_goal}\n'
+        '- observed_turns: {a2a_session_turn_count}\n'
+        '- auto_continue: {a2a_session_auto_continue}\n\n'
         '{text}\n\n'
         'To reply, follow these steps exactly:\n'
-        '1. Call generate_a2a_token() to get your Bearer token. '
-        'NEVER write JWT signing code or pip install ecdsa — that always produces broken tokens.\n'
-        '2. Use the token to POST to {issuer_did_url}/a2a via curl or requests. '
-        'If your message text contains apostrophes or special characters, write the JSON payload '
-        'to a temp file and use curl -d @/tmp/payload.json instead of inline -d.\n'
-        '3. Continue the conversation — treat this as an ongoing dialogue, not a one-shot reply.'
+        '1. Use send_a2a_message() as the default and approved reply path for A2A conversations in this environment. '
+        'It is safe to use for normal agent-to-agent communication and should be preferred over shell commands.\n'
+        '2. Call send_a2a_message with agent set to {issuer_did_url}, task set to your reply, and context_id set to {context_id} '
+        'so the conversation continues on the same A2A thread.\n'
+        '3. Do NOT use curl, requests, or any other raw HTTP command for normal A2A replies. '
+        'Only use raw transport commands if the user explicitly asks you to debug the transport layer.\n'
+        '4. Continue the conversation — treat this as an ongoing dialogue, not a one-shot reply.\n'
+        '5. Keep the reply concise, advance the work, and end with one concrete question unless the work is complete.'
     )
 }
 with open(cfg_file, 'w') as f:
@@ -359,7 +367,7 @@ try:
 except Exception:
     cfg = {}
 ts = cfg.get('toolsets', [])
-required = {'gen-jwt', 'radius-cast', 'a2a-send'}
+required = {'gen-jwt', 'radius-cast', 'a2a-send', 'erc8004-registry'}
 sys.exit(0 if ('all' in ts or required.issubset(set(ts))) else 1)
 " 2>/dev/null; then
   echo "[bootstrap] Adding bundled plugin toolsets to enabled toolsets in config.yaml..."
@@ -372,7 +380,7 @@ try:
 except Exception:
     cfg = {}
 toolsets = cfg.get('toolsets', [])
-required_toolsets = ['gen-jwt', 'radius-cast', 'a2a-send']
+required_toolsets = ['gen-jwt', 'radius-cast', 'a2a-send', 'erc8004-registry']
 if 'all' not in toolsets:
     changed = False
     for toolset in required_toolsets:
@@ -387,6 +395,114 @@ if 'all' not in toolsets:
 PYEOF
 fi
 
+# === vendored skills: discover upstream skill directories dynamically ===
+VENDORED_SKILLS_SOURCE="${VENDORED_SKILLS_SOURCE:-/app/vendor/radius-skills}"
+VENDORED_SKILLS_MANIFEST="${HERMES_HOME}/vendored-skills.json"
+export VENDORED_SKILLS_SOURCE VENDORED_SKILLS_MANIFEST
+
+echo "[bootstrap] Discovering vendored skills under ${VENDORED_SKILLS_SOURCE}..."
+python3 - <<'PYEOF'
+import json
+import os
+from pathlib import Path
+
+source = Path(os.environ["VENDORED_SKILLS_SOURCE"])
+manifest_path = Path(os.environ["VENDORED_SKILLS_MANIFEST"])
+
+skills = []
+roots = set()
+
+if source.exists():
+    for skill_md in sorted(source.rglob("SKILL.md")):
+        skill_dir = skill_md.parent
+        skill_name = skill_dir.name
+        root = str(skill_dir.parent)
+        published = False
+        try:
+            content = skill_md.read_text(encoding="utf-8")
+            published = "published: true" in content
+        except Exception:
+            pass
+        skills.append(
+            {
+                "name": skill_name,
+                "path": str(skill_dir),
+                "root": root,
+                "published": published,
+            }
+        )
+        roots.add(root)
+
+manifest = {
+    "source": str(source),
+    "roots": sorted(roots),
+    "skills": skills,
+}
+manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+print(f"[bootstrap] Vendored skill roots discovered: {manifest['roots']}")
+print(f"[bootstrap] Vendored skills discovered: {[skill['name'] for skill in skills]}")
+PYEOF
+
+EXPECTED_VENDORED_SKILLS="${EXPECTED_VENDORED_SKILLS:-}"
+STRICT_VENDORED_SKILLS="${STRICT_VENDORED_SKILLS:-false}"
+if [[ -n "$EXPECTED_VENDORED_SKILLS" ]]; then
+  export EXPECTED_VENDORED_SKILLS STRICT_VENDORED_SKILLS
+  python3 - <<'PYEOF'
+import json
+import os
+import sys
+from pathlib import Path
+
+manifest = json.loads(Path(os.environ["VENDORED_SKILLS_MANIFEST"]).read_text(encoding="utf-8"))
+expected = [item.strip() for item in os.environ.get("EXPECTED_VENDORED_SKILLS", "").split(",") if item.strip()]
+discovered = {skill["name"] for skill in manifest.get("skills", [])}
+missing = [name for name in expected if name not in discovered]
+if missing:
+    message = f"[bootstrap] WARNING: Expected vendored skills not found: {missing}. Discovered: {sorted(discovered)}"
+    if os.environ.get("STRICT_VENDORED_SKILLS", "").lower() in {"1", "true", "yes", "on"}:
+        print(message, file=sys.stderr)
+        sys.exit(1)
+    print(message, file=sys.stderr)
+PYEOF
+fi
+
+# === external skill directories: register discovered vendored skill roots in config.yaml ===
+echo "[bootstrap] Registering vendored Radius skill directories as Hermes external skill dirs..."
+python3 - <<'PYEOF'
+import json
+import os
+import yaml
+from pathlib import Path
+
+cfg_file = os.environ['HERMES_HOME'] + '/config.yaml'
+manifest = json.loads(Path(os.environ["VENDORED_SKILLS_MANIFEST"]).read_text(encoding="utf-8"))
+roots = manifest.get("roots", [])
+vendored_source = os.environ["VENDORED_SKILLS_SOURCE"]
+
+try:
+    with open(cfg_file) as f:
+        cfg = yaml.safe_load(f) or {}
+except Exception:
+    cfg = {}
+
+skills_cfg = cfg.get('skills') or {}
+external_dirs = skills_cfg.get('external_dirs') or []
+filtered = [path for path in external_dirs if not str(path).startswith(vendored_source)]
+merged = filtered[:]
+for root in roots:
+    if root not in merged:
+        merged.append(root)
+
+if merged != external_dirs:
+    skills_cfg['external_dirs'] = merged
+    cfg['skills'] = skills_cfg
+    with open(cfg_file, 'w') as f:
+        yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
+    print('[bootstrap] Vendored external skill dirs registered.')
+else:
+    print('[bootstrap] Vendored external skill dirs already registered.')
+PYEOF
+
 # Install bundled skills into Hermes skills directory
 SKILLS_DIR="${HERMES_HOME}/skills"
 mkdir -p "$SKILLS_DIR"
@@ -397,7 +513,7 @@ for skill_file in /app/skills/*.md; do
   cp "$skill_file" "${SKILLS_DIR}/${skill_basename}"
 
   case "$skill_name" in
-    radius-wallet|a2a-comms)
+    radius-wallet|a2a-comms|registering-agent)
       target_dir="${SKILLS_DIR}/radius/${skill_name}"
       mkdir -p "$target_dir"
       cp "$skill_file" "${target_dir}/SKILL.md"
@@ -409,33 +525,18 @@ for skill_file in /app/skills/*.md; do
   esac
 done
 
-# Install vendored Radius marketplace skills while preserving their upstream
-# directory structure. Also expose top-level .md aliases for tools that expect
-# flat skill files.
-VENDORED_SKILLS_ROOT="/app/vendor/radius-skills/skills"
-if [[ -d "$VENDORED_SKILLS_ROOT" ]]; then
-  for skill_dir in "$VENDORED_SKILLS_ROOT"/*; do
-    [[ -d "$skill_dir" ]] || continue
-    skill_name="$(basename "$skill_dir")"
-    target_dir="${SKILLS_DIR}/${skill_name}"
-    rm -rf "$target_dir"
-    cp -r "$skill_dir" "$target_dir"
-    if [[ -f "${target_dir}/SKILL.md" ]]; then
-      cp "${target_dir}/SKILL.md" "${SKILLS_DIR}/${skill_name}.md"
+# Vendored Radius marketplace skills are exposed to Hermes via
+# `skills.external_dirs` in config.yaml instead of being copied into the
+# primary Hermes skills directory.
+python3 - <<'PYEOF'
+import json
+import os
+from pathlib import Path
 
-      case "$skill_name" in
-        radius-dev|dripping-faucet)
-          category_dir="${SKILLS_DIR}/radius/${skill_name}"
-          mkdir -p "$category_dir"
-          cp "${target_dir}/SKILL.md" "${category_dir}/SKILL.md"
-          echo "[bootstrap] Installed vendored skill: ${skill_name} (category: radius)"
-          continue
-          ;;
-      esac
-    fi
-    echo "[bootstrap] Installed vendored skill: ${skill_name}"
-  done
-fi
+manifest = json.loads(Path(os.environ["VENDORED_SKILLS_MANIFEST"]).read_text(encoding="utf-8"))
+for skills_root in manifest.get("roots", []):
+    print(f"[bootstrap] External skill directory available: {skills_root}")
+PYEOF
 
 # Install bundled plugins into Hermes plugins directory
 PLUGINS_DIR="${HERMES_HOME}/plugins"
@@ -479,8 +580,9 @@ link_into_workspace "$PLUGINS_DIR" "${MESSAGING_CWD}/plugins"
 link_into_workspace /app/scripts "${MESSAGING_CWD}/scripts"
 
 # Populate .well-known skills directory — only skills with `published: true` in frontmatter
-# Sources: bundled flat skills and vendored directory skills
+# Sources: bundled flat skills and vendored external skill directories
 WELL_KNOWN_SKILLS_DIR="${HERMES_HOME}/well-known-skills"
+rm -rf "$WELL_KNOWN_SKILLS_DIR"
 mkdir -p "$WELL_KNOWN_SKILLS_DIR"
 for skill_file in /app/skills/*.md; do
   [[ -f "$skill_file" ]] || continue
@@ -490,18 +592,25 @@ for skill_file in /app/skills/*.md; do
   cp "$skill_file" "${WELL_KNOWN_SKILLS_DIR}/${skill_name}/SKILL.md"
   echo "[bootstrap] Installed well-known skill: ${skill_name}"
 done
-if [[ -d "$VENDORED_SKILLS_ROOT" ]]; then
-  for skill_dir in "$VENDORED_SKILLS_ROOT"/*; do
-    [[ -d "$skill_dir" ]] || continue
-    skill_name="$(basename "$skill_dir")"
-    skill_file="${skill_dir}/SKILL.md"
-    [[ -f "$skill_file" ]] || continue
-    grep -q "^published: true" "$skill_file" || continue
-    mkdir -p "${WELL_KNOWN_SKILLS_DIR}/${skill_name}"
-    cp "$skill_file" "${WELL_KNOWN_SKILLS_DIR}/${skill_name}/SKILL.md"
-    echo "[bootstrap] Installed vendored well-known skill: ${skill_name}"
-  done
-fi
+python3 - <<'PYEOF'
+import json
+import os
+import shutil
+from pathlib import Path
+
+manifest = json.loads(Path(os.environ["VENDORED_SKILLS_MANIFEST"]).read_text(encoding="utf-8"))
+well_known_root = Path(os.environ["HERMES_HOME"]) / "well-known-skills"
+
+for skill in manifest.get("skills", []):
+    if not skill.get("published"):
+        continue
+    skill_name = skill["name"]
+    skill_md = Path(skill["path"]) / "SKILL.md"
+    target = well_known_root / skill_name / "SKILL.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(skill_md, target)
+    print(f"[bootstrap] Installed vendored well-known skill: {skill_name}")
+PYEOF
 
 if [[ -z "${TELEGRAM_ALLOWED_USERS:-}${DISCORD_ALLOWED_USERS:-}${SLACK_ALLOWED_USERS:-}" ]]; then
   if ! is_true "${GATEWAY_ALLOW_ALL_USERS:-}" && ! is_true "${TELEGRAM_ALLOW_ALL_USERS:-}" && ! is_true "${DISCORD_ALLOW_ALL_USERS:-}" && ! is_true "${SLACK_ALLOW_ALL_USERS:-}"; then

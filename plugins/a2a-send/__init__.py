@@ -96,6 +96,69 @@ def _exchange_api_key_for_token(base_url: str, api_key: str, subject: str) -> st
     return token
 
 
+def _internal_api_key() -> str:
+    return str(os.environ.get("HERMES_API_KEY") or os.environ.get("API_SERVER_KEY") or "").strip()
+
+
+def _internal_base_url() -> str:
+    return f"http://127.0.0.1:{os.environ.get('PORT', '3000')}"
+
+
+def _notify_session_runtime(path: str, payload: dict) -> None:
+    api_key = _internal_api_key()
+    if not api_key:
+        return
+    try:
+        requests.post(
+            f"{_internal_base_url()}{path}",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=10,
+        ).raise_for_status()
+    except Exception as err:
+        _log_event("session_runtime_error", path=path, error=str(err))
+
+
+def _post_session_runtime(path: str, payload: dict) -> dict | None:
+    api_key = _internal_api_key()
+    if not api_key:
+        return None
+    try:
+        response = requests.post(
+            f"{_internal_base_url()}{path}",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=10,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data if isinstance(data, dict) else None
+    except Exception as err:
+        _log_event("session_runtime_error", path=path, error=str(err))
+        return None
+
+
+def _resolve_existing_session(payload: dict) -> dict | None:
+    data = _post_session_runtime("/internal/a2a/sessions/resolve", payload)
+    session = (data or {}).get("session")
+    return session if isinstance(session, dict) and session else None
+
+
+def _runtime_session(data: dict | None) -> dict | None:
+    session = (data or {}).get("session")
+    return session if isinstance(session, dict) and session else None
+
+
+def _build_user_update(session: dict | None, remote_agent: str, context_id: str, auto_continue: bool) -> str:
+    if session:
+        latest_card = session.get("latest_card") if isinstance(session.get("latest_card"), dict) else None
+        if latest_card and latest_card.get("text"):
+            return str(latest_card["text"])
+        if auto_continue:
+            return f"Conversation started with {remote_agent} on context {context_id}. Waiting on the peer agent."
+    return f"Sent the A2A message to {remote_agent} on context {context_id}."
+
+
 def _log_event(event: str, **fields) -> None:
     details = " ".join(
         f"{key}={json.dumps(value, separators=(',', ':')) if isinstance(value, (dict, list)) else value}"
@@ -136,6 +199,42 @@ def register(ctx):
                     "type": "string",
                     "description": "Optional subject for /token exchange. Defaults to hermes.",
                 },
+                "session_id": {
+                    "type": "string",
+                    "description": "Optional durable session id for long-running managed A2A conversations.",
+                },
+                "goal": {
+                    "type": "string",
+                    "description": "Optional session goal stored by the local A2A session runtime.",
+                },
+                "topic": {
+                    "type": "string",
+                    "description": "Optional short topic label stored by the local A2A session runtime.",
+                },
+                "auto_continue": {
+                    "type": "boolean",
+                    "description": "When true, register this exchange as a managed long-running session that can keep sending future turns automatically.",
+                },
+                "max_turns": {
+                    "type": "integer",
+                    "description": "Optional managed-session stop limit. Omit for open-ended sessions.",
+                },
+                "origin_platform": {
+                    "type": "string",
+                    "description": "Optional user-facing platform label for the originating thread, such as discord.",
+                },
+                "origin_chat_id": {
+                    "type": "string",
+                    "description": "Optional originating chat or thread id for observability.",
+                },
+                "origin_message_id": {
+                    "type": "string",
+                    "description": "Optional originating message id for observability.",
+                },
+                "origin_label": {
+                    "type": "string",
+                    "description": "Optional human label for the originating conversation.",
+                },
             },
             "required": ["task"],
         },
@@ -153,7 +252,36 @@ def register(ctx):
             subject = str(params.get("subject") or "hermes").strip() or "hermes"
             rpc_id = str(uuid.uuid4())
             message_id = str(uuid.uuid4())
-            context_id = str(params.get("context_id") or "").strip() or str(uuid.uuid4())
+            auto_continue = bool(params.get("auto_continue"))
+            origin = {
+                "platform": str(params.get("origin_platform") or "").strip() or None,
+                "chat_id": str(params.get("origin_chat_id") or "").strip() or None,
+                "message_id": str(params.get("origin_message_id") or "").strip() or None,
+                "label": str(params.get("origin_label") or "").strip() or None,
+            }
+            requested_context_id = str(params.get("context_id") or "").strip()
+            requested_session_id = str(params.get("session_id") or "").strip()
+            existing_session = None
+            if requested_session_id:
+                existing_session = {"session_id": requested_session_id, "context_id": requested_context_id or None}
+            else:
+                existing_session = _resolve_existing_session(
+                    {
+                        "remote_agent": base_url,
+                        "context_id": requested_context_id or None,
+                        "origin": origin,
+                    }
+                )
+            context_id = str(
+                requested_context_id
+                or (existing_session or {}).get("context_id")
+                or ""
+            ).strip() or str(uuid.uuid4())
+            session_id = str(
+                requested_session_id
+                or (existing_session or {}).get("session_id")
+                or ""
+            ).strip() or str(uuid.uuid4())
 
             if api_key:
                 token = _exchange_api_key_for_token(base_url, api_key, subject)
@@ -180,12 +308,32 @@ def register(ctx):
                 },
             }
 
+            outbound_registration = _post_session_runtime(
+                "/internal/a2a/sessions/outbound",
+                {
+                    "session_id": session_id,
+                    "remote_agent": base_url,
+                    "remote_did": params.get("agent") if str(params.get("agent") or "").startswith("did:web:") else None,
+                    "remote_api_key": api_key or None,
+                    "context_id": context_id,
+                    "message_id": message_id,
+                    "task": task,
+                    "goal": str(params.get("goal") or "").strip() or None,
+                    "topic": str(params.get("topic") or "").strip() or None,
+                    "auto_continue": auto_continue,
+                    "max_turns": params.get("max_turns"),
+                    "origin": origin,
+                },
+            )
+
             _log_event(
                 "submit",
                 remote_agent=base_url,
                 rpc_id=rpc_id,
                 a2a_message_id=message_id,
                 context_id=context_id,
+                session_id=session_id,
+                reused_session=bool(existing_session),
                 auth_mode=auth_mode,
                 caller_did=caller_did,
                 prompt_chars=len(task),
@@ -210,13 +358,34 @@ def register(ctx):
                 a2a_message_id=message_id,
                 context_id=result.get("context_id") or context_id,
                 a2a_task_id=result.get("id"),
+                session_id=session_id,
                 remote_status=getattr(response, "status_code", None),
                 duration_ms=duration_ms,
                 task_state=((result.get("status") or {}).get("state")),
             )
 
+            outbound_result = _post_session_runtime(
+                "/internal/a2a/sessions/outbound-result",
+                {
+                    "session_id": session_id,
+                    "context_id": result.get("context_id") or context_id,
+                    "a2a_task_id": result.get("id"),
+                    "duration_ms": duration_ms,
+                    "response": response_json,
+                    "task_state": ((result.get("status") or {}).get("state")),
+                },
+            )
+            runtime_session = _runtime_session(outbound_result) or _runtime_session(outbound_registration)
+            user_update = _build_user_update(
+                runtime_session,
+                base_url,
+                result.get("context_id") or context_id,
+                auto_continue,
+            )
+
             return json.dumps(
                 {
+                    "session_id": session_id,
                     "remote_agent": base_url,
                     "auth_mode": auth_mode,
                     "caller_did": caller_did,
@@ -225,6 +394,8 @@ def register(ctx):
                     "context_id": result.get("context_id") or context_id,
                     "a2a_task_id": result.get("id"),
                     "duration_ms": duration_ms,
+                    "session": runtime_session,
+                    "user_update": user_update,
                     "response": response_json,
                 },
                 indent=2,

@@ -34,7 +34,7 @@ When a user asks a broad question about Radius, explain it in product terms firs
 
 - Radius is the ecosystem this agent is built for.
 - The template includes a built-in Radius Testnet wallet.
-- The bundled skills `radius-wallet`, `radius-dev`, and `dripping-faucet` are part of that ecosystem.
+- The bundled `radius-wallet` skill and any vendored Radius marketplace skills discovered by Hermes are part of that ecosystem.
 
 If you do not have more detailed product facts loaded, say that this template is Radius-focused and then describe the concrete Radius capabilities available in this agent instead of falling back to generic dictionary meanings.
 

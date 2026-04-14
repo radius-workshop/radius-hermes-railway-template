@@ -14,9 +14,10 @@ import subprocess
 import sys
 import time
 import uuid
+import yaml
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import unquote
 
 import httpx
@@ -35,8 +36,16 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from a2a_sessions import A2ASessionStore
 from a2a_bridge import A2ABridge
 from auth import get_did, get_did_document, issue_token, jwt_auth_dep, setup_auth
+from erc8004_registry import (
+    MissingSelfRegistrationFields,
+    build_self_registration,
+    get_network_config,
+    self_registration_missing_fields_error,
+)
 from hermes_client import HermesClient, HermesUnavailableError, HermesUpstreamError
 from logging_utils import (
     clear_request_context,
@@ -53,7 +62,13 @@ logger = logging.getLogger("agent-server")
 
 _start_time = time.time()
 
+HERMES_HOME = os.environ.get("HERMES_HOME", "/data/.hermes")
+CONFIG_PATH = Path(HERMES_HOME) / "config.yaml"
 SKILLS_ROOT = os.environ.get("SKILLS_ROOT", "/data/.hermes/well-known-skills")
+VENDORED_SKILLS_SOURCE = os.environ.get("VENDORED_SKILLS_SOURCE", "/app/vendor/radius-skills")
+VENDORED_SKILLS_MANIFEST = Path(
+    os.environ.get("VENDORED_SKILLS_MANIFEST", f"{HERMES_HOME}/vendored-skills.json")
+)
 
 
 BASE_URL = get_base_url()
@@ -62,9 +77,13 @@ A2A_MODE = os.environ.get("A2A_MODE", "auto").lower()
 HERMES_URL = os.environ.get("HERMES_URL", "http://127.0.0.1:8642")
 A2A_BRIDGE_MODEL = os.environ.get("A2A_BRIDGE_MODEL", "hermes-agent")
 HERMES_TIMEOUT = float(os.environ.get("HERMES_TIMEOUT", "120"))
+A2A_SESSION_ROOT = Path(HERMES_HOME) / "a2a-sessions"
+A2A_SESSION_TICK_SECONDS = float(os.environ.get("A2A_SESSION_TICK_SECONDS", "2.5"))
 
 _hermes_client: Optional[HermesClient] = None
 _a2a_bridge: Optional[A2ABridge] = None
+_a2a_session_store = A2ASessionStore(A2A_SESSION_ROOT)
+_a2a_session_worker: Optional[asyncio.Task] = None
 _wallet_summary_cache: Optional[dict] = None
 _wallet_summary_built_at: float = 0
 _WALLET_SUMMARY_TTL = 45.0
@@ -93,6 +112,10 @@ def _direct_available() -> bool:
     return bool(_a2a_bridge and _hermes_api_key())
 
 
+def _internal_api_key() -> Optional[str]:
+    return _hermes_api_key()
+
+
 def _resolve_mode(method: str) -> str:
     if A2A_MODE == "direct":
         return "direct"
@@ -116,6 +139,17 @@ def _rpc_success_response(rpc_id, result) -> JSONResponse:
     return JSONResponse(payload.model_dump(by_alias=True, exclude_none=True))
 
 
+async def _internal_auth_dep(request: Request) -> None:
+    expected = _internal_api_key()
+    if not expected:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=503, detail="Internal API unavailable")
+    auth = request.headers.get("Authorization", "")
+    if auth != f"Bearer {expected}":
+        from fastapi import HTTPException
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+
 def _request_id(request: Request) -> str:
     return request.headers.get("X-Request-Id") or request.headers.get("X-Correlation-Id") or str(uuid.uuid4())
 
@@ -130,7 +164,7 @@ def _client_ip(request: Request) -> str | None:
 
 
 def _is_observable_path(path: str) -> bool:
-    return path in {"/a2a", "/token", "/health"} or path.startswith("/files/")
+    return path in {"/a2a", "/token", "/health"} or path.startswith("/files/") or path.startswith("/internal/a2a/")
 
 
 def _radius_address_file() -> Path:
@@ -217,6 +251,192 @@ def _did_web_to_base_url(did: str) -> Optional[str]:
     return f"https://{host}/{'/'.join(parts[1:])}"
 
 
+def _message_text(message: dict | None) -> str:
+    if not isinstance(message, dict):
+        return ""
+    parts = message.get("parts") or []
+    text_parts = []
+    for part in parts:
+        if isinstance(part, dict) and isinstance(part.get("text"), str):
+            text_parts.append(part["text"].strip())
+    return "\n".join(chunk for chunk in text_parts if chunk).strip()
+
+
+def _render_session_envelope(session: dict[str, Any], text: str) -> str:
+    goal = str(session.get("goal") or "").strip()
+    topic = str(session.get("topic") or "").strip()
+    turn_number = int(session.get("turn_count") or 0) + 1
+    max_turns = session.get("max_turns")
+    turn_label = f"{turn_number}/{max_turns}" if max_turns not in (None, "") else f"{turn_number}/open"
+    header = [
+        "[A2A_SESSION]",
+        f"session_id={session.get('session_id')}",
+        f"context_id={session.get('context_id')}",
+        f"turn={turn_label}",
+        f"goal={goal or topic or 'ongoing collaboration'}",
+        "reply_required=true",
+        "[/A2A_SESSION]",
+        "",
+    ]
+    return "\n".join(header) + text.strip()
+
+
+def _build_dialogue_prompt(session: dict[str, Any]) -> str:
+    max_turns = session.get("max_turns")
+    next_turn = int(session.get("turn_count") or 0) + 1
+    turn_label = f"{next_turn}/{max_turns}" if max_turns not in (None, "") else f"{next_turn}/open"
+    goal = str(session.get("goal") or session.get("topic") or "Advance the shared objective").strip()
+    transcript_lines = []
+    for item in session.get("recent_messages") or []:
+        speaker = "You" if item.get("speaker") == "local" else "Peer"
+        transcript_lines.append(f"{speaker}: {item.get('text', '').strip()}")
+    transcript = "\n".join(transcript_lines[-8:]) or "No prior turns recorded."
+    return (
+        "You are continuing an agent-to-agent work session.\n"
+        f"Goal: {goal}\n"
+        f"Next turn: {turn_label}\n"
+        "Write the next message to the peer agent.\n"
+        "Rules:\n"
+        "- Advance the work instead of repeating prior points.\n"
+        "- Keep the message under 140 words.\n"
+        "- End with exactly one concrete question unless the work is complete.\n"
+        "- Do not mention tools, JSON, metadata, or internal orchestration.\n"
+        "- If the task is complete, say so clearly and ask for confirmation or the next work item.\n\n"
+        "Recent transcript:\n"
+        f"{transcript}\n"
+    )
+
+
+async def _exchange_api_key_for_token(base_url: str, api_key: str, subject: str = "hermes") -> str:
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.post(
+            f"{base_url.rstrip('/')}/token",
+            headers={"X-Api-Key": api_key, "Content-Type": "application/json"},
+            json={"sub": subject},
+        )
+        response.raise_for_status()
+        data = response.json()
+        token = data.get("token")
+        if not token:
+            raise RuntimeError("Remote /token response did not include a token")
+        return token
+
+
+async def _send_managed_a2a_turn(session: dict[str, Any], text: str) -> dict[str, Any]:
+    remote_agent = str(session.get("remote_agent") or "").strip().rstrip("/")
+    if not remote_agent:
+        raise RuntimeError("Session has no remote_agent configured")
+
+    api_key = _a2a_session_store.get_remote_api_key(str(session.get("session_id") or ""))
+    if api_key:
+        token = await _exchange_api_key_for_token(remote_agent, api_key)
+        auth_mode = "token_exchange"
+    else:
+        token = await issue_token("hermes")
+        auth_mode = "self_signed_jwt"
+
+    rpc_id = str(uuid.uuid4())
+    message_id = str(uuid.uuid4())
+    payload = {
+        "jsonrpc": "2.0",
+        "id": rpc_id,
+        "method": "message/send",
+        "params": {
+            "message": {
+                "role": "ROLE_USER",
+                "id": message_id,
+                "message_id": message_id,
+                "context_id": session.get("context_id"),
+                "parts": [{"text": _render_session_envelope(session, text)}],
+            }
+        },
+    }
+
+    started = time.perf_counter()
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        response = await client.post(
+            f"{remote_agent}/a2a",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json=payload,
+        )
+    duration_ms = round((time.perf_counter() - started) * 1000, 2)
+    response.raise_for_status()
+    response_json = response.json()
+
+    log_event(
+        logger,
+        logging.INFO,
+        "Managed A2A turn sent",
+        event="a2a.session.outbound",
+        session_id=session.get("session_id"),
+        context_id=session.get("context_id"),
+        remote_agent=remote_agent,
+        auth_mode=auth_mode,
+        rpc_id=rpc_id,
+        a2a_message_id=message_id,
+        duration_ms=duration_ms,
+        task_state=((response_json.get("result") or {}).get("status") or {}).get("state"),
+    )
+
+    return {
+        "session_id": session.get("session_id"),
+        "context_id": (response_json.get("result") or {}).get("context_id") or session.get("context_id"),
+        "a2a_message_id": message_id,
+        "duration_ms": duration_ms,
+        "response": response_json,
+    }
+
+
+async def _run_session_turn(session_id: str) -> None:
+    session = _a2a_session_store.get_session(session_id)
+    if not session or session.get("status") != "active" or session.get("next_action") != "compose_local_turn":
+        return
+    if not _hermes_client:
+        _a2a_session_store.mark_error(session_id, "Direct Hermes client unavailable for managed A2A session")
+        return
+    try:
+        prompt = _build_dialogue_prompt(session)
+        composed = await _hermes_client.complete(
+            messages=[{"role": "user", "content": prompt}],
+            session_id=f"a2a-session:{session_id}",
+        )
+        composed = composed.strip()
+        if not composed:
+            raise RuntimeError("Managed A2A session produced an empty local turn")
+        _a2a_session_store.record_local_turn(session_id, composed)
+        session = _a2a_session_store.get_session(session_id)
+        if not session:
+            return
+        result = await _send_managed_a2a_turn(session, composed)
+        _a2a_session_store.record_outbound_result(result)
+    except Exception as exc:
+        _a2a_session_store.mark_error(session_id, str(exc))
+        log_event(
+            logger,
+            logging.ERROR,
+            "Managed A2A session turn failed",
+            event="a2a.session.turn",
+            session_id=session_id,
+            error=str(exc),
+        )
+
+
+async def _session_worker_loop() -> None:
+    while True:
+        try:
+            for session in _a2a_session_store.list_runnable_sessions():
+                session_id = session.get("session_id")
+                if not session_id:
+                    continue
+                _a2a_session_store.note_worker_claim(session_id, delay_seconds=max(A2A_SESSION_TICK_SECONDS * 4, 6.0))
+                await _run_session_turn(session_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log_event(logger, logging.ERROR, "Managed A2A session worker iteration failed", event="a2a.session.worker", error=str(exc))
+        await asyncio.sleep(max(A2A_SESSION_TICK_SECONDS, 1.0))
+
+
 def _is_published(skill_md: str) -> bool:
     if not skill_md.startswith("---"):
         return False
@@ -240,6 +460,88 @@ def _parse_description(skill_md: str) -> str:
     if inline:
         return inline.group(1).strip()
     return ""
+
+
+def _is_true(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _read_config() -> dict[str, Any]:
+    try:
+        return yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+
+
+def _scan_vendored_skills() -> dict[str, Any]:
+    source = Path(VENDORED_SKILLS_SOURCE)
+    skills: list[dict[str, Any]] = []
+    roots: set[str] = set()
+    if source.exists():
+        for skill_md in sorted(source.rglob("SKILL.md")):
+            skill_dir = skill_md.parent
+            try:
+                content = skill_md.read_text(encoding="utf-8")
+            except Exception:
+                content = ""
+            root = str(skill_dir.parent)
+            roots.add(root)
+            skills.append(
+                {
+                    "name": skill_dir.name,
+                    "path": str(skill_dir),
+                    "root": root,
+                    "published": _is_published(content),
+                    "description": _parse_description(content),
+                }
+            )
+    return {"source": str(source), "roots": sorted(roots), "skills": skills}
+
+
+def _load_vendored_manifest() -> dict[str, Any]:
+    try:
+        return json.loads(VENDORED_SKILLS_MANIFEST.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _list_local_skills() -> dict[str, Any]:
+    hermes_skills_root = Path(HERMES_HOME) / "skills"
+    flat = sorted(p.stem for p in hermes_skills_root.glob("*.md") if p.is_file())
+    radius_bucket: list[str] = []
+    radius_root = hermes_skills_root / "radius"
+    if radius_root.exists():
+        radius_bucket = sorted(p.name for p in radius_root.iterdir() if p.is_dir())
+    return {
+        "root": str(hermes_skills_root),
+        "flat": flat,
+        "radius_bucket": radius_bucket,
+    }
+
+
+def _debug_skills_payload() -> dict[str, Any]:
+    config = _read_config()
+    skills_cfg = config.get("skills") or {}
+    external_dirs = skills_cfg.get("external_dirs") or []
+    public_index = json.loads(_get_index())
+    live_scan = _scan_vendored_skills()
+    manifest = _load_vendored_manifest()
+    well_known_root = Path(SKILLS_ROOT)
+    well_known_dirs = []
+    if well_known_root.exists():
+        well_known_dirs = sorted(p.name for p in well_known_root.iterdir() if p.is_dir())
+    return {
+        "debug_enabled": _is_true(os.environ.get("DEBUG_SKILLS")),
+        "config_path": str(CONFIG_PATH),
+        "config_external_dirs": external_dirs,
+        "vendored_manifest_path": str(VENDORED_SKILLS_MANIFEST),
+        "vendored_manifest": manifest,
+        "vendored_live_scan": live_scan,
+        "local_skills": _list_local_skills(),
+        "well_known_root": str(well_known_root),
+        "well_known_skills": well_known_dirs,
+        "public_index": public_index,
+    }
 
 
 _skills_cache: Optional[str] = None
@@ -291,7 +593,7 @@ def _get_index() -> str:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _hermes_client, _a2a_bridge
+    global _hermes_client, _a2a_bridge, _a2a_session_worker
     await setup_auth(BASE_URL)
     hermes_api_key = _hermes_api_key()
     if hermes_api_key:
@@ -302,6 +604,8 @@ async def lifespan(app: FastAPI):
             timeout=HERMES_TIMEOUT,
         )
         _a2a_bridge = A2ABridge(_hermes_client, _parse_allowed_roots(), A2A_PUBLIC_URL)
+    _a2a_session_worker = asyncio.create_task(_session_worker_loop(), name="a2a-session-worker")
+    vendored_manifest = _load_vendored_manifest()
     log_event(
         logger,
         logging.INFO,
@@ -312,8 +616,18 @@ async def lifespan(app: FastAPI):
         a2a_mode=A2A_MODE,
         direct_ready=_direct_available(),
         hermes_url=HERMES_URL,
+        a2a_session_root=str(A2A_SESSION_ROOT),
+        a2a_session_tick_seconds=A2A_SESSION_TICK_SECONDS,
+        vendored_skill_roots=vendored_manifest.get("roots", []),
+        vendored_skill_names=[skill.get("name") for skill in vendored_manifest.get("skills", [])],
     )
     yield
+    if _a2a_session_worker:
+        _a2a_session_worker.cancel()
+        try:
+            await _a2a_session_worker
+        except asyncio.CancelledError:
+            pass
     if _hermes_client:
         await _hermes_client.close()
 
@@ -417,6 +731,83 @@ async def get_skill(request: Request, name: str):
         return PlainTextResponse("Internal Server Error", status_code=500)
 
 
+@app.get("/debug/skills")
+async def debug_skills(auth: dict = Depends(jwt_auth_dep)):
+    if not _is_true(os.environ.get("DEBUG_SKILLS")):
+        return PlainTextResponse("Not Found", status_code=404)
+    return JSONResponse(_debug_skills_payload(), headers={"Cache-Control": "no-store"})
+
+
+@app.post("/internal/a2a/sessions/outbound")
+async def internal_a2a_session_outbound(request: Request, _: None = Depends(_internal_auth_dep)):
+    payload = await request.json()
+    try:
+        session = _a2a_session_store.create_or_update_outbound(payload if isinstance(payload, dict) else {})
+    except ValueError as exc:
+        log_event(
+            logger,
+            logging.WARNING,
+            "Invalid outbound session payload",
+            event="a2a.session.register_outbound_invalid_payload",
+            error=str(exc),
+        )
+        return JSONResponse({"ok": False, "error": "invalid_request"}, status_code=400)
+    log_event(
+        logger,
+        logging.INFO,
+        "Managed A2A session registered outbound turn",
+        event="a2a.session.register_outbound",
+        session_id=session.get("session_id"),
+        context_id=session.get("context_id"),
+        remote_agent=session.get("remote_agent"),
+        auto_continue=session.get("auto_continue"),
+    )
+    return JSONResponse({"ok": True, "session": _a2a_session_store.serialize_for_response(session)})
+
+@app.post("/internal/a2a/sessions/outbound-result")
+async def internal_a2a_session_outbound_result(request: Request, _: None = Depends(_internal_auth_dep)):
+    payload = await request.json()
+    try:
+        session = _a2a_session_store.record_outbound_result(payload if isinstance(payload, dict) else {})
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    if not session:
+        return JSONResponse({"ok": False, "error": "session_not_found"}, status_code=404)
+    return JSONResponse({"ok": True, "session": _a2a_session_store.serialize_for_response(session)})
+
+
+@app.post("/internal/a2a/sessions/resolve")
+async def internal_a2a_session_resolve(request: Request, _: None = Depends(_internal_auth_dep)):
+    payload = await request.json()
+    payload = payload if isinstance(payload, dict) else {}
+    session = _a2a_session_store.find_active_session(
+        remote_agent=payload.get("remote_agent"),
+        context_id=payload.get("context_id"),
+        origin_platform=((payload.get("origin") or {}).get("platform") if isinstance(payload.get("origin"), dict) else None),
+        origin_chat_id=((payload.get("origin") or {}).get("chat_id") if isinstance(payload.get("origin"), dict) else None),
+    )
+    return JSONResponse({"ok": True, "session": _a2a_session_store.serialize_for_response(session)})
+
+
+@app.get("/internal/a2a/sessions/{session_id}")
+async def internal_a2a_session_get(session_id: str, _: None = Depends(_internal_auth_dep)):
+    try:
+        session = _a2a_session_store.get_session(session_id)
+    except ValueError as exc:
+        log_event(
+            logger,
+            logging.WARNING,
+            "Invalid session lookup request",
+            event="a2a.session.get.invalid_request",
+            session_id=session_id,
+            error=str(exc),
+        )
+        return JSONResponse({"error": "invalid_request"}, status_code=400)
+    if not session:
+        return JSONResponse({"error": "Not Found"}, status_code=404)
+    return JSONResponse(_a2a_session_store.serialize_for_response(session))
+
+
 @app.get("/.well-known/did.json")
 async def did_document_route():
     doc = get_did_document()
@@ -427,27 +818,23 @@ async def did_document_route():
 
 @app.get("/.well-known/agent-registration.json")
 async def agent_registration():
-    wallet_address = os.environ.get("RADIUS_WALLET_ADDRESS")
-    agent_name = os.environ.get("AGENT_NAME", "Hermes Agent")
-    registration: dict = {
-        "schemaVersion": "1.0",
-        "name": agent_name,
-        "x402Support": True,
-        "trustSchemes": ["reput"],
-        "identityRegistry": "eip155:72344:0x5cd923Ce1244d5498Bf3f9E0F3a374C2567F1A31",
-        "services": {
-            "rpc": "https://rpc.radiustech.xyz",
-            "rpcTestnet": "https://rpc.testnet.radiustech.xyz",
-            "faucet": "https://network.radiustech.xyz/api/v1/faucet/doc",
-            "faucetTestnet": "https://testnet.radiustech.xyz/api/v1/faucet/doc",
-        },
-    }
-    if wallet_address:
-        registration["wallet"] = wallet_address
-        registration["owner"] = wallet_address
-    did = get_did()
-    if did:
-        registration["did"] = did
+    try:
+        registration = build_self_registration(
+            get_network_config("testnet"),
+            name=os.environ.get("AGENT_NAME"),
+            description=os.environ.get("AGENT_DESCRIPTION"),
+            image=os.environ.get("AGENT_IMAGE"),
+            did=get_did(),
+        )
+    except MissingSelfRegistrationFields as err:
+        return JSONResponse(
+            self_registration_missing_fields_error(err),
+            status_code=503,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "public, max-age=60",
+            },
+        )
     return JSONResponse(registration, headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=60"})
 
 
@@ -722,12 +1109,17 @@ async def _handle_delegated(rpc_id, message: dict, issuer_did: str | None):
     context_id = message.get("context_id", task_id)
     update_request_context(rpc_id=rpc_id, context_id=context_id, issuer_did=issuer_did, a2a_mode="delegated", a2a_task_id=task_id)
     issuer_did_url = _did_web_to_base_url(issuer_did) if issuer_did else None
+    session = _a2a_session_store.find_by_context(context_id)
     webhook_payload = json.dumps({
         "text": text,
         "context_id": context_id,
         "task_id": task_id,
         **({"issuer_did": issuer_did} if issuer_did else {}),
         **({"issuer_did_url": issuer_did_url} if issuer_did_url else {}),
+        **({"a2a_session_id": session.get("session_id")} if session else {}),
+        **({"a2a_session_goal": session.get("goal") or session.get("topic")} if session else {}),
+        **({"a2a_session_turn_count": session.get("turn_count")} if session else {}),
+        **({"a2a_session_auto_continue": session.get("auto_continue")} if session else {}),
     })
     sig = hmac.new(webhook_secret.encode("utf-8"), webhook_payload.encode("utf-8"), "sha256").hexdigest()
     webhook_port = os.environ.get("WEBHOOK_PORT", "8644")
@@ -871,6 +1263,42 @@ async def handle_a2a(request: Request, auth: dict = Depends(jwt_auth_dep)):
         a2a_message_id=message_id,
         prompt_chars=prompt_chars,
     )
+    managed_session = _a2a_session_store.find_by_context(context_id) if context_id else None
+    if (
+        managed_session
+        and managed_session.get("controller_mode") == "local"
+        and managed_session.get("auto_continue")
+        and managed_session.get("status") == "active"
+    ):
+        inbound_text = _message_text(message if isinstance(message, dict) else None)
+        session = _a2a_session_store.record_inbound_message(
+            {
+                "context_id": context_id,
+                "issuer_did": auth.get("issuer"),
+                "text": inbound_text,
+            }
+        )
+        log_event(
+            logger,
+            logging.INFO,
+            "Managed A2A session received remote turn",
+            event="a2a.session.inbound",
+            session_id=(session or managed_session).get("session_id"),
+            context_id=context_id,
+            issuer_did=auth.get("issuer"),
+            prompt_chars=prompt_chars,
+        )
+        result = {
+            "id": str(uuid.uuid4()),
+            "context_id": context_id,
+            "status": {"state": "TASK_STATE_COMPLETED", "timestamp_ms": int(time.time() * 1000)},
+            "message": {
+                "role": "agent",
+                "context_id": context_id,
+                "parts": [{"type": "text", "text": "Turn received. Continuing the managed A2A session."}],
+            },
+        }
+        return _rpc_success_response(rpc_id, result)
     if method not in {"message/send", "message/stream"}:
         log_event(logger, logging.WARNING, "A2A method not supported", event="a2a.request", outcome="rejected", rejection_reason="method_not_supported", rpc_id=rpc_id, rpc_method=method)
         return _rpc_error_response(rpc_id, MethodNotFoundError(message="This operation is not supported"))

@@ -37,6 +37,27 @@ Example:
 send_a2a_message({"agent":"https://other-agent.example","task":"Run this analysis"})
 ```
 
+For long-running agent dialogues, you can ask the tool to register a managed session on the local agent:
+
+```text
+send_a2a_message({
+  "agent":"https://other-agent.example",
+  "task":"Start the collaboration",
+  "goal":"Keep iterating until the shared task is complete",
+  "auto_continue":true,
+  "max_turns":200
+})
+```
+
+Useful managed-session fields:
+- `session_id` — reuse an existing durable local session id
+- `goal` / `topic` — persist the session objective
+- `auto_continue` — let the local agent server keep composing future turns automatically
+- `max_turns` — optional stop limit; omit for open-ended sessions
+- `origin_platform`, `origin_chat_id`, `origin_message_id`, `origin_label` — attach user-facing thread metadata for observability
+
+When `send_a2a_message` returns, prefer the tool's `user_update` or rendered `session.latest_card.text` for user-facing Telegram/Discord replies instead of dumping raw correlation ids unless the user explicitly asks for transport/debug detail.
+
 If `A2A_PEER_URL` is set, the `agent` argument can be omitted.
 
 ## When to use this skill

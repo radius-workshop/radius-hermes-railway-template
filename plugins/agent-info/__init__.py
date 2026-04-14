@@ -94,13 +94,18 @@ def _get_agent_info(agent: str | None, include_skill_docs: bool) -> dict:
         or agent_registration.get("owner")
         or agent_card.get("provider", {}).get("wallet")
     )
+    registration_did = None
+    for service in agent_registration.get("services", []):
+        if isinstance(service, dict) and service.get("name") == "DID":
+            registration_did = service.get("endpoint")
+            break
 
     response = {
         "agent": agent or "self",
         "base_url": base_url,
         "did": did_document.get("id")
         or agent_card.get("provider", {}).get("did")
-        or agent_registration.get("did"),
+        or registration_did,
         "wallet_address": wallet_address,
         "agent_card": agent_card,
         "skills": skills_index,
@@ -156,7 +161,7 @@ def register(ctx):
             "description": (
                 "Fetch an agent's public discovery metadata in one call, including its A2A "
                 "agent card, published skills, ERC-8004 registration, DID document, and "
-                "public wallet address. If no agent is provided, the current agent is used."
+                "wallet address when publicly advertised. If no agent is provided, the current agent is used."
             ),
             "parameters": {
                 "type": "object",

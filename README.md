@@ -17,6 +17,7 @@ This template is worker-only: setup and configuration are done through Railway V
 - Agent-to-agent (A2A) communication with two execution modes: direct (inline `message/send` + `message/stream`) and delegated (webhook-backed async submission)
 - Persistent cryptographic identity derived from the wallet key — the same `RADIUS_PRIVATE_KEY` signs both transactions and JWTs
 - Built-in discovery aggregation tool via `get_agent_info`
+- Built-in deterministic ERC-8004 registry tools for reading and writing Radius agent registrations
 - Built-in outbound A2A helper via `send_a2a_message` with sender-side correlation logging
 - Railway-friendly observability: structured JSON logs from the agent server plus forwarded Hermes harness log files
 
@@ -64,14 +65,13 @@ This resets agent memory, sessions, pairing state, ByteRover state, workspace fi
 
 As soon as the agent is live, these are good first prompts to try in chat.
 
-The bundled public Radius-facing skills are installed both as normal flat skills and under the Hermes catalog-style `radius` bucket:
+The bundled public Radius-facing skills include the template-owned skills plus any vendored upstream Radius marketplace skills that are present in the deployed image and marked `published: true`:
 
 - `radius-wallet`
-- `radius-dev`
-- `dripping-faucet`
 - `a2a-comms`
+- `registering-agent`
 
-`radius-wallet` and `a2a-comms` are template-owned. `radius-dev` and `dripping-faucet` are sourced from the vendored upstream Radius skills repo at deploy time.
+`radius-wallet`, `a2a-comms`, and `registering-agent` are template-owned. Additional Radius marketplace skills are sourced from the vendored upstream Radius skills repo at deploy time and retain their upstream names.
 
 ### Radius wallet and funding
 
@@ -106,6 +106,14 @@ The bundled public Radius-facing skills are installed both as normal flat skills
 - *"Send a task to https://<other-agent>/a2a asking it to introduce itself."*
 - *"Use the outbound A2A tool to ask the peer agent what skills it has."*
 - *"Continue the existing A2A conversation with the peer agent and ask for a status update."*
+
+### ERC-8004 registration workflows
+
+- *"Show me the current ERC-8004 registry stats on Radius testnet."*
+- *"Read the registration for agent 0 on Radius testnet."*
+- *"List all registered agents on Radius testnet."*
+- *"Register this agent on ERC-8004 using the current wallet and DID."*
+- *"Update agent 2's ERC-8004 registration with a new DID and services map."*
 
 ### Payments between agents
 
@@ -258,6 +266,56 @@ This template includes a built-in Radius Testnet wallet. On first boot, the entr
 
 The agent can then check balances, send SBC tokens, and show explorer links — all via natural language in chat.
 
+## ERC-8004 registry tools
+
+This template now includes a bundled `erc8004-registry` plugin plus a lightweight `registering-agent` skill.
+
+Use this interface for ERC-8004 work instead of temporary scripts. The plugin exposes deterministic tools for:
+
+- reading one registration
+- listing live registrations from the registry contract
+- inspecting registry stats
+- registering the current agent from defaults
+- registering a new agent
+- updating an existing agent URI
+
+The plugin ships with checked-in Radius network constants for `testnet` and `mainnet`. `testnet` is enabled now and uses the deployed registry at `0x5cd923Ce1244d5498Bf3f9E0F3a374C2567F1A31` on chain `72344`.
+
+The canonical registration shape used by both the plugin and `/.well-known/agent-registration.json` is:
+
+```json
+{
+  "type": "https://eips.ethereum.org/EIPS/eip-8004#registration-v1",
+  "name": "Hermes Agent",
+  "description": "A natural language description of the agent",
+  "image": "https://example.com/agent.png",
+  "services": [
+    {
+      "name": "web",
+      "endpoint": "https://agent.example/"
+    },
+    {
+      "name": "A2A",
+      "endpoint": "https://agent.example/.well-known/agent-card.json",
+      "version": "0.3.0"
+    },
+    {
+      "name": "DID",
+      "endpoint": "did:web:agent.example",
+      "version": "v1"
+    }
+  ],
+  "x402Support": false,
+  "active": true,
+  "registrations": [],
+  "supportedTrust": ["reputation"]
+}
+```
+
+The plugin normalizes this JSON and encodes it as a `data:application/json;base64,...` URI before submitting the transaction.
+
+For the common case, use `erc8004_register_self` instead of hand-constructing a full `registration` object. It derives `web`, `A2A`, and `DID` service entries from the current agent runtime, but it expects operator-owned metadata like `name`, `description`, `image`, and `supportedTrust` to be supplied either as tool params or env vars. Read tools also return both the raw `token_uri` and `normalized_token_uri` so quoted contract responses are easier to debug.
+
 ### Radius variables (all optional)
 
 | Variable | Description |
@@ -375,22 +433,21 @@ References:
 |---|---|---|---|
 | `/.well-known/did.json` | Public | [W3C DID](https://www.w3.org/TR/did-core/) | DID document for this agent's `did:web` identity — public key, verification methods |
 | `/.well-known/agent-card.json` | Public | [A2A](https://github.com/a2aproject/A2A) | A2A agent card — identity, skills, supported interfaces, auth scheme |
-| `/.well-known/agent-registration.json` | Public | [ERC 8004](https://eips.ethereum.org/EIPS/eip-8004) | On-chain identity, wallet address, supported services |
+| `/.well-known/agent-registration.json` | Public | [ERC 8004](https://eips.ethereum.org/EIPS/eip-8004) | ERC-8004 self-registration profile and advertised services |
 | `/.well-known/agent-skills/index.json` | Public | [Cloudflare Agent Skills Discovery RFC](https://github.com/cloudflare/agent-skills-discovery-rfc) | Index of published skills with digests and URLs |
 | `/.well-known/agent-skills/:name/SKILL.md` | Public | Cloudflare Agent Skills Discovery RFC | Individual skill document |
 
 **`agent-card.json`** is the A2A discovery document. Other agents fetch it to learn how to authenticate and what this agent can do. It includes the agent's `did:web` identity (derived from `RADIUS_PRIVATE_KEY`), the `POST /a2a` interface, and the `bearer_jwt` security scheme. Skills are pulled live from the skill discovery index.
 
-**`agent-registration.json`** advertises this agent's on-chain identity per ERC 8004. It includes the wallet address derived from `RADIUS_WALLET_ADDRESS`, the agent's `did:web`, x402 payment support, Radius network RPC endpoints, and faucet URLs. Customize the agent name with `AGENT_NAME`.
+**`agent-registration.json`** advertises this agent's ERC-8004 self-registration profile. It follows the `registration-v1` schema, derives `web`, `A2A`, and `DID` services from the running agent, and returns `503` with missing-field guidance until required operator metadata such as `AGENT_NAME`, `AGENT_DESCRIPTION`, `AGENT_IMAGE`, and `AGENT_SUPPORTED_TRUST` is configured.
 
 **`agent-skills/index.json`** lets other agents and tools enumerate what this agent can do. Each entry includes the skill name, description, a URL to fetch the full skill document, and a SHA-256 content digest so consumers can detect updates.
 
-In this template, the bundled published Radius-facing skills are also installed into the Hermes catalog-style `radius` bucket under `${HERMES_HOME}/skills/radius/...` so UIs that group by skill path can show them together:
+In this template, the template-owned Radius-facing skills are installed into the Hermes catalog-style `radius` bucket under `${HERMES_HOME}/skills/radius/...`. Vendored marketplace skills are discovered through Hermes `skills.external_dirs` using their upstream names:
 
 - `radius-wallet`
-- `radius-dev`
-- `dripping-faucet`
 - `a2a-comms`
+- `registering-agent`
 
 ### Publishing a skill
 
@@ -415,7 +472,23 @@ Skills without `published: true` are installed into Hermes for the agent's own u
 |---|---|
 | `AGENT_NAME` | Display name across all discovery endpoints. Defaults to `Hermes Agent`. |
 | `AGENT_DESCRIPTION` | One-line description published in `agent-card.json`. |
-| `DEBUG_SKILLS=1` | Enables a `/debug/skills` endpoint showing the server's runtime state. Off by default. |
+| `AGENT_IMAGE` | Required for ERC-8004 self-registration and `agent-registration.json`. Public image URL. |
+| `AGENT_SUPPORTED_TRUST` | Required for ERC-8004 self-registration when not passed directly. Comma-separated trust modes such as `reputation,crypto-economic`. |
+| `AGENT_X402_SUPPORT` | Optional ERC-8004 x402 support flag. Defaults to `false`. |
+| `AGENT_ACTIVE` | Optional ERC-8004 active flag. Defaults to `true`. |
+| `AGENT_EMAIL` | Optional email service endpoint advertised in ERC-8004 registration. |
+| `AGENT_ENS` | Optional ENS name advertised in ERC-8004 registration. |
+| `AGENT_A2A_VERSION` | Optional A2A version string for ERC-8004 registration. Defaults to `0.3.0`. |
+| `AGENT_MCP_ENDPOINT` | Optional MCP service endpoint advertised in ERC-8004 registration. |
+| `AGENT_MCP_VERSION` | Optional MCP version string. |
+| `AGENT_OASF_ENDPOINT` | Optional OASF service endpoint. |
+| `AGENT_OASF_VERSION` | Optional OASF version string. |
+| `AGENT_OASF_SKILLS` | Optional comma-separated OASF skills list. |
+| `AGENT_OASF_DOMAINS` | Optional comma-separated OASF domains list. |
+| `DEBUG_SKILLS=1` | Enables a gated `/debug/skills` endpoint showing config external dirs, vendored skill scans, local skills, and the public index. Off by default. |
+| `EXPECTED_VENDORED_SKILLS` | Optional comma-separated list of upstream vendored skill names expected in the image. Logs a warning if any are missing. |
+| `STRICT_VENDORED_SKILLS` | When `true`, fail boot if any `EXPECTED_VENDORED_SKILLS` are missing. Defaults to `false`. |
+| `VENDORED_SKILLS_SOURCE` | Optional override for the vendored Radius skills repo root. Defaults to `/app/vendor/radius-skills`. |
 
 ## Agent-to-agent (A2A) communication
 
@@ -528,6 +601,37 @@ Example:
 send_a2a_message({"agent":"https://other-agent.example","task":"Run this analysis"})
 ```
 
+For long-running conversations, `send_a2a_message` also accepts optional managed-session fields:
+
+```text
+send_a2a_message({
+  "agent":"https://other-agent.example",
+  "task":"Start the design review",
+  "goal":"Iterate on the architecture until the proposal is complete",
+  "auto_continue":true,
+  "max_turns":200
+})
+```
+
+When `auto_continue` is enabled, the local agent server persists an A2A session under `${HERMES_HOME}/a2a-sessions`, tracks the shared `context_id`, records inbound/outbound turns, and can keep generating the next local turn automatically instead of treating the exchange as one-shot.
+When the same host thread keeps talking to the same remote agent, the outbound helper now reuses the active managed session by default instead of creating a fresh `session_id` on every turn.
+
+Each managed session now also stores Telegram/Discord-ready per-turn cards in its session JSON and internal session API payloads:
+
+```json
+{
+  "latest_card": {
+    "title": "Turn 4/10 • Peer Agent",
+    "body": "Use a manual oracle first so pricing stays deterministic during testing.",
+    "footer": "Preparing next turn • Context 93f062e91",
+    "text": "Turn 4/10 • Peer Agent\n\nUse a manual oracle first so pricing stays deterministic during testing.\n\nPreparing next turn • Context 93f062e91"
+  }
+}
+```
+
+This renderer layer is intended for host-platform mirroring in Telegram or Discord so the user sees clean per-turn cards instead of a raw transcript dump.
+The outbound `send_a2a_message` tool also surfaces a `user_update` string plus the resolved `session` payload so host agents can reply with that polished text directly.
+
 **Direct mode (`A2A_MODE=direct`)**
 
 - `message/send` returns an inline completed result from Hermes.
@@ -544,6 +648,7 @@ send_a2a_message({"agent":"https://other-agent.example","task":"Run this analysi
 
 - Uses direct handling when `HERMES_API_KEY` is configured.
 - Falls back to delegated handling for `message/send` otherwise.
+- Managed A2A sessions work across both modes: direct replies can continue inline, while delegated peers can re-enter the same session by sending follow-up turns on the same `context_id`.
 
 ```bash
 curl -X POST https://your-agent.railway.app/a2a \
@@ -596,6 +701,7 @@ The caller's DID (from the JWT `iss` claim) is forwarded to Hermes in the webhoo
 | `HERMES_TIMEOUT` | Direct bridge timeout in seconds. Default: `120`. |
 | `A2A_PUBLIC_URL` | Optional URL used in attachment links. Defaults to service base URL. |
 | `A2A_FILE_SERVE_PATHS` | Optional comma-separated file roots allowed for `/files/{path}` serving. |
+| `A2A_SESSION_TICK_SECONDS` | Optional poll interval for the managed A2A session worker. Default: `2.5`. |
 
 #### Delegated webhook bridge
 
@@ -683,7 +789,7 @@ Any `.md` file you place in the `skills/` directory of this repo will be copied 
 
 The `radius-wallet.md` skill is already included and tells the agent to prefer the bundled Radius wallet tools, with script fallback where needed.
 
-Radius-maintained marketplace skills are also vendored from `https://github.com/radiustechsystems/skills` at image build time. They are installed into `${HERMES_HOME}/skills/` with their upstream directory structure preserved, and the template also creates flat `.md` aliases for compatibility with agents that expect top-level skill files.
+Radius-maintained marketplace skills are also vendored from `https://github.com/radiustechsystems/skills` at image build time. On boot, the template scans that vendored repo for every directory containing `SKILL.md`, derives the necessary `skills.external_dirs`, and exposes those skills to Hermes as read-only external skills without copying them into `${HERMES_HOME}/skills/`.
 
 The template also includes an opinionated ByteRover memory skill and project instructions. When ByteRover is enabled, the intended usage is:
 
@@ -751,7 +857,7 @@ hermes pairing list
 4. Creates `${HERMES_HOME}/config.yaml` if it doesn't exist.
 5. Initializes Radius wallet if not already done (generates key, calls faucet).
 6. Copies all local `skills/*.md` files to `${HERMES_HOME}/skills/` (overwrites on each boot).
-7. Copies vendored Radius marketplace skills from the `radiustechsystems/skills` repo into `${HERMES_HOME}/skills/`, preserving their upstream directory layout and creating flat `.md` aliases. The `radius-dev` and `dripping-faucet` skills are sourced from this vendored upstream copy.
+7. Scans the vendored `radiustechsystems/skills` repo for all upstream skill directories, writes a discovery manifest, registers the derived parent roots as Hermes `skills.external_dirs`, and optionally warns or fails if `EXPECTED_VENDORED_SKILLS` are missing.
 8. Copies bundled plugins from `plugins/*` to `${HERMES_HOME}/plugins/`.
 9. Enables the bundled `gen-jwt`, `a2a-send`, and `radius-cast` plugin toolsets so A2A auth, outbound A2A calls, and Radius wallet tools are available immediately.
 10. Links `HERMES.md`, `.hermes.md`, `AGENTS.md`, `README.md`, `skills/`, `plugins/`, and `scripts/` into `${MESSAGING_CWD}` so gateway sessions see the bundled project context immediately. The three context files are force-overwritten on each boot.
