@@ -56,6 +56,7 @@ COPY scripts/skills-server /app/scripts/skills-server
 COPY --from=bun-builder /app/scripts/skills-server/node_modules /app/scripts/skills-server/node_modules
 
 COPY skills /app/skills
+COPY plugins /app/plugins
 
 ENTRYPOINT ["tini", "--"]
 CMD ["/app/scripts/entrypoint.sh"]

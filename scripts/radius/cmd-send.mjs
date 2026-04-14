@@ -1,0 +1,35 @@
+#!/usr/bin/env node
+import { isAddress } from 'viem';
+import { initializeWallets } from './wallet-manager.mjs';
+import { txExplorerUrl } from './radius-chain.mjs';
+
+const args = process.argv.slice(2);
+const walletArg = args.find((a) => a.startsWith('--wallet='));
+const assetArg = args.find((a) => a.startsWith('--asset='));
+const wallet = walletArg ? walletArg.split('=')[1] : undefined;
+const asset = (assetArg ? assetArg.split('=')[1] : 'sbc').toUpperCase();
+const positional = args.filter((a) => !a.startsWith('--wallet=') && !a.startsWith('--asset='));
+
+const [to, amount] = positional;
+if (!to || !amount) {
+  console.error('Usage: node cmd-send.mjs [--wallet=local|para] [--asset=sbc|rusd] <to_address> <amount>');
+  process.exit(1);
+}
+if (!isAddress(to)) {
+  console.error(`Invalid address: ${to}`);
+  process.exit(1);
+}
+
+const { manager } = await initializeWallets({ autoFund: false });
+const provider = manager.getProvider(wallet);
+const txHash = await provider.sendTransaction({ to, amountSbc: amount, asset });
+
+console.log(JSON.stringify({
+  wallet: provider.name,
+  asset,
+  from: await provider.getAddress(),
+  to,
+  amount,
+  tx_hash: txHash,
+  explorer: txExplorerUrl(txHash),
+}, null, 2));
