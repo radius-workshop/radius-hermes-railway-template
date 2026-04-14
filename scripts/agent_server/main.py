@@ -744,7 +744,14 @@ async def internal_a2a_session_outbound(request: Request, _: None = Depends(_int
     try:
         session = _a2a_session_store.create_or_update_outbound(payload if isinstance(payload, dict) else {})
     except ValueError as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        log_event(
+            logger,
+            logging.WARNING,
+            "Invalid outbound session payload",
+            event="a2a.session.register_outbound_invalid_payload",
+            error=str(exc),
+        )
+        return JSONResponse({"ok": False, "error": "invalid_request"}, status_code=400)
     log_event(
         logger,
         logging.INFO,
