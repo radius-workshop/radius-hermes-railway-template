@@ -266,6 +266,13 @@ This template includes a built-in Radius Testnet wallet. On first boot, the entr
 
 The agent can then check balances, send SBC tokens, and show explorer links — all via natural language in chat.
 
+The bundled wallet tools now support two wallet providers for wallet actions:
+
+- `local` — the default for every new session, backed by the persisted `RADIUS_PRIVATE_KEY`
+- `para` — an optional Para-backed operator wallet for session-scoped wallet actions
+
+This provider choice only affects wallet actions. The agent's public wallet identity, DID/JWT auth, homepage wallet summary, and ERC-8004 identity remain pinned to the local wallet.
+
 ## ERC-8004 registry tools
 
 This template now includes a bundled `erc8004-registry` plugin plus a lightweight `registering-agent` skill.
@@ -323,8 +330,30 @@ For the common case, use `erc8004_register_self` instead of hand-constructing a 
 | `RADIUS_PRIVATE_KEY` | BYO private key (`0x...`). Auto-generated if not set. |
 | `RADIUS_WALLET_ADDRESS` | Derived from key automatically. |
 | `RADIUS_AUTO_FUND` | Set to `false` to skip faucet on boot. Default: enabled. |
+| `PARA_API_KEY` | Optional Para server secret key for the alternate `para` wallet provider. |
+| `PARA_SECRET_API_KEY` | Optional alias for `PARA_API_KEY`. |
+| `PARA_ENVIRONMENT` | Optional Para environment. `beta` by default, or `prod` / `production`. |
+| `PARA_REST_BASE_URL` | Optional explicit Para REST base URL override. |
+| `PARA_WALLET_ID` | Optional Para wallet ID to pin the operator wallet if the project has multiple EVM wallets. |
 
 The wallet key is stored at `/data/.hermes/.radius/key` with permissions `600`. It persists across redeploys via the Railway volume.
+
+### Para wallet setup notes
+
+If you want to use the optional `para` wallet provider in this project, a Secret API key alone is not enough. The Para project also needs an existing operator-owned EVM wallet.
+
+Recommended setup:
+
+1. Set `PARA_API_KEY` or `PARA_SECRET_API_KEY` to your Para Secret API key.
+2. Create an EVM wallet in the Para project before trying to switch the session wallet provider to `para`.
+3. Use `scheme: "DKLS"` for this project's EVM wallet.
+4. If the Para project has multiple EVM wallets, also set `PARA_WALLET_ID` so the agent uses the intended operator wallet.
+
+Notes:
+
+- This project treats Para as a wallet provider for wallet actions only. It does not replace the agent's canonical local identity wallet.
+- `ED25519` is not the right choice for this EVM wallet flow.
+- If no EVM wallet exists in the Para project, the agent will hard-error when a session tries to switch to `para`.
 
 ### Wallet commands (via chat)
 
@@ -334,8 +363,19 @@ Once deployed, you can ask the agent:
 - *"Check my balance"*
 - *"Send 10 SBC to 0x..."*
 - *"Get testnet tokens"*
+- *"Use Para wallet for this session"*
+- *"Switch back to local wallet"*
+- *"What is my local wallet address?"*
+- *"What is my Para wallet address?"*
 
 The preferred interface is the bundled `radius-cast` plugin tools. The underlying wallet bootstrap and fallback scripts live under `/app/scripts/radius/`.
+
+The wallet tool behavior is:
+
+- Every new session defaults to `local`.
+- If the user explicitly switches the session to `para`, wallet actions default to the Para wallet for the rest of that session.
+- Users can still override per request by explicitly asking for the `local` or `para` wallet.
+- If `para` is requested but not configured, the agent returns a hard error instead of silently falling back.
 
 ## Linear integration
 
