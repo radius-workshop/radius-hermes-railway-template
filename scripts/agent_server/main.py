@@ -3,6 +3,7 @@
 Agent Server — A2A HTTP gateway and agent discovery endpoints.
 """
 import asyncio
+import base64
 import fcntl
 import hashlib
 import html
@@ -584,9 +585,9 @@ def _write_vendored_manifest(source: Path) -> dict[str, Any]:
 
 def _refresh_well_known_skills(manifest: dict[str, Any]) -> None:
     well_known_root = Path(SKILLS_ROOT)
-    if well_known_root.exists():
-        shutil.rmtree(well_known_root)
-    well_known_root.mkdir(parents=True, exist_ok=True)
+    staging_root = well_known_root.parent / f".well-known-skills-staging-{uuid.uuid4().hex[:8]}"
+    backup_root = well_known_root.parent / f".well-known-skills-backup-{uuid.uuid4().hex[:8]}"
+    staging_root.mkdir(parents=True, exist_ok=True)
 
     bundled = Path("/app/skills")
     if bundled.exists():
@@ -597,7 +598,7 @@ def _refresh_well_known_skills(manifest: dict[str, Any]) -> None:
             if not _is_published(raw):
                 continue
             skill_name = skill_file.stem
-            target = well_known_root / skill_name / "SKILL.md"
+            target = staging_root / skill_name / "SKILL.md"
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(skill_file, target)
 
@@ -606,9 +607,15 @@ def _refresh_well_known_skills(manifest: dict[str, Any]) -> None:
             continue
         skill_name = skill["name"]
         source_skill = Path(skill["path"]) / "SKILL.md"
-        target = well_known_root / skill_name / "SKILL.md"
+        target = staging_root / skill_name / "SKILL.md"
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_skill, target)
+
+    if well_known_root.exists():
+        well_known_root.rename(backup_root)
+    staging_root.rename(well_known_root)
+    if backup_root.exists():
+        shutil.rmtree(backup_root, ignore_errors=True)
 
 
 def _load_vendored_manifest() -> dict[str, Any]:
@@ -710,8 +717,33 @@ def _invalidate_skills_cache() -> None:
     _cache_built_at = 0
 
 
+def _git_auth_env() -> dict[str, str]:
+    if not RADIUS_SKILLS_GITHUB_TOKEN:
+        return {}
+    auth_value = base64.b64encode(f"x-access-token:{RADIUS_SKILLS_GITHUB_TOKEN}".encode("utf-8")).decode("ascii")
+    return {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+        "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {auth_value}",
+    }
+
+
+def _sanitize_error_message(raw: str) -> str:
+    return re.sub(r"https://[^:@/\s]+:[^@/\s]+@", "https://***:***@", raw or "")
+
+
 def _run_git(cmd: list[str], timeout_seconds: int) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds, check=True)
+    env = os.environ.copy()
+    env.update(_git_auth_env())
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds, check=True, env=env)
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or "").strip()
+        stdout = (exc.stdout or "").strip()
+        detail = stderr or stdout or exc.__class__.__name__
+        raise RuntimeError(_sanitize_error_message(detail)) from None
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("git command timed out") from None
 
 
 def _sync_radius_skills_repo(after_sha: str) -> None:
@@ -720,8 +752,6 @@ def _sync_radius_skills_repo(after_sha: str) -> None:
     RADIUS_SKILLS_STAGING_ROOT.mkdir(parents=True, exist_ok=True)
 
     clone_url = f"https://github.com/{RADIUS_SKILLS_REPO}.git"
-    if RADIUS_SKILLS_GITHUB_TOKEN:
-        clone_url = f"https://x-access-token:{RADIUS_SKILLS_GITHUB_TOKEN}@github.com/{RADIUS_SKILLS_REPO}.git"
 
     if not (repo_dir / ".git").exists():
         staging = RADIUS_SKILLS_STAGING_ROOT / f"clone-{int(time.time())}-{uuid.uuid4().hex[:8]}"
@@ -778,10 +808,11 @@ def _sync_radius_skills_stateful(after_sha: str, before_sha: str | None, deliver
                 }
             )
         except Exception as exc:
+            error_message = _sanitize_error_message(str(exc))
             return _save_radius_skills_state(
                 {
                     "sync_in_progress": False,
-                    "last_error": str(exc),
+                    "last_error": error_message,
                 }
             )
         finally:
@@ -964,6 +995,7 @@ async def debug_skills(auth: dict = Depends(jwt_auth_dep)):
 @app.get("/internal/skills/status")
 async def internal_skills_status(_: None = Depends(_internal_auth_dep)):
     state = _load_radius_skills_state()
+    redacted_error = _sanitize_error_message(str(state.get("last_error") or "")) or None
     return JSONResponse(
         {
             "enabled": RADIUS_SKILLS_AUTO_UPDATE,
@@ -973,7 +1005,7 @@ async def internal_skills_status(_: None = Depends(_internal_auth_dep)):
             "active_commit": state.get("active_commit"),
             "last_successful_sync_at": state.get("last_successful_sync_at"),
             "sync_in_progress": bool(state.get("sync_in_progress")),
-            "last_error": state.get("last_error"),
+            "last_error": redacted_error,
         },
         headers={"Cache-Control": "no-store"},
     )
