@@ -210,7 +210,14 @@ def _client_ip(request: Request) -> str | None:
 
 def _is_observable_path(path: str) -> bool:
     return (
-        path in {"/a2a", "/token", "/health"}
+        path in {
+            "/a2a",
+            "/token",
+            "/health",
+            "/webhooks/github/radius-skills",
+            "/internal/skills/status",
+            "/internal/skills/sync",
+        }
         or path.startswith("/files/")
         or path.startswith("/internal/a2a/")
     )
@@ -560,7 +567,9 @@ def _is_true(value: str | None) -> bool:
 
 RADIUS_SKILLS_AUTO_UPDATE = _is_true(os.environ.get("RADIUS_SKILLS_AUTO_UPDATE", "false"))
 RADIUS_SKILLS_REPO = os.environ.get("RADIUS_SKILLS_REPO", "radiustechsystems/skills")
-RADIUS_SKILLS_BRANCH = os.environ.get("RADIUS_SKILLS_BRANCH", "main")
+RADIUS_SKILLS_BRANCH = str(os.environ.get("RADIUS_SKILLS_BRANCH", "main") or "").strip()
+if RADIUS_SKILLS_BRANCH in {"*", "any"}:
+    RADIUS_SKILLS_BRANCH = ""
 RADIUS_SKILLS_WEBHOOK_SECRET = os.environ.get("RADIUS_SKILLS_WEBHOOK_SECRET", "")
 RADIUS_SKILLS_GITHUB_TOKEN = os.environ.get("RADIUS_SKILLS_GITHUB_TOKEN", "")
 RADIUS_SKILLS_SYNC_TIMEOUT_SECONDS = int(os.environ.get("RADIUS_SKILLS_SYNC_TIMEOUT_SECONDS", "90"))
@@ -582,29 +591,54 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _normalize_git_branch_name(ref: str | None) -> str | None:
+    value = str(ref or "").strip()
+    if not value:
+        return None
+    if value.startswith("refs/heads/"):
+        branch = value[len("refs/heads/") :].strip()
+        return branch or None
+    return value
+
+
+def _expected_radius_skills_ref() -> str | None:
+    if not RADIUS_SKILLS_BRANCH:
+        return None
+    return f"refs/heads/{RADIUS_SKILLS_BRANCH}"
+
+
+def _default_radius_skills_state(last_error: Any = None) -> dict[str, Any]:
+    return {
+        "active_commit": None,
+        "active_ref": None,
+        "last_successful_sync_at": None,
+        "last_completed_sync_at": None,
+        "last_sync_started_at": None,
+        "last_delivery_id": None,
+        "last_seen_ref": None,
+        "last_seen_before": None,
+        "last_seen_after": None,
+        "last_sync_result": None,
+        "last_sync_trigger": None,
+        "last_manifest_roots": [],
+        "last_manifest_skill_count": 0,
+        "last_published_skill_count": 0,
+        "sync_in_progress": False,
+        "last_error": last_error,
+    }
+
+
 def _load_radius_skills_state() -> dict[str, Any]:
     if not RADIUS_SKILLS_STATE_PATH.exists():
-        return {
-            "active_commit": None,
-            "last_successful_sync_at": None,
-            "last_delivery_id": None,
-            "last_seen_before": None,
-            "last_seen_after": None,
-            "sync_in_progress": False,
-            "last_error": None,
-        }
+        return _default_radius_skills_state()
     try:
-        return json.loads(RADIUS_SKILLS_STATE_PATH.read_text(encoding="utf-8"))
+        loaded = json.loads(RADIUS_SKILLS_STATE_PATH.read_text(encoding="utf-8"))
+        state = _default_radius_skills_state()
+        if isinstance(loaded, dict):
+            state.update(loaded)
+        return state
     except Exception:
-        return {
-            "active_commit": None,
-            "last_successful_sync_at": None,
-            "last_delivery_id": None,
-            "last_seen_before": None,
-            "last_seen_after": None,
-            "sync_in_progress": False,
-            "last_error": "state_unreadable",
-        }
+        return _default_radius_skills_state(last_error="state_unreadable")
 
 
 def _save_radius_skills_state(patch: dict[str, Any]) -> dict[str, Any]:
@@ -864,7 +898,7 @@ def _run_git(cmd: list[str], timeout_seconds: int) -> subprocess.CompletedProces
         raise RuntimeError("git command timed out") from None
 
 
-def _sync_radius_skills_repo(after_sha: str) -> None:
+def _sync_radius_skills_repo(after_sha: str, branch_name: str) -> None:
     repo_dir = Path(RADIUS_SKILLS_DIR)
     repo_dir.parent.mkdir(parents=True, exist_ok=True)
     RADIUS_SKILLS_STAGING_ROOT.mkdir(parents=True, exist_ok=True)
@@ -872,55 +906,157 @@ def _sync_radius_skills_repo(after_sha: str) -> None:
     clone_url = f"https://github.com/{RADIUS_SKILLS_REPO}.git"
 
     if not (repo_dir / ".git").exists():
+        log_event(
+            logger,
+            logging.INFO,
+            "Radius skills repo not present; cloning repository",
+            event="skills.sync.repo.clone",
+            repo=RADIUS_SKILLS_REPO,
+            branch=branch_name,
+            after=after_sha,
+            repo_dir=str(repo_dir),
+        )
         staging = RADIUS_SKILLS_STAGING_ROOT / f"clone-{int(time.time())}-{uuid.uuid4().hex[:8]}"
-        _run_git(["git", "clone", "--branch", RADIUS_SKILLS_BRANCH, "--single-branch", clone_url, str(staging)], RADIUS_SKILLS_SYNC_TIMEOUT_SECONDS)
+        _run_git(["git", "clone", "--branch", branch_name, "--single-branch", clone_url, str(staging)], RADIUS_SKILLS_SYNC_TIMEOUT_SECONDS)
         _run_git(["git", "-C", str(staging), "checkout", after_sha], RADIUS_SKILLS_SYNC_TIMEOUT_SECONDS)
         if repo_dir.exists():
             shutil.rmtree(repo_dir)
         shutil.move(str(staging), str(repo_dir))
         return
 
-    _run_git(["git", "-C", str(repo_dir), "fetch", "origin", RADIUS_SKILLS_BRANCH], RADIUS_SKILLS_SYNC_TIMEOUT_SECONDS)
-    _run_git(["git", "-C", str(repo_dir), "checkout", RADIUS_SKILLS_BRANCH], RADIUS_SKILLS_SYNC_TIMEOUT_SECONDS)
+    log_event(
+        logger,
+        logging.INFO,
+        "Updating managed Radius skills repository",
+        event="skills.sync.repo.update",
+        repo=RADIUS_SKILLS_REPO,
+        branch=branch_name,
+        after=after_sha,
+        repo_dir=str(repo_dir),
+    )
+    _run_git(
+        [
+            "git",
+            "-C",
+            str(repo_dir),
+            "fetch",
+            "origin",
+            f"refs/heads/{branch_name}:refs/remotes/origin/{branch_name}",
+        ],
+        RADIUS_SKILLS_SYNC_TIMEOUT_SECONDS,
+    )
+    _run_git(
+        [
+            "git",
+            "-C",
+            str(repo_dir),
+            "checkout",
+            "-B",
+            branch_name,
+            f"refs/remotes/origin/{branch_name}",
+        ],
+        RADIUS_SKILLS_SYNC_TIMEOUT_SECONDS,
+    )
     _run_git(["git", "-C", str(repo_dir), "reset", "--hard", after_sha], RADIUS_SKILLS_SYNC_TIMEOUT_SECONDS)
 
 
-def _sync_radius_skills_stateful(after_sha: str, before_sha: str | None, delivery_id: str | None) -> dict[str, Any]:
+def _sync_radius_skills_stateful(
+    after_sha: str,
+    before_sha: str | None,
+    delivery_id: str | None,
+    ref: str | None = None,
+) -> dict[str, Any]:
     RADIUS_SKILLS_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     with RADIUS_SKILLS_LOCK_PATH.open("a+", encoding="utf-8") as lock_fp:
         fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX)
+        branch_name = _normalize_git_branch_name(ref) or RADIUS_SKILLS_BRANCH or "main"
 
         state = _load_radius_skills_state()
-        if state.get("active_commit") == after_sha:
+        if state.get("active_commit") == after_sha and state.get("active_ref") == ref:
             return _save_radius_skills_state(
                 {
+                    "active_ref": ref,
                     "last_delivery_id": delivery_id,
+                    "last_seen_ref": ref,
                     "last_seen_before": before_sha,
                     "last_seen_after": after_sha,
+                    "last_completed_sync_at": _now_iso(),
+                    "last_sync_result": "already_current",
+                    "last_sync_trigger": "github_webhook" if delivery_id and delivery_id != "manual" else "manual",
                     "sync_in_progress": False,
                 }
             )
 
         _save_radius_skills_state(
             {
+                "last_sync_started_at": _now_iso(),
                 "sync_in_progress": True,
                 "last_error": None,
                 "last_delivery_id": delivery_id,
+                "last_seen_ref": ref,
                 "last_seen_before": before_sha,
                 "last_seen_after": after_sha,
+                "last_sync_result": "in_progress",
+                "last_sync_trigger": "github_webhook" if delivery_id and delivery_id != "manual" else "manual",
             }
         )
 
         try:
-            _sync_radius_skills_repo(after_sha)
+            log_event(
+                logger,
+                logging.INFO,
+                "Radius skills sync started",
+                event="skills.sync.started",
+                repo=RADIUS_SKILLS_REPO,
+                branch=branch_name,
+                ref=ref,
+                before=before_sha,
+                after=after_sha,
+                delivery_id=delivery_id,
+            )
+            _sync_radius_skills_repo(after_sha, branch_name)
+            log_event(
+                logger,
+                logging.INFO,
+                "Radius skills repository updated; validating skill metadata",
+                event="skills.sync.validating",
+                repo=RADIUS_SKILLS_REPO,
+                branch=branch_name,
+                ref=ref,
+                after=after_sha,
+                skills_dir=RADIUS_SKILLS_DIR,
+            )
             _validate_external_skills(Path(RADIUS_SKILLS_DIR))
             manifest = _write_vendored_manifest(Path(RADIUS_SKILLS_DIR))
+            published_skills = sum(
+                1 for skill in manifest.get("skills", []) if skill.get("published")
+            )
+            log_event(
+                logger,
+                logging.INFO,
+                "Radius skills manifest written",
+                event="skills.sync.manifest",
+                repo=RADIUS_SKILLS_REPO,
+                branch=branch_name,
+                ref=ref,
+                after=after_sha,
+                skill_count=len(manifest.get("skills", [])),
+                published_skill_count=published_skills,
+                roots=manifest.get("roots", []),
+                manifest_path=str(VENDORED_SKILLS_MANIFEST),
+            )
             _refresh_well_known_skills(manifest)
             _invalidate_skills_cache()
             return _save_radius_skills_state(
                 {
                     "active_commit": after_sha,
+                    "active_ref": ref,
                     "last_successful_sync_at": _now_iso(),
+                    "last_completed_sync_at": _now_iso(),
+                    "last_sync_result": "success",
+                    "last_manifest_roots": manifest.get("roots", []),
+                    "last_manifest_skill_count": len(manifest.get("skills", [])),
+                    "last_published_skill_count": published_skills,
                     "sync_in_progress": False,
                     "last_error": None,
                 }
@@ -929,7 +1065,9 @@ def _sync_radius_skills_stateful(after_sha: str, before_sha: str | None, deliver
             error_message = _sanitize_error_message(str(exc))
             return _save_radius_skills_state(
                 {
+                    "last_completed_sync_at": _now_iso(),
                     "sync_in_progress": False,
+                    "last_sync_result": "error",
                     "last_error": error_message,
                 }
             )
@@ -937,8 +1075,15 @@ def _sync_radius_skills_stateful(after_sha: str, before_sha: str | None, deliver
             fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
 
 
-async def _run_radius_sync_task(after_sha: str, before_sha: str | None = None, delivery_id: str | None = None) -> None:
-    result = await asyncio.to_thread(_sync_radius_skills_stateful, after_sha, before_sha, delivery_id)
+async def _run_radius_sync_task(
+    after_sha: str,
+    before_sha: str | None = None,
+    delivery_id: str | None = None,
+    ref: str | None = None,
+) -> None:
+    result = await asyncio.to_thread(
+        _sync_radius_skills_stateful, after_sha, before_sha, delivery_id, ref
+    )
     if result.get("last_error"):
         log_event(
             logger,
@@ -946,8 +1091,12 @@ async def _run_radius_sync_task(after_sha: str, before_sha: str | None = None, d
             "Radius skills sync failed",
             event="skills.sync",
             repo=RADIUS_SKILLS_REPO,
-            branch=RADIUS_SKILLS_BRANCH,
+            branch=_normalize_git_branch_name(result.get("last_seen_ref")) or RADIUS_SKILLS_BRANCH or "main",
+            ref=result.get("last_seen_ref"),
+            before=before_sha,
             after=after_sha,
+            delivery_id=delivery_id,
+            result=result.get("last_sync_result"),
             error=result.get("last_error"),
         )
     else:
@@ -957,9 +1106,15 @@ async def _run_radius_sync_task(after_sha: str, before_sha: str | None = None, d
             "Radius skills sync completed",
             event="skills.sync",
             repo=RADIUS_SKILLS_REPO,
-            branch=RADIUS_SKILLS_BRANCH,
+            branch=_normalize_git_branch_name(result.get("last_seen_ref")) or RADIUS_SKILLS_BRANCH or "main",
+            ref=result.get("last_seen_ref"),
+            before=before_sha,
             after=after_sha,
+            delivery_id=delivery_id,
+            result=result.get("last_sync_result"),
             active_commit=result.get("active_commit"),
+            skill_count=result.get("last_manifest_skill_count"),
+            published_skill_count=result.get("last_published_skill_count"),
         )
 
 
@@ -1152,10 +1307,22 @@ async def internal_skills_status(_: None = Depends(_internal_auth_dep)):
         {
             "enabled": RADIUS_SKILLS_AUTO_UPDATE,
             "repo": RADIUS_SKILLS_REPO,
-            "branch": RADIUS_SKILLS_BRANCH,
+            "branch": RADIUS_SKILLS_BRANCH or None,
             "skills_dir": RADIUS_SKILLS_DIR,
             "active_commit": state.get("active_commit"),
+            "active_ref": state.get("active_ref"),
             "last_successful_sync_at": state.get("last_successful_sync_at"),
+            "last_completed_sync_at": state.get("last_completed_sync_at"),
+            "last_sync_started_at": state.get("last_sync_started_at"),
+            "last_delivery_id": state.get("last_delivery_id"),
+            "last_seen_ref": state.get("last_seen_ref"),
+            "last_seen_before": state.get("last_seen_before"),
+            "last_seen_after": state.get("last_seen_after"),
+            "last_sync_result": state.get("last_sync_result"),
+            "last_sync_trigger": state.get("last_sync_trigger"),
+            "last_manifest_roots": state.get("last_manifest_roots") or [],
+            "last_manifest_skill_count": int(state.get("last_manifest_skill_count") or 0),
+            "last_published_skill_count": int(state.get("last_published_skill_count") or 0),
             "sync_in_progress": bool(state.get("sync_in_progress")),
             "last_error": redacted_error,
         },
@@ -1187,10 +1354,35 @@ async def internal_skills_sync(request: Request, _: None = Depends(_internal_aut
 async def radius_skills_webhook(request: Request):
     global _skills_sync_task
     if not RADIUS_SKILLS_AUTO_UPDATE:
+        log_event(
+            logger,
+            logging.WARNING,
+            "Radius skills webhook ignored because auto-update is disabled",
+            event="skills.webhook",
+            result="disabled",
+        )
         return JSONResponse({"ok": False, "error": "disabled"}, status_code=404)
     if not RADIUS_SKILLS_WEBHOOK_SECRET:
+        log_event(
+            logger,
+            logging.ERROR,
+            "Radius skills webhook rejected because no secret is configured",
+            event="skills.webhook",
+            result="secret_not_configured",
+        )
         return JSONResponse({"ok": False, "error": "secret_not_configured"}, status_code=503)
-    if request.headers.get("X-GitHub-Event") != "push":
+    event_name = request.headers.get("X-GitHub-Event")
+    delivery_id = request.headers.get("X-GitHub-Delivery")
+    if event_name != "push":
+        log_event(
+            logger,
+            logging.INFO,
+            "Radius skills webhook ignored because event is unsupported",
+            event="skills.webhook",
+            result="unsupported_event",
+            github_event=event_name,
+            delivery_id=delivery_id,
+        )
         return JSONResponse({"ok": False, "error": "unsupported_event"}, status_code=202)
 
     payload_bytes = await request.body()
@@ -1199,27 +1391,108 @@ async def radius_skills_webhook(request: Request):
         RADIUS_SKILLS_WEBHOOK_SECRET.encode("utf-8"), payload_bytes, hashlib.sha256
     ).hexdigest()
     if not hmac.compare_digest(signature, expected):
+        log_event(
+            logger,
+            logging.WARNING,
+            "Radius skills webhook rejected because signature verification failed",
+            event="skills.webhook",
+            result="invalid_signature",
+            github_event=event_name,
+            delivery_id=delivery_id,
+        )
         return JSONResponse({"ok": False, "error": "invalid_signature"}, status_code=403)
 
     try:
         payload = json.loads(payload_bytes.decode("utf-8"))
     except Exception:
+        log_event(
+            logger,
+            logging.WARNING,
+            "Radius skills webhook rejected because payload was invalid JSON",
+            event="skills.webhook",
+            result="invalid_json",
+            github_event=event_name,
+            delivery_id=delivery_id,
+        )
         return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
 
     repo_name = ((payload.get("repository") or {}).get("full_name") or "").strip()
     ref = str(payload.get("ref") or "").strip()
     before = str(payload.get("before") or "").strip() or None
     after = str(payload.get("after") or "").strip()
-    expected_ref = f"refs/heads/{RADIUS_SKILLS_BRANCH}"
+    expected_ref = _expected_radius_skills_ref()
+    is_branch_push = ref.startswith("refs/heads/")
 
-    if repo_name != RADIUS_SKILLS_REPO or ref != expected_ref:
+    if repo_name != RADIUS_SKILLS_REPO or not is_branch_push or (
+        expected_ref is not None and ref != expected_ref
+    ):
+        log_event(
+            logger,
+            logging.INFO,
+            "Radius skills webhook ignored because repository or branch did not match",
+            event="skills.webhook",
+            result="ignored",
+            github_event=event_name,
+            delivery_id=delivery_id,
+            repo=repo_name,
+            ref=ref,
+            expected_repo=RADIUS_SKILLS_REPO,
+            expected_ref=expected_ref,
+        )
         return JSONResponse({"ok": True, "ignored": True}, status_code=202)
     if not after:
+        log_event(
+            logger,
+            logging.WARNING,
+            "Radius skills webhook rejected because after SHA was missing",
+            event="skills.webhook",
+            result="missing_after_sha",
+            github_event=event_name,
+            delivery_id=delivery_id,
+            repo=repo_name,
+            ref=ref,
+        )
         return JSONResponse({"ok": False, "error": "missing_after_sha"}, status_code=400)
 
-    delivery_id = request.headers.get("X-GitHub-Delivery")
-    _skills_sync_task = asyncio.create_task(_run_radius_sync_task(after, before, delivery_id))
-    return JSONResponse({"ok": True, "queued": True, "after": after}, status_code=202)
+    _save_radius_skills_state(
+        {
+            "last_delivery_id": delivery_id,
+            "last_seen_ref": ref,
+            "last_seen_before": before,
+            "last_seen_after": after,
+            "last_sync_trigger": "github_webhook",
+        }
+    )
+    log_event(
+        logger,
+        logging.INFO,
+        "Radius skills webhook accepted and sync queued",
+        event="skills.webhook",
+        result="queued",
+        github_event=event_name,
+        delivery_id=delivery_id,
+        repo=repo_name,
+        ref=ref,
+        before=before,
+        after=after,
+    )
+    _skills_sync_task = asyncio.create_task(
+        _run_radius_sync_task(after, before, delivery_id, ref)
+    )
+    return JSONResponse(
+        {
+            "ok": True,
+            "queued": True,
+            "repo": repo_name,
+            "ref": ref,
+            "branch_mode": "any" if expected_ref is None else "pinned",
+            "before": before,
+            "after": after,
+            "delivery_id": delivery_id,
+            "status_path": "/internal/skills/status",
+        },
+        status_code=202,
+    )
 
 
 @app.post("/internal/a2a/sessions/outbound")

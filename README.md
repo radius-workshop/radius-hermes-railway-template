@@ -539,6 +539,17 @@ To enable webhook-driven updates for the managed Radius external directory:
    - `GET /internal/skills/status` (Bearer internal API key)
    - optional manual refresh: `POST /internal/skills/sync` with `{"after":"<commit-sha>"}`.
 
+If `RADIUS_SKILLS_BRANCH` is omitted, empty, `*`, or `any`, the webhook accepts pushes from any branch under `refs/heads/*` and syncs the pushed branch. If it is set to a concrete branch such as `main`, only that branch is accepted.
+
+The webhook itself returns `202 Accepted` because sync happens asynchronously after signature validation. A successful queue response now includes the target repo/ref/SHA plus `delivery_id`, `status_path`, and whether branch handling is `pinned` or `any`. Progress and outcome are emitted to Railway logs as structured events:
+
+- `skills.webhook` for accept/ignore/reject decisions
+- `skills.sync.started` when the background sync begins
+- `skills.sync.manifest` after validation and manifest generation
+- `skills.sync` for final success/error
+
+`GET /internal/skills/status` also exposes the latest delivery id, seen ref/SHAs, active ref, sync start/completion times, last result, manifest root list, and skill counts.
+
 The template also includes an opinionated ByteRover memory skill and project instructions. When ByteRover is enabled, the intended usage is:
 
 - organize memory by session date
