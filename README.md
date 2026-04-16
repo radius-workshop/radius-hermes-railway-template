@@ -518,7 +518,26 @@ Any `.md` file you place in the `skills/` directory of this repo will be copied 
 
 The `radius-wallet.md` skill is already included and tells the agent to prefer the bundled Radius wallet tools, with script fallback where needed.
 
-Radius-maintained marketplace skills are also vendored from `https://github.com/radiustechsystems/skills` at image build time. On boot, the template scans that vendored repo for every directory containing `SKILL.md`, derives the necessary `skills.external_dirs`, and exposes those skills to Hermes as read-only external skills without copying them into `${HERMES_HOME}/skills/`.
+Radius-maintained marketplace skills are seeded from `https://github.com/radiustechsystems/skills` at image build time, then managed at runtime as one persistent Hermes external directory (`RADIUS_SKILLS_DIR`, default `/data/.hermes/external-skills/radius-skills`). On boot, the template scans that directory for every `SKILL.md`, derives `skills.external_dirs`, and exposes those skills to Hermes as read-only external skills without copying them into `${HERMES_HOME}/skills/`.
+
+### Auto-updating Radius external skills
+
+Hermes local skills remain primary at `${HERMES_HOME}/skills` and are still editable by Hermes. Radius marketplace skills stay external and read-only from Hermes' perspective via `skills.external_dirs`; if a local and external skill share the same name, local wins.
+
+To enable webhook-driven updates for the managed Radius external directory:
+
+1. Set:
+   - `RADIUS_SKILLS_AUTO_UPDATE=true`
+   - `RADIUS_SKILLS_WEBHOOK_SECRET=<shared-secret>`
+   - optional: `RADIUS_SKILLS_REPO`, `RADIUS_SKILLS_BRANCH`, `RADIUS_SKILLS_GITHUB_TOKEN`
+2. Configure a GitHub webhook on the source repo:
+   - URL: `https://<your-agent-domain>/webhooks/github/radius-skills`
+   - Event: **Push**
+   - Content type: `application/json`
+   - Secret: same value as `RADIUS_SKILLS_WEBHOOK_SECRET`
+3. Use internal observability endpoints:
+   - `GET /internal/skills/status` (Bearer internal API key)
+   - optional manual refresh: `POST /internal/skills/sync` with `{"after":"<commit-sha>"}`.
 
 The template also includes an opinionated ByteRover memory skill and project instructions. When ByteRover is enabled, the intended usage is:
 
@@ -586,7 +605,7 @@ hermes pairing list
 4. Creates `${HERMES_HOME}/config.yaml` if it doesn't exist.
 5. Initializes Radius wallet if not already done (generates key, calls faucet).
 6. Copies all local `skills/*.md` files to `${HERMES_HOME}/skills/` (overwrites on each boot).
-7. Scans the vendored `radiustechsystems/skills` repo for all upstream skill directories, writes a discovery manifest, registers the derived parent roots as Hermes `skills.external_dirs`, and optionally warns or fails if `EXPECTED_VENDORED_SKILLS` are missing.
+7. Ensures the managed Radius external directory exists on persistent storage (`RADIUS_SKILLS_DIR`), bootstraps it from `/app/vendor/radius-skills` when empty (optional), scans all upstream skill directories, writes a discovery manifest, registers the derived parent roots as Hermes `skills.external_dirs`, and optionally warns or fails if `EXPECTED_VENDORED_SKILLS` are missing.
 8. Copies bundled plugins from `plugins/*` to `${HERMES_HOME}/plugins/`.
 9. Enables the bundled `gen-jwt`, `a2a-send`, and `radius-cast` plugin toolsets so A2A auth, outbound A2A calls, and Radius wallet tools are available immediately.
 10. Links `HERMES.md`, `.hermes.md`, `AGENTS.md`, `README.md`, `skills/`, `plugins/`, and `scripts/` into `${MESSAGING_CWD}` so gateway sessions see the bundled project context immediately. The three context files are force-overwritten on each boot.

@@ -208,6 +208,7 @@ for key in \
   PARA_API_KEY PARA_SECRET_API_KEY PARA_ENVIRONMENT PARA_REST_BASE_URL PARA_WALLET_ID \
   WEBHOOK_PORT WEBHOOK_SECRET DEBUG_SKILLS \
   EXPECTED_VENDORED_SKILLS STRICT_VENDORED_SKILLS VENDORED_SKILLS_SOURCE \
+  RADIUS_SKILLS_AUTO_UPDATE RADIUS_SKILLS_REPO RADIUS_SKILLS_BRANCH RADIUS_SKILLS_WEBHOOK_SECRET RADIUS_SKILLS_GITHUB_TOKEN RADIUS_SKILLS_DIR RADIUS_SKILLS_SYNC_TIMEOUT_SECONDS RADIUS_SKILLS_BOOTSTRAP_FROM_IMAGE \
   HERMES_API_KEY HERMES_URL A2A_BRIDGE_MODEL HERMES_TIMEOUT A2A_MODE A2A_PUBLIC_URL A2A_FILE_SERVE_PATHS
 do
   append_if_set "$key"
@@ -396,8 +397,23 @@ if 'all' not in toolsets:
 PYEOF
 fi
 
-# === vendored skills: discover upstream skill directories dynamically ===
-VENDORED_SKILLS_SOURCE="${VENDORED_SKILLS_SOURCE:-/app/vendor/radius-skills}"
+# === vendored skills: persist Radius external directory and discover skill roots ===
+RADIUS_SKILLS_DIR="${RADIUS_SKILLS_DIR:-/data/.hermes/external-skills/radius-skills}"
+RADIUS_SKILLS_BOOTSTRAP_FROM_IMAGE="${RADIUS_SKILLS_BOOTSTRAP_FROM_IMAGE:-true}"
+mkdir -p "$(dirname "${RADIUS_SKILLS_DIR}")"
+
+if [[ ! -f "${RADIUS_SKILLS_DIR}/.git/HEAD" ]]; then
+  if is_true "${RADIUS_SKILLS_BOOTSTRAP_FROM_IMAGE}" && [[ -d "/app/vendor/radius-skills" ]]; then
+    echo "[bootstrap] Bootstrapping Radius external skills from image snapshot into ${RADIUS_SKILLS_DIR}..."
+    rm -rf "${RADIUS_SKILLS_DIR}"
+    cp -a /app/vendor/radius-skills "${RADIUS_SKILLS_DIR}"
+  else
+    echo "[bootstrap] Radius external skills directory missing and bootstrap disabled; creating empty directory at ${RADIUS_SKILLS_DIR}."
+    mkdir -p "${RADIUS_SKILLS_DIR}"
+  fi
+fi
+
+VENDORED_SKILLS_SOURCE="${VENDORED_SKILLS_SOURCE:-${RADIUS_SKILLS_DIR}}"
 VENDORED_SKILLS_MANIFEST="${HERMES_HOME}/vendored-skills.json"
 export VENDORED_SKILLS_SOURCE VENDORED_SKILLS_MANIFEST
 
@@ -479,6 +495,7 @@ cfg_file = os.environ['HERMES_HOME'] + '/config.yaml'
 manifest = json.loads(Path(os.environ["VENDORED_SKILLS_MANIFEST"]).read_text(encoding="utf-8"))
 roots = manifest.get("roots", [])
 vendored_source = os.environ["VENDORED_SKILLS_SOURCE"]
+legacy_vendored_source = "/app/vendor/radius-skills"
 
 try:
     with open(cfg_file) as f:
@@ -488,7 +505,11 @@ except Exception:
 
 skills_cfg = cfg.get('skills') or {}
 external_dirs = skills_cfg.get('external_dirs') or []
-filtered = [path for path in external_dirs if not str(path).startswith(vendored_source)]
+filtered = [
+    path
+    for path in external_dirs
+    if not str(path).startswith(vendored_source) and not str(path).startswith(legacy_vendored_source)
+]
 merged = filtered[:]
 for root in roots:
     if root not in merged:

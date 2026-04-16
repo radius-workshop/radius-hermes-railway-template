@@ -4,6 +4,8 @@ Agent Server — A2A HTTP gateway and agent discovery endpoints.
 """
 
 import asyncio
+import base64
+import fcntl
 import hashlib
 import hmac
 import html
@@ -11,11 +13,13 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import unquote
@@ -74,9 +78,8 @@ _start_time = time.time()
 HERMES_HOME = os.environ.get("HERMES_HOME", "/data/.hermes")
 CONFIG_PATH = Path(HERMES_HOME) / "config.yaml"
 SKILLS_ROOT = os.environ.get("SKILLS_ROOT", "/data/.hermes/well-known-skills")
-VENDORED_SKILLS_SOURCE = os.environ.get(
-    "VENDORED_SKILLS_SOURCE", "/app/vendor/radius-skills"
-)
+RADIUS_SKILLS_DIR = os.environ.get("RADIUS_SKILLS_DIR", "/data/.hermes/external-skills/radius-skills")
+VENDORED_SKILLS_SOURCE = os.environ.get("VENDORED_SKILLS_SOURCE", RADIUS_SKILLS_DIR)
 VENDORED_SKILLS_MANIFEST = Path(
     os.environ.get("VENDORED_SKILLS_MANIFEST", f"{HERMES_HOME}/vendored-skills.json")
 )
@@ -555,6 +558,19 @@ def _is_true(value: str | None) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+RADIUS_SKILLS_AUTO_UPDATE = _is_true(os.environ.get("RADIUS_SKILLS_AUTO_UPDATE", "false"))
+RADIUS_SKILLS_REPO = os.environ.get("RADIUS_SKILLS_REPO", "radiustechsystems/skills")
+RADIUS_SKILLS_BRANCH = os.environ.get("RADIUS_SKILLS_BRANCH", "main")
+RADIUS_SKILLS_WEBHOOK_SECRET = os.environ.get("RADIUS_SKILLS_WEBHOOK_SECRET", "")
+RADIUS_SKILLS_GITHUB_TOKEN = os.environ.get("RADIUS_SKILLS_GITHUB_TOKEN", "")
+RADIUS_SKILLS_SYNC_TIMEOUT_SECONDS = int(os.environ.get("RADIUS_SKILLS_SYNC_TIMEOUT_SECONDS", "90"))
+RADIUS_SKILLS_STATE_PATH = Path(HERMES_HOME) / "external-skills" / ".radius-skills-state.json"
+RADIUS_SKILLS_LOCK_PATH = Path(HERMES_HOME) / "external-skills" / ".radius-skills-lock"
+RADIUS_SKILLS_STAGING_ROOT = Path(HERMES_HOME) / "external-skills" / ".radius-skills-staging"
+
+_skills_sync_task: Optional[asyncio.Task] = None
+
+
 def _read_config() -> dict[str, Any]:
     try:
         return yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
@@ -562,8 +578,58 @@ def _read_config() -> dict[str, Any]:
         return {}
 
 
-def _scan_vendored_skills() -> dict[str, Any]:
-    source = Path(VENDORED_SKILLS_SOURCE)
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _load_radius_skills_state() -> dict[str, Any]:
+    if not RADIUS_SKILLS_STATE_PATH.exists():
+        return {
+            "active_commit": None,
+            "last_successful_sync_at": None,
+            "last_delivery_id": None,
+            "last_seen_before": None,
+            "last_seen_after": None,
+            "sync_in_progress": False,
+            "last_error": None,
+        }
+    try:
+        return json.loads(RADIUS_SKILLS_STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {
+            "active_commit": None,
+            "last_successful_sync_at": None,
+            "last_delivery_id": None,
+            "last_seen_before": None,
+            "last_seen_after": None,
+            "sync_in_progress": False,
+            "last_error": "state_unreadable",
+        }
+
+
+def _save_radius_skills_state(patch: dict[str, Any]) -> dict[str, Any]:
+    state = _load_radius_skills_state()
+    state.update(patch)
+    RADIUS_SKILLS_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    RADIUS_SKILLS_STATE_PATH.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    return state
+
+
+def _parse_frontmatter(skill_md: str) -> dict[str, Any]:
+    if not skill_md.startswith("---"):
+        return {}
+    end = skill_md.find("---", 3)
+    if end < 0:
+        return {}
+    try:
+        parsed = yaml.safe_load(skill_md[3:end]) or {}
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _scan_vendored_skills(source: Path | None = None) -> dict[str, Any]:
+    source = source or Path(VENDORED_SKILLS_SOURCE)
     skills: list[dict[str, Any]] = []
     roots: set[str] = set()
     if source.exists():
@@ -585,6 +651,58 @@ def _scan_vendored_skills() -> dict[str, Any]:
                 }
             )
     return {"source": str(source), "roots": sorted(roots), "skills": skills}
+
+
+def _validate_external_skills(source: Path) -> None:
+    manifest = _scan_vendored_skills(source)
+    for skill in manifest.get("skills", []):
+        skill_md_path = Path(skill["path"]) / "SKILL.md"
+        raw = skill_md_path.read_text(encoding="utf-8")
+        frontmatter = _parse_frontmatter(raw)
+        if not frontmatter.get("name") or not frontmatter.get("description"):
+            raise ValueError(f"Invalid skill frontmatter in {skill_md_path}: required keys name and description")
+
+
+def _write_vendored_manifest(source: Path) -> dict[str, Any]:
+    manifest = _scan_vendored_skills(source)
+    VENDORED_SKILLS_MANIFEST.parent.mkdir(parents=True, exist_ok=True)
+    VENDORED_SKILLS_MANIFEST.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return manifest
+
+
+def _refresh_well_known_skills(manifest: dict[str, Any]) -> None:
+    well_known_root = Path(SKILLS_ROOT)
+    staging_root = well_known_root.parent / f".well-known-skills-staging-{uuid.uuid4().hex[:8]}"
+    backup_root = well_known_root.parent / f".well-known-skills-backup-{uuid.uuid4().hex[:8]}"
+    staging_root.mkdir(parents=True, exist_ok=True)
+
+    bundled = Path("/app/skills")
+    if bundled.exists():
+        for skill_file in sorted(bundled.glob("*.md")):
+            if not skill_file.is_file():
+                continue
+            raw = skill_file.read_text(encoding="utf-8")
+            if not _is_published(raw):
+                continue
+            skill_name = skill_file.stem
+            target = staging_root / skill_name / "SKILL.md"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(skill_file, target)
+
+    for skill in manifest.get("skills", []):
+        if not skill.get("published"):
+            continue
+        skill_name = skill["name"]
+        source_skill = Path(skill["path"]) / "SKILL.md"
+        target = staging_root / skill_name / "SKILL.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_skill, target)
+
+    if well_known_root.exists():
+        well_known_root.rename(backup_root)
+    staging_root.rename(well_known_root)
+    if backup_root.exists():
+        shutil.rmtree(backup_root, ignore_errors=True)
 
 
 def _load_vendored_manifest() -> dict[str, Any]:
@@ -709,6 +827,140 @@ def _get_index() -> str:
         _skills_cache = _build_index()
         _cache_built_at = now
     return _skills_cache
+
+
+def _invalidate_skills_cache() -> None:
+    global _skills_cache, _cache_built_at
+    _skills_cache = None
+    _cache_built_at = 0
+
+
+def _git_auth_env() -> dict[str, str]:
+    if not RADIUS_SKILLS_GITHUB_TOKEN:
+        return {}
+    auth_value = base64.b64encode(f"x-access-token:{RADIUS_SKILLS_GITHUB_TOKEN}".encode("utf-8")).decode("ascii")
+    return {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+        "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {auth_value}",
+    }
+
+
+def _sanitize_error_message(raw: str) -> str:
+    return re.sub(r"https://[^:@/\s]+:[^@/\s]+@", "https://***:***@", raw or "")
+
+
+def _run_git(cmd: list[str], timeout_seconds: int) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env.update(_git_auth_env())
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds, check=True, env=env)
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or "").strip()
+        stdout = (exc.stdout or "").strip()
+        detail = stderr or stdout or exc.__class__.__name__
+        raise RuntimeError(_sanitize_error_message(detail)) from None
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("git command timed out") from None
+
+
+def _sync_radius_skills_repo(after_sha: str) -> None:
+    repo_dir = Path(RADIUS_SKILLS_DIR)
+    repo_dir.parent.mkdir(parents=True, exist_ok=True)
+    RADIUS_SKILLS_STAGING_ROOT.mkdir(parents=True, exist_ok=True)
+
+    clone_url = f"https://github.com/{RADIUS_SKILLS_REPO}.git"
+
+    if not (repo_dir / ".git").exists():
+        staging = RADIUS_SKILLS_STAGING_ROOT / f"clone-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+        _run_git(["git", "clone", "--branch", RADIUS_SKILLS_BRANCH, "--single-branch", clone_url, str(staging)], RADIUS_SKILLS_SYNC_TIMEOUT_SECONDS)
+        _run_git(["git", "-C", str(staging), "checkout", after_sha], RADIUS_SKILLS_SYNC_TIMEOUT_SECONDS)
+        if repo_dir.exists():
+            shutil.rmtree(repo_dir)
+        shutil.move(str(staging), str(repo_dir))
+        return
+
+    _run_git(["git", "-C", str(repo_dir), "fetch", "origin", RADIUS_SKILLS_BRANCH], RADIUS_SKILLS_SYNC_TIMEOUT_SECONDS)
+    _run_git(["git", "-C", str(repo_dir), "checkout", RADIUS_SKILLS_BRANCH], RADIUS_SKILLS_SYNC_TIMEOUT_SECONDS)
+    _run_git(["git", "-C", str(repo_dir), "reset", "--hard", after_sha], RADIUS_SKILLS_SYNC_TIMEOUT_SECONDS)
+
+
+def _sync_radius_skills_stateful(after_sha: str, before_sha: str | None, delivery_id: str | None) -> dict[str, Any]:
+    RADIUS_SKILLS_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with RADIUS_SKILLS_LOCK_PATH.open("a+", encoding="utf-8") as lock_fp:
+        fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX)
+
+        state = _load_radius_skills_state()
+        if state.get("active_commit") == after_sha:
+            return _save_radius_skills_state(
+                {
+                    "last_delivery_id": delivery_id,
+                    "last_seen_before": before_sha,
+                    "last_seen_after": after_sha,
+                    "sync_in_progress": False,
+                }
+            )
+
+        _save_radius_skills_state(
+            {
+                "sync_in_progress": True,
+                "last_error": None,
+                "last_delivery_id": delivery_id,
+                "last_seen_before": before_sha,
+                "last_seen_after": after_sha,
+            }
+        )
+
+        try:
+            _sync_radius_skills_repo(after_sha)
+            _validate_external_skills(Path(RADIUS_SKILLS_DIR))
+            manifest = _write_vendored_manifest(Path(RADIUS_SKILLS_DIR))
+            _refresh_well_known_skills(manifest)
+            _invalidate_skills_cache()
+            return _save_radius_skills_state(
+                {
+                    "active_commit": after_sha,
+                    "last_successful_sync_at": _now_iso(),
+                    "sync_in_progress": False,
+                    "last_error": None,
+                }
+            )
+        except Exception as exc:
+            error_message = _sanitize_error_message(str(exc))
+            return _save_radius_skills_state(
+                {
+                    "sync_in_progress": False,
+                    "last_error": error_message,
+                }
+            )
+        finally:
+            fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
+
+
+async def _run_radius_sync_task(after_sha: str, before_sha: str | None = None, delivery_id: str | None = None) -> None:
+    result = await asyncio.to_thread(_sync_radius_skills_stateful, after_sha, before_sha, delivery_id)
+    if result.get("last_error"):
+        log_event(
+            logger,
+            logging.ERROR,
+            "Radius skills sync failed",
+            event="skills.sync",
+            repo=RADIUS_SKILLS_REPO,
+            branch=RADIUS_SKILLS_BRANCH,
+            after=after_sha,
+            error=result.get("last_error"),
+        )
+    else:
+        log_event(
+            logger,
+            logging.INFO,
+            "Radius skills sync completed",
+            event="skills.sync",
+            repo=RADIUS_SKILLS_REPO,
+            branch=RADIUS_SKILLS_BRANCH,
+            after=after_sha,
+            active_commit=result.get("active_commit"),
+        )
 
 
 @asynccontextmanager
@@ -890,6 +1142,84 @@ async def debug_skills(auth: dict = Depends(jwt_auth_dep)):
     if not _is_true(os.environ.get("DEBUG_SKILLS")):
         return PlainTextResponse("Not Found", status_code=404)
     return JSONResponse(_debug_skills_payload(), headers={"Cache-Control": "no-store"})
+
+
+@app.get("/internal/skills/status")
+async def internal_skills_status(_: None = Depends(_internal_auth_dep)):
+    state = _load_radius_skills_state()
+    redacted_error = _sanitize_error_message(str(state.get("last_error") or "")) or None
+    return JSONResponse(
+        {
+            "enabled": RADIUS_SKILLS_AUTO_UPDATE,
+            "repo": RADIUS_SKILLS_REPO,
+            "branch": RADIUS_SKILLS_BRANCH,
+            "skills_dir": RADIUS_SKILLS_DIR,
+            "active_commit": state.get("active_commit"),
+            "last_successful_sync_at": state.get("last_successful_sync_at"),
+            "sync_in_progress": bool(state.get("sync_in_progress")),
+            "last_error": redacted_error,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/internal/skills/sync")
+async def internal_skills_sync(request: Request, _: None = Depends(_internal_auth_dep)):
+    if not RADIUS_SKILLS_AUTO_UPDATE:
+        return JSONResponse({"ok": False, "error": "disabled"}, status_code=409)
+    body = await request.json() if request.headers.get("Content-Type", "").startswith("application/json") else {}
+    target_sha = str((body or {}).get("after") or "").strip()
+    if not target_sha:
+        try:
+            result = await asyncio.to_thread(
+                _run_git,
+                ["git", "-C", RADIUS_SKILLS_DIR, "rev-parse", "HEAD"],
+                RADIUS_SKILLS_SYNC_TIMEOUT_SECONDS,
+            )
+            target_sha = result.stdout.strip()
+        except Exception:
+            return JSONResponse({"ok": False, "error": "target_sha_required"}, status_code=400)
+    asyncio.create_task(_run_radius_sync_task(target_sha, delivery_id="manual"))
+    return JSONResponse({"ok": True, "queued": True, "after": target_sha}, status_code=202)
+
+
+@app.post("/webhooks/github/radius-skills")
+async def radius_skills_webhook(request: Request):
+    global _skills_sync_task
+    if not RADIUS_SKILLS_AUTO_UPDATE:
+        return JSONResponse({"ok": False, "error": "disabled"}, status_code=404)
+    if not RADIUS_SKILLS_WEBHOOK_SECRET:
+        return JSONResponse({"ok": False, "error": "secret_not_configured"}, status_code=503)
+    if request.headers.get("X-GitHub-Event") != "push":
+        return JSONResponse({"ok": False, "error": "unsupported_event"}, status_code=202)
+
+    payload_bytes = await request.body()
+    signature = request.headers.get("X-Hub-Signature-256", "")
+    expected = "sha256=" + hmac.new(
+        RADIUS_SKILLS_WEBHOOK_SECRET.encode("utf-8"), payload_bytes, hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        return JSONResponse({"ok": False, "error": "invalid_signature"}, status_code=403)
+
+    try:
+        payload = json.loads(payload_bytes.decode("utf-8"))
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
+
+    repo_name = ((payload.get("repository") or {}).get("full_name") or "").strip()
+    ref = str(payload.get("ref") or "").strip()
+    before = str(payload.get("before") or "").strip() or None
+    after = str(payload.get("after") or "").strip()
+    expected_ref = f"refs/heads/{RADIUS_SKILLS_BRANCH}"
+
+    if repo_name != RADIUS_SKILLS_REPO or ref != expected_ref:
+        return JSONResponse({"ok": True, "ignored": True}, status_code=202)
+    if not after:
+        return JSONResponse({"ok": False, "error": "missing_after_sha"}, status_code=400)
+
+    delivery_id = request.headers.get("X-GitHub-Delivery")
+    _skills_sync_task = asyncio.create_task(_run_radius_sync_task(after, before, delivery_id))
+    return JSONResponse({"ok": True, "queued": True, "after": after}, status_code=202)
 
 
 @app.post("/internal/a2a/sessions/outbound")

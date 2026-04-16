@@ -71,6 +71,8 @@ RUN git clone --depth 1 https://github.com/radius-workshop/linear-claude-skill /
   && npm run build \
   && npm prune --omit=dev
 
+# Bootstrap snapshot only: entrypoint copies this to RADIUS_SKILLS_DIR on /data
+# when persistent external skills storage is empty.
 RUN git clone --depth 1 https://github.com/radiustechsystems/skills.git /app/vendor/radius-skills
 
 COPY scripts/agent_server /app/scripts/agent_server
