@@ -2,10 +2,11 @@
 """
 Agent Server — A2A HTTP gateway and agent discovery endpoints.
 """
+
 import asyncio
 import hashlib
-import html
 import hmac
+import html
 import json
 import logging
 import os
@@ -14,7 +15,6 @@ import subprocess
 import sys
 import time
 import uuid
-import yaml
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
@@ -22,6 +22,7 @@ from urllib.parse import unquote
 
 import httpx
 import uvicorn
+import yaml
 from a2a.types import (
     InternalError,
     InvalidParamsError,
@@ -33,19 +34,26 @@ from a2a.types import (
     MethodNotFoundError,
 )
 from fastapi import Depends, FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    Response,
+    StreamingResponse,
+)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from a2a_sessions import A2ASessionStore
-from a2a_bridge import A2ABridge
-from auth import get_did, get_did_document, issue_token, jwt_auth_dep, setup_auth
 from erc8004_registry import (
     MissingSelfRegistrationFields,
     build_self_registration,
     get_network_config,
     self_registration_missing_fields_error,
 )
+
+from a2a_bridge import A2ABridge
+from a2a_sessions import A2ASessionStore
+from auth import get_did, get_did_document, issue_token, jwt_auth_dep, setup_auth
 from hermes_client import HermesClient, HermesUnavailableError, HermesUpstreamError
 from logging_utils import (
     clear_request_context,
@@ -65,7 +73,9 @@ _start_time = time.time()
 HERMES_HOME = os.environ.get("HERMES_HOME", "/data/.hermes")
 CONFIG_PATH = Path(HERMES_HOME) / "config.yaml"
 SKILLS_ROOT = os.environ.get("SKILLS_ROOT", "/data/.hermes/well-known-skills")
-VENDORED_SKILLS_SOURCE = os.environ.get("VENDORED_SKILLS_SOURCE", "/app/vendor/radius-skills")
+VENDORED_SKILLS_SOURCE = os.environ.get(
+    "VENDORED_SKILLS_SOURCE", "/app/vendor/radius-skills"
+)
 VENDORED_SKILLS_MANIFEST = Path(
     os.environ.get("VENDORED_SKILLS_MANIFEST", f"{HERMES_HOME}/vendored-skills.json")
 )
@@ -87,7 +97,12 @@ _a2a_session_worker: Optional[asyncio.Task] = None
 _wallet_summary_cache: Optional[dict] = None
 _wallet_summary_built_at: float = 0
 _WALLET_SUMMARY_TTL = 45.0
-_MOCK_MODE = os.environ.get("AGENT_SERVER_MOCK_DATA", "").strip().lower() in {"1", "true", "yes", "on"}
+_MOCK_MODE = os.environ.get("AGENT_SERVER_MOCK_DATA", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 def _hermes_api_key() -> Optional[str]:
@@ -98,7 +113,9 @@ def _mock_wallet_summary() -> Optional[dict]:
     if not _MOCK_MODE:
         return None
     return {
-        "address": os.environ.get("MOCK_RADIUS_WALLET_ADDRESS", "0x4D8020F43A9EFb829DBe4Cb93cbb29d5B52aEc6b"),
+        "address": os.environ.get(
+            "MOCK_RADIUS_WALLET_ADDRESS", "0x4D8020F43A9EFb829DBe4Cb93cbb29d5B52aEc6b"
+        ),
         "sbc": os.environ.get("MOCK_RADIUS_SBC_BALANCE", "40.05199"),
         "rusd": os.environ.get("MOCK_RADIUS_RUSD_BALANCE", "10.099815153377649216"),
         "error": os.environ.get("MOCK_RADIUS_WALLET_ERROR") or None,
@@ -139,9 +156,15 @@ def _resolve_mode(method: str) -> str:
     return "delegated"
 
 
-def _rpc_error_response(rpc_id, error_obj: JSONRPCError, status_code: int = 200) -> JSONResponse:
+def _rpc_error_response(
+    rpc_id, error_obj: JSONRPCError, status_code: int = 200
+) -> JSONResponse:
     return JSONResponse(
-        {"jsonrpc": "2.0", "id": rpc_id, "error": error_obj.model_dump(by_alias=True, exclude_none=True)},
+        {
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "error": error_obj.model_dump(by_alias=True, exclude_none=True),
+        },
         status_code=status_code,
     )
 
@@ -155,15 +178,21 @@ async def _internal_auth_dep(request: Request) -> None:
     expected = _internal_api_key()
     if not expected:
         from fastapi import HTTPException
+
         raise HTTPException(status_code=503, detail="Internal API unavailable")
     auth = request.headers.get("Authorization", "")
     if auth != f"Bearer {expected}":
         from fastapi import HTTPException
+
         raise HTTPException(status_code=403, detail="Forbidden")
 
 
 def _request_id(request: Request) -> str:
-    return request.headers.get("X-Request-Id") or request.headers.get("X-Correlation-Id") or str(uuid.uuid4())
+    return (
+        request.headers.get("X-Request-Id")
+        or request.headers.get("X-Correlation-Id")
+        or str(uuid.uuid4())
+    )
 
 
 def _client_ip(request: Request) -> str | None:
@@ -176,7 +205,11 @@ def _client_ip(request: Request) -> str | None:
 
 
 def _is_observable_path(path: str) -> bool:
-    return path in {"/a2a", "/token", "/health"} or path.startswith("/files/") or path.startswith("/internal/a2a/")
+    return (
+        path in {"/a2a", "/token", "/health"}
+        or path.startswith("/files/")
+        or path.startswith("/internal/a2a/")
+    )
 
 
 def _radius_address_file() -> Path:
@@ -204,7 +237,12 @@ def _build_wallet_summary() -> dict:
 
     address = _wallet_address()
     if not address:
-        return {"address": None, "sbc": None, "rusd": None, "error": "wallet_unavailable"}
+        return {
+            "address": None,
+            "sbc": None,
+            "rusd": None,
+            "error": "wallet_unavailable",
+        }
 
     try:
         result = subprocess.run(
@@ -283,7 +321,11 @@ def _render_session_envelope(session: dict[str, Any], text: str) -> str:
     topic = str(session.get("topic") or "").strip()
     turn_number = int(session.get("turn_count") or 0) + 1
     max_turns = session.get("max_turns")
-    turn_label = f"{turn_number}/{max_turns}" if max_turns not in (None, "") else f"{turn_number}/open"
+    turn_label = (
+        f"{turn_number}/{max_turns}"
+        if max_turns not in (None, "")
+        else f"{turn_number}/open"
+    )
     header = [
         "[A2A_SESSION]",
         f"session_id={session.get('session_id')}",
@@ -300,8 +342,14 @@ def _render_session_envelope(session: dict[str, Any], text: str) -> str:
 def _build_dialogue_prompt(session: dict[str, Any]) -> str:
     max_turns = session.get("max_turns")
     next_turn = int(session.get("turn_count") or 0) + 1
-    turn_label = f"{next_turn}/{max_turns}" if max_turns not in (None, "") else f"{next_turn}/open"
-    goal = str(session.get("goal") or session.get("topic") or "Advance the shared objective").strip()
+    turn_label = (
+        f"{next_turn}/{max_turns}"
+        if max_turns not in (None, "")
+        else f"{next_turn}/open"
+    )
+    goal = str(
+        session.get("goal") or session.get("topic") or "Advance the shared objective"
+    ).strip()
     transcript_lines = []
     for item in session.get("recent_messages") or []:
         speaker = "You" if item.get("speaker") == "local" else "Peer"
@@ -323,7 +371,9 @@ def _build_dialogue_prompt(session: dict[str, Any]) -> str:
     )
 
 
-async def _exchange_api_key_for_token(base_url: str, api_key: str, subject: str = "hermes") -> str:
+async def _exchange_api_key_for_token(
+    base_url: str, api_key: str, subject: str = "hermes"
+) -> str:
     async with httpx.AsyncClient(timeout=20.0) as client:
         response = await client.post(
             f"{base_url.rstrip('/')}/token",
@@ -343,7 +393,9 @@ async def _send_managed_a2a_turn(session: dict[str, Any], text: str) -> dict[str
     if not remote_agent:
         raise RuntimeError("Session has no remote_agent configured")
 
-    api_key = _a2a_session_store.get_remote_api_key(str(session.get("session_id") or ""))
+    api_key = _a2a_session_store.get_remote_api_key(
+        str(session.get("session_id") or "")
+    )
     if api_key:
         token = await _exchange_api_key_for_token(remote_agent, api_key)
         auth_mode = "token_exchange"
@@ -372,7 +424,10 @@ async def _send_managed_a2a_turn(session: dict[str, Any], text: str) -> dict[str
     async with httpx.AsyncClient(timeout=180.0) as client:
         response = await client.post(
             f"{remote_agent}/a2a",
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
             json=payload,
         )
     duration_ms = round((time.perf_counter() - started) * 1000, 2)
@@ -391,12 +446,15 @@ async def _send_managed_a2a_turn(session: dict[str, Any], text: str) -> dict[str
         rpc_id=rpc_id,
         a2a_message_id=message_id,
         duration_ms=duration_ms,
-        task_state=((response_json.get("result") or {}).get("status") or {}).get("state"),
+        task_state=((response_json.get("result") or {}).get("status") or {}).get(
+            "state"
+        ),
     )
 
     return {
         "session_id": session.get("session_id"),
-        "context_id": (response_json.get("result") or {}).get("context_id") or session.get("context_id"),
+        "context_id": (response_json.get("result") or {}).get("context_id")
+        or session.get("context_id"),
         "a2a_message_id": message_id,
         "duration_ms": duration_ms,
         "response": response_json,
@@ -405,10 +463,16 @@ async def _send_managed_a2a_turn(session: dict[str, Any], text: str) -> dict[str
 
 async def _run_session_turn(session_id: str) -> None:
     session = _a2a_session_store.get_session(session_id)
-    if not session or session.get("status") != "active" or session.get("next_action") != "compose_local_turn":
+    if (
+        not session
+        or session.get("status") != "active"
+        or session.get("next_action") != "compose_local_turn"
+    ):
         return
     if not _hermes_client:
-        _a2a_session_store.mark_error(session_id, "Direct Hermes client unavailable for managed A2A session")
+        _a2a_session_store.mark_error(
+            session_id, "Direct Hermes client unavailable for managed A2A session"
+        )
         return
     try:
         prompt = _build_dialogue_prompt(session)
@@ -444,12 +508,20 @@ async def _session_worker_loop() -> None:
                 session_id = session.get("session_id")
                 if not session_id:
                     continue
-                _a2a_session_store.note_worker_claim(session_id, delay_seconds=max(A2A_SESSION_TICK_SECONDS * 4, 6.0))
+                _a2a_session_store.note_worker_claim(
+                    session_id, delay_seconds=max(A2A_SESSION_TICK_SECONDS * 4, 6.0)
+                )
                 await _run_session_turn(session_id)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            log_event(logger, logging.ERROR, "Managed A2A session worker iteration failed", event="a2a.session.worker", error=str(exc))
+            log_event(
+                logger,
+                logging.ERROR,
+                "Managed A2A session worker iteration failed",
+                event="a2a.session.worker",
+                error=str(exc),
+            )
         await asyncio.sleep(max(A2A_SESSION_TICK_SECONDS, 1.0))
 
 
@@ -545,7 +617,9 @@ def _debug_skills_payload() -> dict[str, Any]:
     well_known_root = Path(SKILLS_ROOT)
     well_known_dirs = []
     if well_known_root.exists():
-        well_known_dirs = sorted(p.name for p in well_known_root.iterdir() if p.is_dir())
+        well_known_dirs = sorted(
+            p.name for p in well_known_root.iterdir() if p.is_dir()
+        )
     return {
         "debug_enabled": _is_true(os.environ.get("DEBUG_SKILLS")),
         "config_path": str(CONFIG_PATH),
@@ -567,7 +641,13 @@ _CACHE_TTL = 60.0
 
 def _build_index() -> str:
     skills_root = Path(SKILLS_ROOT)
-    empty = json.dumps({"$schema": "https://schemas.agentskills.io/discovery/0.2.0/schema.json", "skills": []}, indent=2)
+    empty = json.dumps(
+        {
+            "$schema": "https://schemas.agentskills.io/discovery/0.2.0/schema.json",
+            "skills": [],
+        },
+        indent=2,
+    )
     if not skills_root.exists():
         return empty
     try:
@@ -585,22 +665,32 @@ def _build_index() -> str:
             if not _is_published(content):
                 continue
             digest = "sha256:" + hashlib.sha256(skill_path.read_bytes()).hexdigest()
-            skills.append({
-                "name": entry,
-                "type": "skill-md",
-                "description": _parse_description(content),
-                "url": f"{BASE_URL}/.well-known/agent-skills/{entry}/SKILL.md",
-                "digest": digest,
-            })
+            skills.append(
+                {
+                    "name": entry,
+                    "type": "skill-md",
+                    "description": _parse_description(content),
+                    "url": f"{BASE_URL}/.well-known/agent-skills/{entry}/SKILL.md",
+                    "digest": digest,
+                }
+            )
         except Exception:
             continue
 
-    return json.dumps({"$schema": "https://schemas.agentskills.io/discovery/0.2.0/schema.json", "skills": skills}, indent=2)
+    return json.dumps(
+        {
+            "$schema": "https://schemas.agentskills.io/discovery/0.2.0/schema.json",
+            "skills": skills,
+        },
+        indent=2,
+    )
 
 
 def _get_index() -> str:
     global _skills_cache, _cache_built_at
-    mock_index_file = " ".join(os.environ.get("MOCK_AGENT_SKILLS_INDEX_FILE", "").split())
+    mock_index_file = " ".join(
+        os.environ.get("MOCK_AGENT_SKILLS_INDEX_FILE", "").split()
+    )
     if mock_index_file:
         try:
             return Path(mock_index_file).read_text(encoding="utf-8")
@@ -633,7 +723,9 @@ async def lifespan(app: FastAPI):
             timeout=HERMES_TIMEOUT,
         )
         _a2a_bridge = A2ABridge(_hermes_client, _parse_allowed_roots(), A2A_PUBLIC_URL)
-    _a2a_session_worker = asyncio.create_task(_session_worker_loop(), name="a2a-session-worker")
+    _a2a_session_worker = asyncio.create_task(
+        _session_worker_loop(), name="a2a-session-worker"
+    )
     vendored_manifest = _load_vendored_manifest()
     log_event(
         logger,
@@ -648,7 +740,9 @@ async def lifespan(app: FastAPI):
         a2a_session_root=str(A2A_SESSION_ROOT),
         a2a_session_tick_seconds=A2A_SESSION_TICK_SECONDS,
         vendored_skill_roots=vendored_manifest.get("roots", []),
-        vendored_skill_names=[skill.get("name") for skill in vendored_manifest.get("skills", [])],
+        vendored_skill_names=[
+            skill.get("name") for skill in vendored_manifest.get("skills", [])
+        ],
     )
     yield
     if _a2a_session_worker:
@@ -677,7 +771,14 @@ async def _cors_skills(request: Request, call_next):
         )
     if request.url.path.startswith("/.well-known/agent-skills/"):
         if request.method == "OPTIONS":
-            return Response(status_code=204, headers={"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS", "Access-Control-Allow-Headers": "Content-Type"})
+            return Response(
+                status_code=204,
+                headers={
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+                    "Access-Control-Allow-Headers": "Content-Type",
+                },
+            )
         response = await call_next(request)
         response.headers["Access-Control-Allow-Origin"] = "*"
         response.headers["Access-Control-Allow-Methods"] = "GET, HEAD, OPTIONS"
@@ -734,7 +835,10 @@ async def _request_logging(request: Request, call_next):
 @app.api_route("/.well-known/agent-skills/index.json", methods=["GET", "HEAD"])
 async def skills_index(request: Request):
     body = _get_index()
-    headers = {"Content-Type": "application/json; charset=utf-8", "Cache-Control": "public, max-age=60"}
+    headers = {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "public, max-age=60",
+    }
     if request.method == "HEAD":
         return Response(status_code=200, headers=headers)
     return Response(content=body, headers=headers)
@@ -751,12 +855,25 @@ async def get_skill(request: Request, name: str):
         raw = skill_path.read_bytes()
         if not _is_published(raw.decode("utf-8")):
             return PlainTextResponse("Not Found", status_code=404)
-        headers = {"Cache-Control": "public, max-age=300", "Content-Length": str(len(raw))}
+        headers = {
+            "Cache-Control": "public, max-age=300",
+            "Content-Length": str(len(raw)),
+        }
         if request.method == "HEAD":
             return Response(status_code=200, headers=headers)
-        return Response(content=raw, media_type="text/markdown; charset=utf-8", headers=headers)
+        return Response(
+            content=raw, media_type="text/markdown; charset=utf-8", headers=headers
+        )
     except Exception as e:
-        log_event(logger, logging.ERROR, "Failed reading skill file", event="skills.read_error", skill_name=name, skill_path=str(skill_path), error=str(e))
+        log_event(
+            logger,
+            logging.ERROR,
+            "Failed reading skill file",
+            event="skills.read_error",
+            skill_name=name,
+            skill_path=str(skill_path),
+            error=str(e),
+        )
         return PlainTextResponse("Internal Server Error", status_code=500)
 
 
@@ -768,10 +885,14 @@ async def debug_skills(auth: dict = Depends(jwt_auth_dep)):
 
 
 @app.post("/internal/a2a/sessions/outbound")
-async def internal_a2a_session_outbound(request: Request, _: None = Depends(_internal_auth_dep)):
+async def internal_a2a_session_outbound(
+    request: Request, _: None = Depends(_internal_auth_dep)
+):
     payload = await request.json()
     try:
-        session = _a2a_session_store.create_or_update_outbound(payload if isinstance(payload, dict) else {})
+        session = _a2a_session_store.create_or_update_outbound(
+            payload if isinstance(payload, dict) else {}
+        )
     except ValueError as exc:
         log_event(
             logger,
@@ -791,35 +912,60 @@ async def internal_a2a_session_outbound(request: Request, _: None = Depends(_int
         remote_agent=session.get("remote_agent"),
         auto_continue=session.get("auto_continue"),
     )
-    return JSONResponse({"ok": True, "session": _a2a_session_store.serialize_for_response(session)})
+    return JSONResponse(
+        {"ok": True, "session": _a2a_session_store.serialize_for_response(session)}
+    )
+
 
 @app.post("/internal/a2a/sessions/outbound-result")
-async def internal_a2a_session_outbound_result(request: Request, _: None = Depends(_internal_auth_dep)):
+async def internal_a2a_session_outbound_result(
+    request: Request, _: None = Depends(_internal_auth_dep)
+):
     payload = await request.json()
     try:
-        session = _a2a_session_store.record_outbound_result(payload if isinstance(payload, dict) else {})
+        session = _a2a_session_store.record_outbound_result(
+            payload if isinstance(payload, dict) else {}
+        )
     except ValueError as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
     if not session:
-        return JSONResponse({"ok": False, "error": "session_not_found"}, status_code=404)
-    return JSONResponse({"ok": True, "session": _a2a_session_store.serialize_for_response(session)})
+        return JSONResponse(
+            {"ok": False, "error": "session_not_found"}, status_code=404
+        )
+    return JSONResponse(
+        {"ok": True, "session": _a2a_session_store.serialize_for_response(session)}
+    )
 
 
 @app.post("/internal/a2a/sessions/resolve")
-async def internal_a2a_session_resolve(request: Request, _: None = Depends(_internal_auth_dep)):
+async def internal_a2a_session_resolve(
+    request: Request, _: None = Depends(_internal_auth_dep)
+):
     payload = await request.json()
     payload = payload if isinstance(payload, dict) else {}
     session = _a2a_session_store.find_active_session(
         remote_agent=payload.get("remote_agent"),
         context_id=payload.get("context_id"),
-        origin_platform=((payload.get("origin") or {}).get("platform") if isinstance(payload.get("origin"), dict) else None),
-        origin_chat_id=((payload.get("origin") or {}).get("chat_id") if isinstance(payload.get("origin"), dict) else None),
+        origin_platform=(
+            (payload.get("origin") or {}).get("platform")
+            if isinstance(payload.get("origin"), dict)
+            else None
+        ),
+        origin_chat_id=(
+            (payload.get("origin") or {}).get("chat_id")
+            if isinstance(payload.get("origin"), dict)
+            else None
+        ),
     )
-    return JSONResponse({"ok": True, "session": _a2a_session_store.serialize_for_response(session)})
+    return JSONResponse(
+        {"ok": True, "session": _a2a_session_store.serialize_for_response(session)}
+    )
 
 
 @app.get("/internal/a2a/sessions/{session_id}")
-async def internal_a2a_session_get(session_id: str, _: None = Depends(_internal_auth_dep)):
+async def internal_a2a_session_get(
+    session_id: str, _: None = Depends(_internal_auth_dep)
+):
     try:
         session = _a2a_session_store.get_session(session_id)
     except ValueError as exc:
@@ -842,7 +988,14 @@ async def did_document_route():
     doc = get_did_document()
     if not doc:
         return JSONResponse({"error": "Not ready"}, status_code=503)
-    return Response(content=json.dumps(doc), media_type="application/did+json", headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=600"})
+    return Response(
+        content=json.dumps(doc),
+        media_type="application/did+json",
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "public, max-age=600",
+        },
+    )
 
 
 @app.get("/.well-known/agent-registration.json")
@@ -864,11 +1017,27 @@ async def agent_registration():
                 "Cache-Control": "public, max-age=60",
             },
         )
-    return JSONResponse(registration, headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=60"})
+    return JSONResponse(
+        registration,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "public, max-age=60",
+        },
+    )
 
 
 @app.get("/.well-known/agent-card.json")
 async def agent_card():
+    return JSONResponse(
+        _build_agent_card_payload(),
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "public, max-age=60",
+        },
+    )
+
+
+def _build_agent_card_payload() -> dict:
     agent_name = os.environ.get("AGENT_NAME", "Hermes Agent")
     did = get_did()
     webhook_enabled = bool(os.environ.get("WEBHOOK_SECRET"))
@@ -876,20 +1045,36 @@ async def agent_card():
     mode = A2A_MODE
     direct = _direct_available()
     streaming = mode == "direct" or (mode == "auto" and direct)
-    skills = [{
-        "id": s["name"],
-        "name": s["name"],
-        "description": s.get("description", ""),
-        "tags": ["a2a-direct", "a2a-delegated"],
-        "input_modes": ["text/plain"],
-        "output_modes": ["text/plain"],
-    } for s in skills_index.get("skills", [])]
-    card: dict = {
+    skills = [
+        {
+            "id": s["name"],
+            "name": s["name"],
+            "description": s.get("description", ""),
+            "tags": ["a2a-direct", "a2a-delegated"],
+            "input_modes": ["text/plain"],
+            "output_modes": ["text/plain"],
+        }
+        for s in skills_index.get("skills", [])
+    ]
+    return {
         "name": agent_name,
-        "description": os.environ.get("AGENT_DESCRIPTION", f"{agent_name} — AI agent powered by Hermes"),
+        "description": os.environ.get(
+            "AGENT_DESCRIPTION",
+            f"Name: {agent_name}",
+        ),
         "version": "1.1.0",
-        "provider": {"name": agent_name, "url": BASE_URL, **({"did": did} if did else {})},
-        "supported_interfaces": [{"protocol_binding": "JSONRPC", "url": f"{BASE_URL}/a2a", "protocol_version": "1.0"}],
+        "provider": {
+            "name": agent_name,
+            "url": BASE_URL,
+            **({"did": did} if did else {}),
+        },
+        "supported_interfaces": [
+            {
+                "protocol_binding": "JSONRPC",
+                "url": f"{BASE_URL}/a2a",
+                "protocol_version": "1.0",
+            }
+        ],
         "capabilities": {
             "streaming": streaming,
             "push_notifications": webhook_enabled,
@@ -908,12 +1093,199 @@ async def agent_card():
             }
         },
     }
-    return JSONResponse(card, headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=60"})
+
+
+def _humanize_slug(value: str) -> str:
+    acronyms = {
+        "a2a": "A2A",
+        "did": "DID",
+        "jwt": "JWT",
+        "erc": "ERC",
+        "rusd": "RUSD",
+        "sbc": "SBC",
+    }
+    words = re.split(r"[-_\s]+", (value or "").strip())
+    return (
+        " ".join(
+            acronyms.get(word.lower(), word.capitalize()) for word in words if word
+        )
+        or "Unknown"
+    )
+
+
+def _truncate_text(value: str, limit: int) -> str:
+    text = " ".join((value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _skill_badges(name: str, description: str) -> list[str]:
+    haystack = f"{name} {description}".lower()
+    badges: list[str] = []
+    if "wallet" in haystack or "token" in haystack or "balance" in haystack:
+        badges.append("Wallet")
+    if "a2a" in haystack or "agent-to-agent" in haystack or "jwt" in haystack:
+        badges.append("A2A")
+    if "erc-8004" in haystack or "registration" in haystack or "register" in haystack:
+        badges.append("Registration")
+    if not badges:
+        badges.append("Capability")
+    return badges[:2]
+
+
+def _format_skill_cards(published_skills: list[dict]) -> str:
+    cards: list[str] = []
+    for skill in published_skills:
+        name = skill.get("name", "unknown")
+        description = skill.get("description") or "Published capability"
+        badges_html = "".join(
+            f"<span class='mini-pill'>{html.escape(badge)}</span>"
+            for badge in _skill_badges(name, description)
+        )
+        cards.append(
+            "<article class='skill-card'>"
+            f"<div class='skill-card-top'><h3>{html.escape(_humanize_slug(name))}</h3><div class='mini-pills'>{badges_html}</div></div>"
+            f"<p>{html.escape(_truncate_text(description, 150))}</p>"
+            f"<div class='skill-slug'>/{html.escape(name)}</div>"
+            "</article>"
+        )
+    if not cards:
+        cards.append(
+            "<article class='skill-card empty'>"
+            "<div class='skill-card-top'><h3>No Published Skills Yet</h3></div>"
+            "<p>This agent has not exposed public skills yet, but the discovery documents below are still live.</p>"
+            "</article>"
+        )
+    return "".join(cards)
+
+
+def _format_discovery_cards(agent_card: dict) -> tuple[str, str]:
+    interface_url = (
+        agent_card.get("supported_interfaces", [{}])[0].get("url") or f"{BASE_URL}/a2a"
+    )
+    discovery_links = [
+        (
+            "Agent Card",
+            "/.well-known/agent-card.json",
+            "A2A interface, auth scheme, and advertised capabilities.",
+        ),
+        (
+            "Skills Index",
+            "/.well-known/agent-skills/index.json",
+            "Published capability surface for agent browsers and tooling.",
+        ),
+        (
+            "DID Document",
+            "/.well-known/did.json",
+            "Public signing identity for DID-based trust and verification.",
+        ),
+        (
+            "ERC-8004 Registration",
+            "/.well-known/agent-registration.json",
+            "Registration profile linking this agent to onchain identity.",
+        ),
+    ]
+    cards = []
+    for label, href, note in discovery_links:
+        cards.append(
+            "<a class='discovery-card' href='{href}'>"
+            "<span>{label}</span>"
+            "<strong>{uri}</strong>"
+            "<p>{note}</p>"
+            "</a>".format(
+                href=html.escape(href),
+                label=html.escape(label),
+                uri=html.escape(href),
+                note=html.escape(note),
+            )
+        )
+    interface_bits = [
+        ("A2A Endpoint", interface_url),
+        ("Auth", "Bearer JWT"),
+        (
+            "Streaming",
+            "Enabled"
+            if agent_card.get("capabilities", {}).get("streaming")
+            else "Standard requests",
+        ),
+        (
+            "Modes",
+            ", ".join(agent_card.get("capabilities", {}).get("a2a_modes", []))
+            or "Unavailable",
+        ),
+    ]
+    facts_html = "".join(
+        "<div class='fact-row'><span>{label}</span><strong>{value}</strong></div>".format(
+            label=html.escape(label),
+            value=html.escape(value),
+        )
+        for label, value in interface_bits
+    )
+    return "".join(cards), facts_html
+
+
+def _build_social_svg(
+    agent_name: str, description: str, skill_labels: list[str]
+) -> str:
+    chips = skill_labels[:3] or ["A2A Discovery", "Radius Wallet", "Published Skills"]
+    chip_markup = []
+    x = 68
+    y = 316
+    for chip in chips:
+        width = max(132, 18 + len(chip) * 10)
+        chip_markup.append(
+            (
+                f"<rect x='{x}' y='{y}' width='{width}' height='46' rx='23' fill='rgba(255,255,255,0.14)' "
+                "stroke='rgba(255,255,255,0.18)'/>"
+                f"<text x='{x + 22}' y='{y + 29}' fill='white' font-size='20' font-family='Instrument Sans, Arial, sans-serif'>{html.escape(chip)}</text>"
+            )
+        )
+        x += width + 16
+    return f"""<svg xmlns='http://www.w3.org/2000/svg' width='1200' height='630' viewBox='0 0 1200 630' role='img' aria-label='{html.escape(agent_name)} social preview'>
+  <defs>
+    <linearGradient id='bg' x1='0' y1='0' x2='1' y2='1'>
+      <stop offset='0%' stop-color='#201e25'/>
+      <stop offset='55%' stop-color='#44332c'/>
+      <stop offset='100%' stop-color='#eb6359'/>
+    </linearGradient>
+    <radialGradient id='glow' cx='0' cy='0' r='1' gradientUnits='userSpaceOnUse' gradientTransform='translate(1050 110) rotate(140) scale(410 320)'>
+      <stop offset='0%' stop-color='rgba(255,255,255,0.24)'/>
+      <stop offset='100%' stop-color='rgba(255,255,255,0)'/>
+    </radialGradient>
+  </defs>
+  <rect width='1200' height='630' fill='url(#bg)'/>
+  <rect width='1200' height='630' fill='url(#glow)'/>
+  <rect x='44' y='44' width='1112' height='542' rx='32' fill='rgba(255,255,255,0.07)' stroke='rgba(255,255,255,0.14)'/>
+  <text x='68' y='116' fill='rgba(255,255,255,0.78)' font-size='24' font-family='Instrument Sans, Arial, sans-serif' letter-spacing='4'>AI Agent on Radius</text>
+  <text x='68' y='220' fill='white' font-size='72' font-family='Instrument Sans, Arial, sans-serif' font-weight='600'>{html.escape(_truncate_text(agent_name, 28))}</text>
+  <text x='68' y='276' fill='rgba(255,255,255,0.84)' font-size='30' font-family='Instrument Sans, Arial, sans-serif'>{html.escape(_truncate_text(description, 78))}</text>
+  {"".join(chip_markup)}
+  <text x='68' y='504' fill='rgba(255,255,255,0.72)' font-size='26' font-family='Instrument Sans, Arial, sans-serif'>Human-readable capability overview plus canonical /.well-known discovery docs.</text>
+  <text x='68' y='554' fill='rgba(255,255,255,0.6)' font-size='22' font-family='Instrument Sans, Arial, sans-serif'>{html.escape(BASE_URL)}</text>
+</svg>"""
+
+
+@app.get("/og-image.svg")
+async def social_preview_image():
+    agent_card = _build_agent_card_payload()
+    agent_name = agent_card["name"]
+    description = agent_card["description"]
+    skill_labels = [
+        _humanize_slug(skill.get("name", "")) for skill in agent_card.get("skills", [])
+    ]
+    return Response(
+        content=_build_social_svg(agent_name, description, skill_labels),
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=300"},
+    )
 
 
 @app.get("/")
 async def index():
-    agent_name = os.environ.get("AGENT_NAME", "Hermes Agent")
+    agent_card = _build_agent_card_payload()
+    agent_name = agent_card["name"]
+    agent_description = agent_card["description"]
     did = get_did() or "Unavailable"
     wallet_summary, cache_hit = await _get_wallet_summary()
     skills_index = json.loads(_get_index())
@@ -934,40 +1306,37 @@ async def index():
     sbc_balance = wallet_summary.get("sbc") or "Unavailable"
     rusd_balance = wallet_summary.get("rusd") or "Unavailable"
     wallet_error = wallet_summary.get("error")
-    explorer_link = f"https://testnet.radiustech.xyz/address/{wallet_address}" if wallet_summary.get("address") else "https://testnet.radiustech.xyz"
-
-    links = [
-        ("Agent Card", "/.well-known/agent-card.json"),
-        ("Agent Skills", "/.well-known/agent-skills/index.json"),
-        ("DID Document", "/.well-known/did.json"),
-        ("ERC-8004 Registration", "/.well-known/agent-registration.json"),
-    ]
-    links_html = "".join(
-        f"<a class='linkcard' href='{html.escape(href)}'><span>{html.escape(label)}</span><strong>{html.escape(href)}</strong></a>"
-        for label, href in links
+    explorer_link = (
+        f"https://testnet.radiustech.xyz/address/{wallet_address}"
+        if wallet_summary.get("address")
+        else "https://testnet.radiustech.xyz"
     )
     published_skills = skills_index.get("skills", [])
-    skills_html = "".join(
-        (
-            "<li>"
-            f"<strong>{html.escape(skill.get('name', 'unknown'))}</strong>: "
-            f"{html.escape(skill.get('description') or 'Published skill')}"
-            "</li>"
-        )
-        for skill in published_skills
-    )
-    if not skills_html:
-        skills_html = "<li><strong>No published skills</strong>: This agent has not exposed any public skills yet.</li>"
+    skills_html = _format_skill_cards(published_skills)
+    discovery_cards_html, discovery_facts_html = _format_discovery_cards(agent_card)
     wallet_note = (
         f"<p class='note'>Wallet data unavailable: {html.escape(wallet_error)}</p>"
         if wallet_error
-        else "<p class='note'>Wallet balances refresh automatically with a short cache to keep the public page fast.</p>"
+        else ""
     )
     radius_site = "https://radiustech.xyz"
     radius_mainnet = "https://network.radiustech.xyz"
     radius_testnet = "https://testnet.radiustech.xyz"
     radius_docs = "https://docs.radiustech.xyz"
     template_repo = "https://github.com/radius-workshop/radius-hermes-railway-template"
+    page_title = f"{agent_name} | Radius Hermes Agent"
+    og_title = f"{agent_name} | Public A2A Discovery"
+    og_description = _truncate_text(
+        f"{agent_description} Human-readable capabilities plus canonical /.well-known discovery documents for A2A clients, registries, and operator tooling.",
+        180,
+    )
+    og_image_url = f"{BASE_URL}/og-image.svg"
+    published_count = len(published_skills)
+    skill_summary = (
+        f"{published_count} published skill{'s' if published_count != 1 else ''} exposed via the public skills index."
+        if published_count
+        else "No published skills yet, but the canonical discovery documents are available now."
+    )
 
     return HTMLResponse(
         f"""<!DOCTYPE html>
@@ -975,7 +1344,19 @@ async def index():
 <head>
   <meta charset='UTF-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1.0'>
-  <title>{html.escape(agent_name)}</title>
+  <title>{html.escape(page_title)}</title>
+  <meta name='description' content='{html.escape(og_description)}'>
+  <meta property='og:title' content='{html.escape(og_title)}'>
+  <meta property='og:description' content='{html.escape(og_description)}'>
+  <meta property='og:type' content='website'>
+  <meta property='og:url' content='{html.escape(BASE_URL)}/'>
+  <meta property='og:image' content='{html.escape(og_image_url)}'>
+  <meta property='og:image:type' content='image/svg+xml'>
+  <meta name='twitter:card' content='summary_large_image'>
+  <meta name='twitter:title' content='{html.escape(og_title)}'>
+  <meta name='twitter:description' content='{html.escape(og_description)}'>
+  <meta name='twitter:image' content='{html.escape(og_image_url)}'>
+  <link rel='canonical' href='{html.escape(BASE_URL)}/'>
   <style>
     @import url("https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@300;400;500;600;700&display=swap");
 
@@ -1057,28 +1438,30 @@ async def index():
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 18px;
-      margin-bottom: 18px;
-      padding: 14px 18px;
+      gap: 14px;
+      margin-bottom: 14px;
+      padding: 12px 16px;
       border: 1px solid rgba(255, 255, 255, 0.6);
       border-radius: 22px;
       background: rgba(255, 255, 255, 0.62);
       box-shadow: 0 18px 50px rgba(65, 45, 36, 0.08);
       backdrop-filter: blur(18px);
+      position: relative;
+      z-index: 30;
     }}
 
     .brand {{
       display: inline-flex;
       align-items: center;
-      gap: 12px;
+      gap: 10px;
       min-width: 0;
       font-weight: 600;
       letter-spacing: -0.02em;
     }}
 
     .brand-mark {{
-      width: 42px;
-      height: 30px;
+      width: 38px;
+      height: 27px;
       color: var(--foreground);
       flex-shrink: 0;
     }}
@@ -1090,14 +1473,14 @@ async def index():
     }}
 
     .brand-name {{
-      font-size: 1.1rem;
+      font-size: 1rem;
       line-height: 1;
       color: var(--foreground);
     }}
 
     .brand-subtitle {{
       margin-top: 3px;
-      font-size: 12px;
+      font-size: 11px;
       line-height: 1.2;
       color: var(--muted);
       font-weight: 500;
@@ -1109,8 +1492,241 @@ async def index():
       display: flex;
       align-items: center;
       justify-content: flex-end;
-      flex-wrap: wrap;
+      gap: 8px;
+    }}
+
+    .nav-shell {{
+      position: relative;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }}
+
+    .nav-menu {{
+      margin: 0;
+      display: none;
+    }}
+
+    .desktop-cta {{
+      display: inline-flex;
+    }}
+
+    .desktop-only {{
+      display: inline-flex;
+    }}
+
+    .mobile-only {{
+      display: none;
+    }}
+
+    .discovery-menu {{
+      position: relative;
+      margin: 0;
+    }}
+
+    .resources-menu {{
+      position: relative;
+      margin: 0;
+    }}
+
+    .discovery-toggle {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 40px;
+      padding: 0 15px;
+      border-radius: 999px;
+      border: 1px solid rgba(31, 31, 37, 0.1);
+      background: rgba(255, 255, 255, 0.78);
+      color: rgba(31, 31, 37, 0.86);
+      cursor: pointer;
+      list-style: none;
+      user-select: none;
+      font-size: 13px;
+      font-weight: 600;
+      white-space: nowrap;
+      transition: border-color 160ms ease, background 160ms ease, color 160ms ease, box-shadow 160ms ease;
+    }}
+
+    .resources-toggle {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 40px;
+      padding: 0 15px;
+      border-radius: 999px;
+      border: 1px solid rgba(31, 31, 37, 0.1);
+      background: rgba(255, 255, 255, 0.78);
+      color: rgba(31, 31, 37, 0.86);
+      cursor: pointer;
+      list-style: none;
+      user-select: none;
+      font-size: 13px;
+      font-weight: 500;
+      white-space: nowrap;
+      transition: border-color 160ms ease, background 160ms ease, color 160ms ease, box-shadow 160ms ease;
+    }}
+
+    .discovery-toggle::-webkit-details-marker {{
+      display: none;
+    }}
+
+    .resources-toggle::-webkit-details-marker {{
+      display: none;
+    }}
+
+    .discovery-panel {{
+      position: absolute;
+      top: calc(100% + 12px);
+      right: 0;
+      width: min(34rem, calc(100vw - 48px));
+      padding: 14px;
+      border-radius: 20px;
+      border: 1px solid rgba(31, 31, 37, 0.08);
+      background: #fff;
+      box-shadow: 0 28px 70px rgba(31, 31, 37, 0.16);
+      z-index: 20;
+      transform-origin: top right;
+      animation: menu-rise 140ms ease-out;
+    }}
+
+    .resources-panel {{
+      position: absolute;
+      top: calc(100% + 12px);
+      right: 0;
+      width: 13rem;
+      padding: 10px;
+      border-radius: 18px;
+      border: 1px solid rgba(31, 31, 37, 0.08);
+      background: #fff;
+      box-shadow: 0 24px 60px rgba(31, 31, 37, 0.14);
+      z-index: 20;
+      transform-origin: top right;
+      animation: menu-rise 140ms ease-out;
+    }}
+
+    .discovery-menu[open] .discovery-toggle,
+    .resources-menu[open] .resources-toggle {{
+      border-color: rgba(235, 99, 89, 0.38);
+      background: #fff;
+      color: var(--foreground);
+      box-shadow: 0 0 0 4px rgba(235, 99, 89, 0.1);
+    }}
+
+    .resources-links {{
+      display: grid;
+      gap: 8px;
+    }}
+
+    .resources-link {{
+      display: flex;
+      align-items: center;
+      min-height: 40px;
+      padding: 0 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(31, 31, 37, 0.08);
+      background: #fff;
+      font-size: 13px;
+      font-weight: 500;
+      transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
+    }}
+
+    .resources-link:hover {{
+      background: rgba(235, 99, 89, 0.08);
+      border-color: rgba(235, 99, 89, 0.2);
+      transform: translateY(-1px);
+    }}
+
+    .mobile-nav-section {{
+      display: none;
+    }}
+
+    .mobile-nav-label {{
+      margin: 2px 2px 0;
+      color: var(--muted-soft);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }}
+
+    .mobile-nav-stack,
+    .mobile-fact-list,
+    .mobile-resource-links {{
+      display: grid;
+      gap: 8px;
+    }}
+
+    .mobile-nav-divider {{
+      height: 1px;
+      margin: 2px 0;
+      background: rgba(31, 31, 37, 0.08);
+    }}
+
+    @keyframes menu-rise {{
+      from {{
+        opacity: 0;
+        transform: translateY(-6px) scale(0.985);
+      }}
+      to {{
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }}
+    }}
+
+    .discovery-panel-head {{
+      margin-bottom: 10px;
+    }}
+
+    .discovery-panel-head h2 {{
+      margin: 0;
+      font-size: 1rem;
+      letter-spacing: -0.02em;
+    }}
+
+    .discovery-panel-head p {{
+      margin-top: 4px;
+      font-size: 0.88rem;
+    }}
+
+    .nav-toggle {{
+      display: none;
+      align-items: center;
+      justify-content: center;
+      min-height: 40px;
+      min-width: 40px;
+      border: 1px solid rgba(31, 31, 37, 0.12);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.76);
+      color: var(--foreground);
+      cursor: pointer;
+      list-style: none;
+      user-select: none;
+      padding: 0 12px;
+      font-size: 13px;
+      font-weight: 600;
       gap: 10px;
+    }}
+
+    .mobile-menu-panel {{
+      display: none;
+    }}
+
+    .nav-toggle::-webkit-details-marker {{
+      display: none;
+    }}
+
+    .nav-toggle-bars {{
+      display: inline-grid;
+      gap: 4px;
+    }}
+
+    .nav-toggle-bars span {{
+      display: block;
+      width: 16px;
+      height: 2px;
+      border-radius: 999px;
+      background: currentColor;
     }}
 
     .nav-link,
@@ -1118,9 +1734,9 @@ async def index():
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      min-height: 44px;
+      min-height: 40px;
       border-radius: 999px;
-      padding: 0 16px;
+      padding: 0 14px;
       transition: transform 160ms ease, border-color 160ms ease, background 160ms ease, color 160ms ease;
       white-space: nowrap;
     }}
@@ -1129,7 +1745,7 @@ async def index():
       border: 1px solid rgba(31, 31, 37, 0.1);
       background: rgba(255, 255, 255, 0.66);
       color: rgba(31, 31, 37, 0.82);
-      font-size: 14px;
+      font-size: 13px;
       font-weight: 500;
     }}
 
@@ -1140,10 +1756,10 @@ async def index():
     }}
 
     .nav-cta {{
-      padding: 0 20px;
+      padding: 0 16px;
       background: var(--primary);
       color: #fff;
-      font-size: 14px;
+      font-size: 13px;
       font-weight: 600;
       letter-spacing: 0.01em;
       box-shadow: 0 14px 30px rgba(235, 99, 89, 0.26);
@@ -1158,13 +1774,14 @@ async def index():
       position: relative;
       overflow: hidden;
       border: 1px solid rgba(255, 255, 255, 0.65);
-      border-radius: 32px;
+      border-radius: 28px;
       background:
         linear-gradient(135deg, rgba(255,255,255,0.86), rgba(255,255,255,0.58)),
         linear-gradient(160deg, rgba(235,99,89,0.06), rgba(226,221,217,0.18));
       box-shadow: var(--shadow);
-      padding: clamp(1.25rem, 2vw, 1.75rem);
+      padding: clamp(1rem, 1.5vw, 1.35rem);
       backdrop-filter: blur(18px);
+      z-index: 1;
     }}
 
     .hero-shell::before {{
@@ -1179,7 +1796,7 @@ async def index():
     .hero {{
       display: grid;
       grid-template-columns: 1.4fr 1fr;
-      gap: 18px;
+      gap: 14px;
       align-items: stretch;
     }}
 
@@ -1187,8 +1804,8 @@ async def index():
       position: relative;
       background: var(--card);
       border: 1px solid var(--line);
-      border-radius: var(--radius);
-      padding: 22px;
+      border-radius: 18px;
+      padding: 18px;
       backdrop-filter: blur(12px);
       box-shadow: inset 0 1px 0 rgba(255,255,255,0.7);
     }}
@@ -1201,18 +1818,15 @@ async def index():
 
     .hero-side {{
       background:
-        linear-gradient(180deg, rgba(31,31,37,0.96), rgba(31,31,37,0.88)),
-        linear-gradient(135deg, rgba(235,99,89,0.12), transparent);
-      color: #fff;
-      border-color: rgba(255,255,255,0.08);
-      box-shadow: 0 18px 50px rgba(31, 31, 37, 0.16);
+        linear-gradient(180deg, rgba(255,255,255,0.9), rgba(255,255,255,0.78)),
+        linear-gradient(135deg, rgba(235,99,89,0.08), transparent);
     }}
 
     h1 {{
       margin: 0;
       max-width: 11ch;
-      font-size: clamp(3rem, 7vw, 5.5rem);
-      line-height: 0.92;
+      font-size: clamp(2.4rem, 5vw, 4.4rem);
+      line-height: 0.94;
       letter-spacing: -0.04em;
       font-weight: 500;
     }}
@@ -1220,56 +1834,42 @@ async def index():
     p {{
       margin: 0;
       color: var(--muted);
-      line-height: 1.6;
-      font-weight: 300;
-    }}
-
-    .hero-side p,
-    .hero-side .label,
-    .hero-side .linkcard span,
-    .hero-side .list,
-    .hero-side .note {{
-      color: rgba(255, 255, 255, 0.66);
+      line-height: 1.5;
+      font-weight: 400;
+      font-size: 0.95rem;
     }}
 
     .eyebrow {{
       display: inline-flex;
       align-items: center;
       gap: 8px;
-      margin-bottom: 14px;
+      margin-bottom: 10px;
       color: var(--primary);
       letter-spacing: 0.1em;
       text-transform: uppercase;
-      font-size: 12px;
+      font-size: 11px;
       font-weight: 600;
     }}
 
     .eyebrow::before {{
       content: "";
-      width: 24px;
+      width: 18px;
       height: 1px;
       background: currentColor;
       opacity: 0.72;
     }}
 
-    .hero-side .eyebrow,
-    .hero-side .linkcard strong,
-    .hero-side .repo a,
-    .hero-side .value a {{
-      color: #fff;
-    }}
-
     .lede {{
       max-width: 38rem;
-      margin-top: 16px;
-      font-size: clamp(1rem, 1.4vw, 1.125rem);
+      margin-top: 10px;
+      font-size: clamp(0.94rem, 1.1vw, 1.02rem);
     }}
 
     .hero-meta {{
       display: flex;
       flex-wrap: wrap;
-      gap: 10px;
-      margin-top: 20px;
+      gap: 8px;
+      margin-top: 14px;
     }}
 
     .pill {{
@@ -1277,26 +1877,26 @@ async def index():
       align-items: center;
       border: 1px solid rgba(31, 31, 37, 0.1);
       border-radius: 999px;
-      padding: 10px 14px;
+      padding: 7px 11px;
       background: rgba(255, 255, 255, 0.72);
       color: rgba(31, 31, 37, 0.78);
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 500;
     }}
 
     .stats {{
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 12px;
-      margin-top: 22px;
+      gap: 10px;
+      margin-top: 16px;
     }}
 
     .stat {{
       border: 1px solid var(--line);
-      border-radius: 16px;
-      padding: 15px;
+      border-radius: 14px;
+      padding: 12px;
       background: rgba(255,255,255,0.58);
-      min-height: 118px;
+      min-height: 96px;
     }}
 
     .hero-side .stat {{
@@ -1307,14 +1907,14 @@ async def index():
     .label {{
       display: block;
       color: var(--muted-soft);
-      font-size: 12px;
-      margin-bottom: 10px;
+      font-size: 11px;
+      margin-bottom: 7px;
       text-transform: uppercase;
       letter-spacing: 0.08em;
     }}
 
     .value {{
-      font-size: clamp(1.5rem, 2vw, 2rem);
+      font-size: clamp(1.2rem, 1.6vw, 1.6rem);
       color: var(--foreground);
       word-break: break-word;
       letter-spacing: -0.03em;
@@ -1325,99 +1925,198 @@ async def index():
     }}
 
     .value.small {{
-      font-size: 13px;
-      line-height: 1.6;
+      font-size: 12px;
+      line-height: 1.45;
       letter-spacing: 0;
     }}
 
-    .grid {{
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 18px;
-      margin-top: 18px;
+    .capability-section {{
+      margin-top: 14px;
+      padding-top: 14px;
+      border-top: 1px solid rgba(31, 31, 37, 0.08);
     }}
 
-    .section-card {{
-      background:
-        linear-gradient(180deg, rgba(255,255,255,0.86), rgba(255,255,255,0.7));
-      box-shadow: var(--shadow);
+    .capability-copy {{
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 14px;
+      margin-bottom: 10px;
     }}
 
-    .links {{
+    .capability-copy p {{
+      max-width: 42rem;
+    }}
+
+    .skill-grid {{
       display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 10px;
-      margin-top: 18px;
     }}
 
-    .linkcard {{
+    .skill-grid.compact {{
+      grid-template-columns: 1fr;
+    }}
+
+    .skill-card {{
+      padding: 14px;
+      border-radius: 16px;
+      border: 1px solid rgba(31, 31, 37, 0.1);
+      background: rgba(255, 255, 255, 0.58);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.65);
+    }}
+
+    .skill-card.empty {{
+      grid-column: 1 / -1;
+    }}
+
+    .skill-card p {{
+      font-size: 0.88rem;
+      line-height: 1.45;
+    }}
+
+    .skill-card-top {{
+      display: flex;
+      align-items: start;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
+    }}
+
+    .skill-card h3 {{
+      margin: 0;
+      font-size: 1rem;
+      line-height: 1.1;
+      letter-spacing: -0.02em;
+      font-weight: 600;
+    }}
+
+    .mini-pills {{
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 5px;
+    }}
+
+    .mini-pill {{
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 0 8px;
+      border-radius: 999px;
+      background: rgba(235, 99, 89, 0.12);
+      color: rgba(31, 31, 37, 0.82);
+      font-size: 11px;
+      font-weight: 600;
+    }}
+
+    .skill-slug {{
+      margin-top: 8px;
+      color: var(--muted-soft);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }}
+
+    .discovery-links {{
+      display: grid;
+      gap: 8px;
+      margin-top: 14px;
+    }}
+
+    .discovery-card {{
       display: block;
       color: inherit;
       border: 1px solid var(--line);
-      border-radius: 16px;
-      padding: 15px 16px;
+      border-radius: 14px;
+      padding: 12px 13px;
       background: rgba(255,255,255,0.04);
       transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
     }}
 
-    .linkcard:hover {{
+    .discovery-card:hover {{
       transform: translateY(-1px);
       border-color: var(--line-strong);
       background: rgba(255,255,255,0.1);
     }}
 
-    .linkcard span {{
+    .discovery-card span {{
       display: block;
       color: var(--muted-soft);
-      margin-bottom: 6px;
-      font-size: 12px;
+      margin-bottom: 4px;
+      font-size: 11px;
       text-transform: uppercase;
       letter-spacing: 0.08em;
     }}
 
-    .linkcard strong {{
+    .discovery-card strong {{
       color: var(--primary);
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 500;
       word-break: break-all;
     }}
 
-    .list {{
-      margin: 18px 0 0;
-      padding: 0;
-      list-style: none;
-      color: var(--muted);
+    .discovery-card p {{
+      margin-top: 6px;
+      font-size: 12px;
+      color: inherit;
+      line-height: 1.5;
     }}
 
-    .list li {{
-      margin: 0;
-      padding: 14px 0;
-      border-bottom: 1px solid rgba(31, 31, 37, 0.08);
-      line-height: 1.6;
+    .fact-list {{
+      display: grid;
+      gap: 8px;
+      margin-top: 14px;
     }}
 
-    .list li:last-child {{
-      border-bottom: 0;
-      padding-bottom: 0;
+    .fact-row {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.7);
+      border: 1px solid rgba(31,31,37,0.08);
     }}
 
-    .list strong {{
+    .fact-row span {{
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted-soft);
+    }}
+
+    .fact-row strong {{
       color: var(--foreground);
-      font-weight: 500;
+      font-size: 12px;
+      line-height: 1.35;
+      word-break: break-word;
+      text-align: right;
     }}
 
     .note {{
-      margin-top: 16px;
-      padding: 12px 14px;
-      border-radius: 14px;
+      margin-top: 12px;
+      padding: 10px 12px;
+      border-radius: 12px;
       background: var(--primary-soft);
       color: rgba(31, 31, 37, 0.72);
-      font-size: 13px;
-      line-height: 1.55;
+      font-size: 12px;
+      line-height: 1.45;
+    }}
+
+    .site-footer {{
+      margin-top: 16px;
+      padding: 10px 4px 0;
+      text-align: center;
+      color: var(--muted-soft);
+      font-size: 12px;
+      letter-spacing: 0.04em;
     }}
 
     .repo {{
-      margin-top: 18px;
-      font-size: 13px;
+      margin-top: 12px;
+      font-size: 12px;
       color: rgba(31, 31, 37, 0.72);
     }}
 
@@ -1426,44 +2125,112 @@ async def index():
       color: var(--primary);
     }}
 
-    .section-head {{
-      display: flex;
-      align-items: end;
-      justify-content: space-between;
-      gap: 16px;
-    }}
-
-    .section-head p {{
-      max-width: 32rem;
-    }}
-
     @media (max-width: 860px) {{
-      .hero, .grid, .stats {{ grid-template-columns: 1fr; }}
+      .hero, .stats, .skill-grid {{ grid-template-columns: 1fr; }}
       body {{ padding: 16px; }}
       .site-header {{
-        padding: 14px;
+        padding: 12px 14px;
       }}
-      .site-nav {{
-        justify-content: flex-start;
-      }}
-      .hero-shell {{ border-radius: 24px; padding: 14px; }}
-      .card {{ padding: 18px; }}
+      .hero-shell {{ border-radius: 22px; padding: 12px; }}
+      .card {{ padding: 15px; }}
       h1 {{ max-width: none; }}
-      .hero-meta {{ margin-top: 16px; }}
+      .hero-meta {{ margin-top: 12px; }}
       .stat {{ min-height: 0; }}
+      .capability-copy {{
+        flex-direction: column;
+        align-items: start;
+      }}
     }}
 
     @media (max-width: 700px) {{
       .site-header {{
+        align-items: center;
+        padding: 12px 14px;
+      }}
+      .brand-copy {{
+        max-width: 12rem;
+      }}
+      .discovery-toggle {{
+        min-height: 38px;
+        padding: 0 12px;
+        font-size: 12px;
+      }}
+      .resources-toggle {{
+        min-height: 38px;
+        padding: 0 12px;
+        font-size: 12px;
+      }}
+      .discovery-panel {{
+        position: fixed;
+        right: 16px;
+        left: 16px;
+        top: 72px;
+        width: auto;
+        max-height: calc(100vh - 96px);
+        overflow: auto;
+      }}
+      .resources-panel {{
+        position: fixed;
+        right: 16px;
+        left: auto;
+        top: 72px;
+        width: min(13rem, calc(100vw - 32px));
+      }}
+      .nav-toggle {{
+        display: inline-flex;
+      }}
+      .nav-menu {{
+        display: block;
+      }}
+      .desktop-only {{
+        display: none;
+      }}
+      .mobile-only {{
+        display: block;
+      }}
+      .desktop-cta {{
+        display: none;
+      }}
+      .nav-menu {{
+        position: relative;
+      }}
+      .mobile-menu-panel {{
+        display: none;
+        position: fixed;
+        left: 8px;
+        right: 8px;
+        top: var(--mobile-menu-top, 90px);
+        height: 720px;
+        padding: 12px;
+        border-radius: 20px;
+        border: 1px solid rgba(31, 31, 37, 0.08);
+        background: #fff;
+        box-shadow: 1px 1px 5px rgba(31, 31, 37, 0.22);
+        z-index: 40;
+        overflow: auto;
+        -webkit-overflow-scrolling: touch;
+      }}
+      .nav-menu[data-open="true"] .mobile-menu-panel {{
+        display: block;
+      }}
+      .nav-menu .site-nav {{
+        display: flex;
         flex-direction: column;
         align-items: stretch;
+        gap: 8px;
       }}
-      .site-nav {{
+      .mobile-nav-section {{
+        display: grid;
+        gap: 8px;
+      }}
+      .nav-menu .nav-link,
+      .nav-menu .nav-cta,
+      .nav-menu .resources-link,
+      .nav-menu .discovery-card {{
         width: 100%;
       }}
-      .nav-link,
-      .nav-cta {{
-        flex: 1 1 calc(50% - 10px);
+      .nav-menu .nav-cta {{
+        margin-top: 2px;
       }}
     }}
   </style>
@@ -1477,28 +2244,65 @@ async def index():
         </svg>
         <span class='brand-copy'>
           <span class='brand-name'>Radius</span>
-          <span class='brand-subtitle'>Hermes Agent</span>
+          <span class='brand-subtitle'>Agent Ecosystem</span>
         </span>
       </a>
-      <nav class='site-nav' aria-label='Primary'>
-        <a class='nav-link' href='{radius_mainnet}' target='_blank' rel='noopener'>Mainnet</a>
-        <a class='nav-link' href='{radius_testnet}' target='_blank' rel='noopener'>Testnet</a>
-        <a class='nav-link' href='{radius_docs}' target='_blank' rel='noopener'>Docs</a>
-        <a class='nav-cta' href='{template_repo}' target='_blank' rel='noopener'>Create Your Own Agent</a>
-      </nav>
+      <div class='nav-shell'>
+        <details class='discovery-menu desktop-only'>
+          <summary class='discovery-toggle'>Discovery Surface</summary>
+          <div class='discovery-panel'>
+            <div class='discovery-panel-head'>
+              <h2>Canonical Agent Documents</h2>
+              <p>These machine-readable documents remain the public contract for A2A clients, registries, agent browsers, and operator tooling.</p>
+            </div>
+            <div class='discovery-links'>{discovery_cards_html}</div>
+            <div class='fact-list'>{discovery_facts_html}</div>
+          </div>
+        </details>
+        <details class='resources-menu desktop-only'>
+          <summary class='resources-toggle'>Resources</summary>
+          <div class='resources-panel'>
+            <div class='resources-links'>
+              <a class='resources-link' href='{radius_mainnet}' target='_blank' rel='noopener'>Mainnet</a>
+              <a class='resources-link' href='{radius_testnet}' target='_blank' rel='noopener'>Testnet</a>
+              <a class='resources-link' href='{radius_docs}' target='_blank' rel='noopener'>Docs</a>
+            </div>
+          </div>
+        </details>
+        <a class='nav-cta desktop-cta' href='{template_repo}' target='_blank' rel='noopener'>Create Your Own Agent</a>
+        <div class='nav-menu' data-open='false'>
+          <button class='nav-toggle' type='button' aria-label='Open navigation menu' aria-expanded='false' aria-controls='mobile-menu-panel'>
+            <span class='nav-toggle-bars' aria-hidden='true'><span></span><span></span><span></span></span>
+            <span>Menu</span>
+          </button>
+          <div class='mobile-menu-panel' id='mobile-menu-panel'>
+            <nav class='site-nav' aria-label='Primary'>
+            <div class='mobile-nav-section mobile-only'>
+              <div class='mobile-nav-label'>Discovery Surface</div>
+              <div class='mobile-nav-stack'>{discovery_cards_html}</div>
+              <div class='mobile-fact-list'>{discovery_facts_html}</div>
+              <div class='mobile-nav-divider'></div>
+              <div class='mobile-nav-label'>Resources</div>
+              <div class='mobile-resource-links'>
+                <a class='resources-link' href='{radius_mainnet}' target='_blank' rel='noopener'>Mainnet</a>
+                <a class='resources-link' href='{radius_testnet}' target='_blank' rel='noopener'>Testnet</a>
+                <a class='resources-link' href='{radius_docs}' target='_blank' rel='noopener'>Docs</a>
+              </div>
+              <div class='mobile-nav-divider'></div>
+            </div>
+            <a class='nav-cta' href='{template_repo}' target='_blank' rel='noopener'>Create Your Own Agent</a>
+            </nav>
+          </div>
+        </div>
+      </div>
     </header>
 
     <section class='hero-shell'>
       <div class='hero'>
         <div class='card hero-main'>
-          <span class='eyebrow'>Radius Hermes Agent</span>
+          <span class='eyebrow'>Agent Details</span>
           <h1>{html.escape(agent_name)}</h1>
-          <p class='lede'>Public discovery profile for this agent. Inspect its A2A surface, DID identity, wallet footprint, and published capabilities from one page.</p>
-          <div class='hero-meta'>
-            <span class='pill'>A2A-ready discovery</span>
-            <span class='pill'>ERC-8004 identity</span>
-            <span class='pill'>Radius wallet visibility</span>
-          </div>
+          <p class='lede'>{html.escape(agent_description)}</p>
           <div class='stats'>
             <div class='stat'>
               <span class='label'>DID</span>
@@ -1518,37 +2322,99 @@ async def index():
             </div>
           </div>
           {wallet_note}
-          <p class='repo'>Deploy your own: <a href='https://github.com/radius-workshop/radius-hermes-railway-template' target='_blank' rel='noopener'>radius-workshop/radius-hermes-railway-template</a></p>
         </div>
         <div class='card hero-side'>
-          <span class='eyebrow'>Discovery</span>
-          <p>These endpoints are public and intended for operators, agent browsers, and other A2A-compatible systems.</p>
-          <div class='links'>{links_html}</div>
+          <span class='eyebrow'>Published Skills</span>
+          <p>{html.escape(skill_summary)}</p>
+          <br>
+          <div class='skill-grid compact'>{skills_html}</div>
         </div>
       </div>
     </section>
+    <footer class='site-footer'>2026 &middot; Radius Technology System &middot; MIT License</footer>
 
-    <section class='grid'>
-      <div class='card section-card'>
-        <div class='section-head'>
-          <div>
-            <span class='eyebrow'>Published Skills</span>
-            <p>This list is rendered from the public skills index and updates automatically as published skills change.</p>
-          </div>
-        </div>
-        <ul class='list'>{skills_html}</ul>
-      </div>
-      <div class='card section-card'>
-        <span class='eyebrow'>What To Inspect</span>
-        <ul class='list'>
-          <li><strong>Agent Card</strong> for supported interfaces and auth scheme</li>
-          <li><strong>DID Document</strong> for the agent's public signing key</li>
-          <li><strong>Agent Registration</strong> for ERC-8004 and wallet identity</li>
-          <li><strong>Skills Index</strong> for the published capability surface</li>
-        </ul>
-      </div>
-    </section>
   </div>
+  <script>
+    (() => {{
+      const detailMenus = Array.from(document.querySelectorAll('.discovery-menu, .resources-menu'));
+      const closeOtherMenus = (active) => {{
+        detailMenus.forEach((menu) => {{
+          if (menu !== active) {{
+            menu.removeAttribute('open');
+          }}
+        }});
+      }};
+      detailMenus.forEach((menu) => {{
+        menu.addEventListener('toggle', () => {{
+          if (menu.open) {{
+            closeOtherMenus(menu);
+          }}
+        }});
+      }});
+      document.addEventListener('click', (event) => {{
+        if (detailMenus.some((menu) => menu.contains(event.target))) {{
+          return;
+        }}
+        detailMenus.forEach((menu) => menu.removeAttribute('open'));
+      }});
+      document.addEventListener('keydown', (event) => {{
+        if (event.key === 'Escape') {{
+          detailMenus.forEach((menu) => menu.removeAttribute('open'));
+        }}
+      }});
+      const navMenu = document.querySelector('.nav-menu');
+      const navToggle = navMenu ? navMenu.querySelector('.nav-toggle') : null;
+      const mobilePanel = navMenu ? navMenu.querySelector('.mobile-menu-panel') : null;
+      const siteHeader = document.querySelector('.site-header');
+      const updateMobileMenuPosition = () => {{
+        if (!siteHeader) return;
+        const rect = siteHeader.getBoundingClientRect();
+        const top = Math.round(rect.bottom + 12);
+        document.documentElement.style.setProperty('--mobile-menu-top', `${{top}}px`);
+      }};
+      const setNavOpen = (open) => {{
+        if (!navMenu || !navToggle) return;
+        navMenu.dataset.open = open ? 'true' : 'false';
+        navToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+        if (open && mobilePanel) {{
+          updateMobileMenuPosition();
+          const resetPanel = () => {{
+            mobilePanel.scrollTop = 0;
+            mobilePanel.scrollTo(0, 0);
+          }};
+          resetPanel();
+          requestAnimationFrame(resetPanel);
+        }}
+      }};
+      if (!navMenu || !navToggle) return;
+      navToggle.addEventListener('click', () => {{
+        const nextOpen = navMenu.dataset.open !== 'true';
+        if (nextOpen) {{
+          closeOtherMenus(null);
+        }}
+        setNavOpen(nextOpen);
+      }});
+      document.addEventListener('click', (event) => {{
+        if (navMenu.contains(event.target)) return;
+        setNavOpen(false);
+      }});
+      document.addEventListener('keydown', (event) => {{
+        if (event.key === 'Escape') {{
+          setNavOpen(false);
+        }}
+      }});
+      const syncMenu = () => {{
+        updateMobileMenuPosition();
+        if (window.innerWidth <= 700) {{
+          setNavOpen(false);
+        }} else {{
+          setNavOpen(false);
+        }}
+      }};
+      syncMenu();
+      window.addEventListener('resize', syncMenu);
+    }})();
+  </script>
 </body>
 </html>"""
     )
@@ -1557,37 +2423,69 @@ async def index():
 async def _handle_delegated(rpc_id, message: dict, issuer_did: str | None):
     webhook_secret = os.environ.get("WEBHOOK_SECRET")
     if not webhook_secret:
-        return _rpc_error_response(rpc_id, InternalError(message="Webhook not configured on this agent"), status_code=503)
+        return _rpc_error_response(
+            rpc_id,
+            InternalError(message="Webhook not configured on this agent"),
+            status_code=503,
+        )
 
     parts = message.get("parts") or []
     text = "\n".join(p["text"] for p in parts if isinstance(p.get("text"), str)).strip()
     if not text:
-        return _rpc_error_response(rpc_id, InvalidParamsError(message="Invalid params: no text content in message parts"))
+        return _rpc_error_response(
+            rpc_id,
+            InvalidParamsError(
+                message="Invalid params: no text content in message parts"
+            ),
+        )
 
     task_id = str(uuid.uuid4())
     context_id = message.get("context_id", task_id)
-    update_request_context(rpc_id=rpc_id, context_id=context_id, issuer_did=issuer_did, a2a_mode="delegated", a2a_task_id=task_id)
+    update_request_context(
+        rpc_id=rpc_id,
+        context_id=context_id,
+        issuer_did=issuer_did,
+        a2a_mode="delegated",
+        a2a_task_id=task_id,
+    )
     issuer_did_url = _did_web_to_base_url(issuer_did) if issuer_did else None
     session = _a2a_session_store.find_by_context(context_id)
-    webhook_payload = json.dumps({
-        "text": text,
-        "context_id": context_id,
-        "task_id": task_id,
-        **({"issuer_did": issuer_did} if issuer_did else {}),
-        **({"issuer_did_url": issuer_did_url} if issuer_did_url else {}),
-        **({"a2a_session_id": session.get("session_id")} if session else {}),
-        **({"a2a_session_goal": session.get("goal") or session.get("topic")} if session else {}),
-        **({"a2a_session_turn_count": session.get("turn_count")} if session else {}),
-        **({"a2a_session_auto_continue": session.get("auto_continue")} if session else {}),
-    })
-    sig = hmac.new(webhook_secret.encode("utf-8"), webhook_payload.encode("utf-8"), "sha256").hexdigest()
+    webhook_payload = json.dumps(
+        {
+            "text": text,
+            "context_id": context_id,
+            "task_id": task_id,
+            **({"issuer_did": issuer_did} if issuer_did else {}),
+            **({"issuer_did_url": issuer_did_url} if issuer_did_url else {}),
+            **({"a2a_session_id": session.get("session_id")} if session else {}),
+            **(
+                {"a2a_session_goal": session.get("goal") or session.get("topic")}
+                if session
+                else {}
+            ),
+            **(
+                {"a2a_session_turn_count": session.get("turn_count")} if session else {}
+            ),
+            **(
+                {"a2a_session_auto_continue": session.get("auto_continue")}
+                if session
+                else {}
+            ),
+        }
+    )
+    sig = hmac.new(
+        webhook_secret.encode("utf-8"), webhook_payload.encode("utf-8"), "sha256"
+    ).hexdigest()
     webhook_port = os.environ.get("WEBHOOK_PORT", "8644")
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             webhook_res = await client.post(
                 f"http://localhost:{webhook_port}/webhooks/a2a",
                 content=webhook_payload,
-                headers={"Content-Type": "application/json", "X-Webhook-Signature": sig},
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Webhook-Signature": sig,
+                },
             )
         if not webhook_res.is_success:
             log_event(
@@ -1604,7 +2502,9 @@ async def _handle_delegated(rpc_id, message: dict, issuer_did: str | None):
             )
             return _rpc_error_response(
                 rpc_id,
-                InternalError(message=f"Webhook delivery failed: HTTP {webhook_res.status_code}"),
+                InternalError(
+                    message=f"Webhook delivery failed: HTTP {webhook_res.status_code}"
+                ),
                 status_code=502,
             )
     except Exception:
@@ -1622,7 +2522,9 @@ async def _handle_delegated(rpc_id, message: dict, issuer_did: str | None):
         )
         return _rpc_error_response(
             rpc_id,
-            InternalError(message="Could not reach agent backend — ensure WEBHOOK_ENABLED=true and WEBHOOK_SECRET is set"),
+            InternalError(
+                message="Could not reach agent backend — ensure WEBHOOK_ENABLED=true and WEBHOOK_SECRET is set"
+            ),
             status_code=503,
         )
 
@@ -1641,27 +2543,65 @@ async def _handle_delegated(rpc_id, message: dict, issuer_did: str | None):
 
     return _rpc_success_response(
         rpc_id,
-        {"id": task_id, "context_id": context_id, "status": {"state": "TASK_STATE_SUBMITTED", "timestamp_ms": int(time.time() * 1000)}},
+        {
+            "id": task_id,
+            "context_id": context_id,
+            "status": {
+                "state": "TASK_STATE_SUBMITTED",
+                "timestamp_ms": int(time.time() * 1000),
+            },
+        },
     )
 
 
 def _hermes_error_response(rpc_id, exc: Exception) -> JSONResponse:
     if isinstance(exc, HermesUnavailableError):
-        log_event(logger, logging.WARNING, "Direct A2A cannot reach Hermes backend", event="a2a.direct", outcome="error", rpc_id=rpc_id, hermes_error=str(exc), error_type="unavailable")
+        log_event(
+            logger,
+            logging.WARNING,
+            "Direct A2A cannot reach Hermes backend",
+            event="a2a.direct",
+            outcome="error",
+            rpc_id=rpc_id,
+            hermes_error=str(exc),
+            error_type="unavailable",
+        )
         return _rpc_error_response(
             rpc_id,
-            InternalError(message="Hermes backend is unreachable. Check HERMES_URL and HERMES_API_KEY/API_SERVER_KEY."),
+            InternalError(
+                message="Hermes backend is unreachable. Check HERMES_URL and HERMES_API_KEY/API_SERVER_KEY."
+            ),
             status_code=503,
         )
     if isinstance(exc, HermesUpstreamError):
-        log_event(logger, logging.WARNING, "Direct A2A Hermes upstream returned an error", event="a2a.direct", outcome="error", rpc_id=rpc_id, hermes_error=str(exc), error_type="upstream")
+        log_event(
+            logger,
+            logging.WARNING,
+            "Direct A2A Hermes upstream returned an error",
+            event="a2a.direct",
+            outcome="error",
+            rpc_id=rpc_id,
+            hermes_error=str(exc),
+            error_type="upstream",
+        )
         return _rpc_error_response(
             rpc_id,
             InternalError(message=str(exc)),
             status_code=502,
         )
-    log_event(logger, logging.ERROR, "Direct A2A failure", event="a2a.direct", outcome="error", rpc_id=rpc_id, error_type=type(exc).__name__, exc_info=True)
-    return _rpc_error_response(rpc_id, InternalError(message="Internal processing error"))
+    log_event(
+        logger,
+        logging.ERROR,
+        "Direct A2A failure",
+        event="a2a.direct",
+        outcome="error",
+        rpc_id=rpc_id,
+        error_type=type(exc).__name__,
+        exc_info=True,
+    )
+    return _rpc_error_response(
+        rpc_id, InternalError(message="Internal processing error")
+    )
 
 
 @app.post("/a2a")
@@ -1669,27 +2609,70 @@ async def handle_a2a(request: Request, auth: dict = Depends(jwt_auth_dep)):
     try:
         body = await request.json()
     except Exception:
-        log_event(logger, logging.WARNING, "A2A request body could not be parsed", event="a2a.request", outcome="rejected", rejection_reason="json_parse_error")
-        return _rpc_error_response(None, JSONParseError(message="Parse error"), status_code=400)
+        log_event(
+            logger,
+            logging.WARNING,
+            "A2A request body could not be parsed",
+            event="a2a.request",
+            outcome="rejected",
+            rejection_reason="json_parse_error",
+        )
+        return _rpc_error_response(
+            None, JSONParseError(message="Parse error"), status_code=400
+        )
 
     try:
         parsed_request = JSONRPCRequest.model_validate(body)
         body = parsed_request.model_dump(by_alias=True, exclude_none=True)
     except Exception:
-        log_event(logger, logging.WARNING, "A2A request failed schema validation", event="a2a.request", outcome="rejected", rejection_reason="invalid_request")
-        return _rpc_error_response(body.get("id") if isinstance(body, dict) else None, InvalidRequestError(), status_code=400)
+        log_event(
+            logger,
+            logging.WARNING,
+            "A2A request failed schema validation",
+            event="a2a.request",
+            outcome="rejected",
+            rejection_reason="invalid_request",
+        )
+        return _rpc_error_response(
+            body.get("id") if isinstance(body, dict) else None,
+            InvalidRequestError(),
+            status_code=400,
+        )
 
     if body.get("jsonrpc") != "2.0" or not body.get("method"):
-        log_event(logger, logging.WARNING, "A2A request missing required JSON-RPC fields", event="a2a.request", outcome="rejected", rejection_reason="invalid_jsonrpc_envelope", rpc_id=body.get("id"))
-        return _rpc_error_response(body.get("id"), InvalidRequestError(message="Invalid Request"), status_code=400)
+        log_event(
+            logger,
+            logging.WARNING,
+            "A2A request missing required JSON-RPC fields",
+            event="a2a.request",
+            outcome="rejected",
+            rejection_reason="invalid_jsonrpc_envelope",
+            rpc_id=body.get("id"),
+        )
+        return _rpc_error_response(
+            body.get("id"),
+            InvalidRequestError(message="Invalid Request"),
+            status_code=400,
+        )
 
     rpc_id = body.get("id")
     method = body.get("method")
     params = body.get("params") or {}
     message = params.get("message")
     if not message:
-        log_event(logger, logging.WARNING, "A2A request missing message payload", event="a2a.request", outcome="rejected", rejection_reason="missing_message", rpc_id=rpc_id, rpc_method=method)
-        return _rpc_error_response(rpc_id, InvalidParamsError(message="Invalid params: missing message"))
+        log_event(
+            logger,
+            logging.WARNING,
+            "A2A request missing message payload",
+            event="a2a.request",
+            outcome="rejected",
+            rejection_reason="missing_message",
+            rpc_id=rpc_id,
+            rpc_method=method,
+        )
+        return _rpc_error_response(
+            rpc_id, InvalidParamsError(message="Invalid params: missing message")
+        )
 
     mode = _resolve_mode(method)
     message_id = message.get("message_id") if isinstance(message, dict) else None
@@ -1698,7 +2681,11 @@ async def handle_a2a(request: Request, auth: dict = Depends(jwt_auth_dep)):
     context_id = message.get("context_id") if isinstance(message, dict) else None
     prompt_chars = 0
     if isinstance(message, dict):
-        prompt_chars = sum(len(part.get("text", "")) for part in (message.get("parts") or []) if isinstance(part.get("text"), str))
+        prompt_chars = sum(
+            len(part.get("text", ""))
+            for part in (message.get("parts") or [])
+            if isinstance(part.get("text"), str)
+        )
     update_request_context(
         rpc_id=rpc_id,
         rpc_method=method,
@@ -1722,7 +2709,9 @@ async def handle_a2a(request: Request, auth: dict = Depends(jwt_auth_dep)):
         a2a_message_id=message_id,
         prompt_chars=prompt_chars,
     )
-    managed_session = _a2a_session_store.find_by_context(context_id) if context_id else None
+    managed_session = (
+        _a2a_session_store.find_by_context(context_id) if context_id else None
+    )
     if (
         managed_session
         and managed_session.get("controller_mode") == "local"
@@ -1750,28 +2739,71 @@ async def handle_a2a(request: Request, auth: dict = Depends(jwt_auth_dep)):
         result = {
             "id": str(uuid.uuid4()),
             "context_id": context_id,
-            "status": {"state": "TASK_STATE_COMPLETED", "timestamp_ms": int(time.time() * 1000)},
+            "status": {
+                "state": "TASK_STATE_COMPLETED",
+                "timestamp_ms": int(time.time() * 1000),
+            },
             "message": {
                 "role": "agent",
                 "context_id": context_id,
-                "parts": [{"type": "text", "text": "Turn received. Continuing the managed A2A session."}],
+                "parts": [
+                    {
+                        "type": "text",
+                        "text": "Turn received. Continuing the managed A2A session.",
+                    }
+                ],
             },
         }
         return _rpc_success_response(rpc_id, result)
     if method not in {"message/send", "message/stream"}:
-        log_event(logger, logging.WARNING, "A2A method not supported", event="a2a.request", outcome="rejected", rejection_reason="method_not_supported", rpc_id=rpc_id, rpc_method=method)
-        return _rpc_error_response(rpc_id, MethodNotFoundError(message="This operation is not supported"))
+        log_event(
+            logger,
+            logging.WARNING,
+            "A2A method not supported",
+            event="a2a.request",
+            outcome="rejected",
+            rejection_reason="method_not_supported",
+            rpc_id=rpc_id,
+            rpc_method=method,
+        )
+        return _rpc_error_response(
+            rpc_id, MethodNotFoundError(message="This operation is not supported")
+        )
 
     if mode == "delegated":
         if method == "message/stream":
-            log_event(logger, logging.WARNING, "A2A streaming requires direct mode", event="a2a.request", outcome="rejected", rejection_reason="stream_requires_direct_mode", rpc_id=rpc_id, rpc_method=method)
-            return _rpc_error_response(rpc_id, MethodNotFoundError(message="message/stream is only supported in direct mode"))
+            log_event(
+                logger,
+                logging.WARNING,
+                "A2A streaming requires direct mode",
+                event="a2a.request",
+                outcome="rejected",
+                rejection_reason="stream_requires_direct_mode",
+                rpc_id=rpc_id,
+                rpc_method=method,
+            )
+            return _rpc_error_response(
+                rpc_id,
+                MethodNotFoundError(
+                    message="message/stream is only supported in direct mode"
+                ),
+            )
         return await _handle_delegated(rpc_id, message, auth.get("issuer"))
 
     if not _a2a_bridge:
-        log_event(logger, logging.ERROR, "Direct A2A bridge unavailable", event="a2a.direct", outcome="error", rpc_id=rpc_id, rpc_method=method)
+        log_event(
+            logger,
+            logging.ERROR,
+            "Direct A2A bridge unavailable",
+            event="a2a.direct",
+            outcome="error",
+            rpc_id=rpc_id,
+            rpc_method=method,
+        )
         return _rpc_error_response(
-            rpc_id, InternalError(message="Direct A2A bridge is unavailable"), status_code=503
+            rpc_id,
+            InternalError(message="Direct A2A bridge is unavailable"),
+            status_code=503,
         )
 
     try:
@@ -1831,23 +2863,76 @@ async def handle_a2a(request: Request, auth: dict = Depends(jwt_auth_dep)):
                 )
             except (HermesUnavailableError, HermesUpstreamError) as exc:
                 if isinstance(exc, HermesUnavailableError):
-                    log_event(logger, logging.WARNING, "Direct A2A streaming cannot reach Hermes backend", event="a2a.direct_stream", outcome="error", rpc_id=rpc_id, issuer_did=auth.get("issuer"), context_id=get_request_context().get("context_id"), hermes_error=str(exc), error_type="unavailable")
+                    log_event(
+                        logger,
+                        logging.WARNING,
+                        "Direct A2A streaming cannot reach Hermes backend",
+                        event="a2a.direct_stream",
+                        outcome="error",
+                        rpc_id=rpc_id,
+                        issuer_did=auth.get("issuer"),
+                        context_id=get_request_context().get("context_id"),
+                        hermes_error=str(exc),
+                        error_type="unavailable",
+                    )
                     message_text = "Hermes backend is unreachable. Check HERMES_URL and HERMES_API_KEY/API_SERVER_KEY."
                 else:
-                    log_event(logger, logging.WARNING, "Direct A2A streaming Hermes upstream returned an error", event="a2a.direct_stream", outcome="error", rpc_id=rpc_id, issuer_did=auth.get("issuer"), context_id=get_request_context().get("context_id"), hermes_error=str(exc), error_type="upstream")
+                    log_event(
+                        logger,
+                        logging.WARNING,
+                        "Direct A2A streaming Hermes upstream returned an error",
+                        event="a2a.direct_stream",
+                        outcome="error",
+                        rpc_id=rpc_id,
+                        issuer_did=auth.get("issuer"),
+                        context_id=get_request_context().get("context_id"),
+                        hermes_error=str(exc),
+                        error_type="upstream",
+                    )
                     message_text = str(exc)
-                err = {"jsonrpc": "2.0", "id": rpc_id, "error": InternalError(message=message_text).model_dump(exclude_none=True)}
+                err = {
+                    "jsonrpc": "2.0",
+                    "id": rpc_id,
+                    "error": InternalError(message=message_text).model_dump(
+                        exclude_none=True
+                    ),
+                }
                 yield f"data: {json.dumps(err)}\n\n"
             except Exception:
-                log_event(logger, logging.ERROR, "Direct A2A streaming failure", event="a2a.direct_stream", outcome="error", rpc_id=rpc_id, issuer_did=auth.get("issuer"), context_id=get_request_context().get("context_id"), exc_info=True)
-                err = {"jsonrpc": "2.0", "id": rpc_id, "error": InternalError(message="Internal processing error").model_dump(exclude_none=True)}
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "Direct A2A streaming failure",
+                    event="a2a.direct_stream",
+                    outcome="error",
+                    rpc_id=rpc_id,
+                    issuer_did=auth.get("issuer"),
+                    context_id=get_request_context().get("context_id"),
+                    exc_info=True,
+                )
+                err = {
+                    "jsonrpc": "2.0",
+                    "id": rpc_id,
+                    "error": InternalError(
+                        message="Internal processing error"
+                    ).model_dump(exclude_none=True),
+                }
                 yield f"data: {json.dumps(err)}\n\n"
             finally:
                 clear_request_context(stream_token)
 
         return StreamingResponse(_sse(), media_type="text/event-stream")
     except ValueError:
-        log_event(logger, logging.WARNING, "A2A request failed parameter validation", event="a2a.request", outcome="rejected", rejection_reason="invalid_params", rpc_id=rpc_id, rpc_method=method)
+        log_event(
+            logger,
+            logging.WARNING,
+            "A2A request failed parameter validation",
+            event="a2a.request",
+            outcome="rejected",
+            rejection_reason="invalid_params",
+            rpc_id=rpc_id,
+            rpc_method=method,
+        )
         return _rpc_error_response(rpc_id, InvalidParamsError(message="Invalid params"))
     except Exception as exc:
         return _hermes_error_response(rpc_id, exc)
@@ -1863,7 +2948,9 @@ async def serve_file(file_path: str, auth: dict = Depends(jwt_auth_dep)):
         except ValueError:
             continue
         if candidate.exists() and candidate.is_file():
-            return Response(content=candidate.read_bytes(), media_type="application/octet-stream")
+            return Response(
+                content=candidate.read_bytes(), media_type="application/octet-stream"
+            )
     for root in _parse_allowed_roots():
         candidate = (root / requested).resolve()
         try:
@@ -1880,7 +2967,13 @@ async def token_exchange(request: Request):
     if not api_key:
         return JSONResponse({"error": "Not found"}, status_code=404)
     if request.headers.get("X-Api-Key") != api_key:
-        log_event(logger, logging.WARNING, "Token exchange rejected", event="token.exchange", outcome="unauthorized")
+        log_event(
+            logger,
+            logging.WARNING,
+            "Token exchange rejected",
+            event="token.exchange",
+            outcome="unauthorized",
+        )
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     sub = "client"
     try:
@@ -1890,7 +2983,14 @@ async def token_exchange(request: Request):
     except Exception:
         pass
     token = await issue_token(sub)
-    log_event(logger, logging.INFO, "Token issued", event="token.exchange", outcome="issued", token_subject=sub)
+    log_event(
+        logger,
+        logging.INFO,
+        "Token issued",
+        event="token.exchange",
+        outcome="issued",
+        token_subject=sub,
+    )
     return JSONResponse({"token": token})
 
 
