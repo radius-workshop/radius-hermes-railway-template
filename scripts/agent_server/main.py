@@ -943,143 +943,429 @@ async def index():
   <meta name='viewport' content='width=device-width, initial-scale=1.0'>
   <title>{html.escape(agent_name)}</title>
   <style>
+    @import url("https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@300;400;500;600;700&display=swap");
+
     :root {{
-      --bg: #081018;
-      --bg2: #102131;
-      --card: rgba(12, 24, 36, 0.82);
-      --line: rgba(255,255,255,0.12);
-      --text: #f2f7fb;
-      --muted: #a7bacb;
-      --accent: #73f0b3;
-      --accent2: #7bc6ff;
+      --background: #fff;
+      --foreground: #1f1f25;
+      --card: rgba(255, 255, 255, 0.82);
+      --card-strong: rgba(255, 255, 255, 0.94);
+      --line: rgba(31, 31, 37, 0.1);
+      --line-strong: rgba(31, 31, 37, 0.18);
+      --muted: rgba(31, 31, 37, 0.64);
+      --muted-soft: rgba(31, 31, 37, 0.48);
+      --primary: #eb6359;
+      --primary-soft: rgba(235, 99, 89, 0.12);
+      --secondary: #e2ddd9;
+      --shadow: 0 24px 80px rgba(65, 45, 36, 0.12);
+      --radius: 20px;
     }}
     * {{ box-sizing: border-box; }}
+
+    html {{
+      font-size: 16px;
+    }}
+
     body {{
       margin: 0;
       min-height: 100vh;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      color: var(--text);
+      font-family: "Instrument Sans", sans-serif;
+      color: var(--foreground);
       background:
-        radial-gradient(circle at top left, rgba(115,240,179,0.16), transparent 32%),
-        radial-gradient(circle at top right, rgba(123,198,255,0.18), transparent 30%),
-        linear-gradient(180deg, var(--bg), var(--bg2));
-      padding: 28px;
+        radial-gradient(circle at top left, rgba(235, 99, 89, 0.14), transparent 28%),
+        radial-gradient(circle at 85% 18%, rgba(226, 221, 217, 0.92), transparent 26%),
+        linear-gradient(180deg, #fffaf7 0%, #f6f1ec 48%, #efe7df 100%);
+      padding: 24px;
+      position: relative;
+      overflow-x: hidden;
     }}
-    .wrap {{ max-width: 1080px; margin: 0 auto; }}
+
+    body::before,
+    body::after {{
+      content: "";
+      position: fixed;
+      inset: auto;
+      pointer-events: none;
+      border-radius: 999px;
+      filter: blur(10px);
+      opacity: 0.75;
+    }}
+
+    body::before {{
+      width: 22rem;
+      height: 22rem;
+      top: -6rem;
+      right: -5rem;
+      background: rgba(235, 99, 89, 0.16);
+    }}
+
+    body::after {{
+      width: 18rem;
+      height: 18rem;
+      left: -6rem;
+      bottom: 5rem;
+      background: rgba(226, 221, 217, 0.9);
+    }}
+
+    a {{
+      color: inherit;
+      text-decoration: none;
+    }}
+
+    .wrap {{
+      max-width: 1180px;
+      margin: 0 auto;
+      position: relative;
+      z-index: 1;
+    }}
+
+    .hero-shell {{
+      position: relative;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.65);
+      border-radius: 32px;
+      background:
+        linear-gradient(135deg, rgba(255,255,255,0.86), rgba(255,255,255,0.58)),
+        linear-gradient(160deg, rgba(235,99,89,0.06), rgba(226,221,217,0.18));
+      box-shadow: var(--shadow);
+      padding: clamp(1.25rem, 2vw, 1.75rem);
+      backdrop-filter: blur(18px);
+    }}
+
+    .hero-shell::before {{
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(115deg, transparent 0%, rgba(235, 99, 89, 0.08) 48%, transparent 100%);
+      pointer-events: none;
+    }}
+
     .hero {{
       display: grid;
       grid-template-columns: 1.4fr 1fr;
       gap: 18px;
       align-items: stretch;
     }}
+
     .card {{
+      position: relative;
       background: var(--card);
       border: 1px solid var(--line);
-      border-radius: 20px;
+      border-radius: var(--radius);
       padding: 22px;
-      backdrop-filter: blur(10px);
-      box-shadow: 0 18px 60px rgba(0,0,0,0.22);
+      backdrop-filter: blur(12px);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.7);
     }}
-    h1 {{ margin: 0 0 8px; font-size: clamp(34px, 5vw, 56px); line-height: 0.95; }}
-    p {{ margin: 0; color: var(--muted); line-height: 1.55; }}
+
+    .hero-main {{
+      background:
+        linear-gradient(180deg, var(--card-strong), rgba(255,255,255,0.78)),
+        linear-gradient(145deg, rgba(235,99,89,0.06), transparent);
+    }}
+
+    .hero-side {{
+      background:
+        linear-gradient(180deg, rgba(31,31,37,0.96), rgba(31,31,37,0.88)),
+        linear-gradient(135deg, rgba(235,99,89,0.12), transparent);
+      color: #fff;
+      border-color: rgba(255,255,255,0.08);
+      box-shadow: 0 18px 50px rgba(31, 31, 37, 0.16);
+    }}
+
+    h1 {{
+      margin: 0;
+      max-width: 11ch;
+      font-size: clamp(3rem, 7vw, 5.5rem);
+      line-height: 0.92;
+      letter-spacing: -0.04em;
+      font-weight: 500;
+    }}
+
+    p {{
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.6;
+      font-weight: 300;
+    }}
+
+    .hero-side p,
+    .hero-side .label,
+    .hero-side .linkcard span,
+    .hero-side .list,
+    .hero-side .note {{
+      color: rgba(255, 255, 255, 0.66);
+    }}
+
     .eyebrow {{
-      display: inline-block;
-      margin-bottom: 12px;
-      color: var(--accent);
-      letter-spacing: 0.08em;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 14px;
+      color: var(--primary);
+      letter-spacing: 0.1em;
       text-transform: uppercase;
       font-size: 12px;
+      font-weight: 600;
     }}
+
+    .eyebrow::before {{
+      content: "";
+      width: 24px;
+      height: 1px;
+      background: currentColor;
+      opacity: 0.72;
+    }}
+
+    .hero-side .eyebrow,
+    .hero-side .linkcard strong,
+    .hero-side .repo a,
+    .hero-side .value a {{
+      color: #fff;
+    }}
+
+    .lede {{
+      max-width: 38rem;
+      margin-top: 16px;
+      font-size: clamp(1rem, 1.4vw, 1.125rem);
+    }}
+
+    .hero-meta {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 20px;
+    }}
+
+    .pill {{
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid rgba(31, 31, 37, 0.1);
+      border-radius: 999px;
+      padding: 10px 14px;
+      background: rgba(255, 255, 255, 0.72);
+      color: rgba(31, 31, 37, 0.78);
+      font-size: 13px;
+      font-weight: 500;
+    }}
+
     .stats {{
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 12px;
-      margin-top: 18px;
+      margin-top: 22px;
     }}
+
     .stat {{
       border: 1px solid var(--line);
       border-radius: 16px;
-      padding: 14px;
-      background: rgba(255,255,255,0.03);
+      padding: 15px;
+      background: rgba(255,255,255,0.58);
+      min-height: 118px;
     }}
-    .label {{ display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }}
-    .value {{ font-size: 22px; color: var(--text); word-break: break-word; }}
-    .value.small {{ font-size: 13px; line-height: 1.5; }}
+
+    .hero-side .stat {{
+      background: rgba(255,255,255,0.05);
+      border-color: rgba(255,255,255,0.1);
+    }}
+
+    .label {{
+      display: block;
+      color: var(--muted-soft);
+      font-size: 12px;
+      margin-bottom: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }}
+
+    .value {{
+      font-size: clamp(1.5rem, 2vw, 2rem);
+      color: var(--foreground);
+      word-break: break-word;
+      letter-spacing: -0.03em;
+    }}
+
+    .hero-side .value {{
+      color: #fff;
+    }}
+
+    .value.small {{
+      font-size: 13px;
+      line-height: 1.6;
+      letter-spacing: 0;
+    }}
+
     .grid {{
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 18px;
       margin-top: 18px;
     }}
+
+    .section-card {{
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.86), rgba(255,255,255,0.7));
+      box-shadow: var(--shadow);
+    }}
+
     .links {{
       display: grid;
       gap: 10px;
-      margin-top: 14px;
+      margin-top: 18px;
     }}
+
     .linkcard {{
       display: block;
-      text-decoration: none;
       color: inherit;
       border: 1px solid var(--line);
-      border-radius: 14px;
-      padding: 14px;
-      background: rgba(255,255,255,0.02);
+      border-radius: 16px;
+      padding: 15px 16px;
+      background: rgba(255,255,255,0.04);
+      transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
     }}
-    .linkcard span {{ display: block; color: var(--muted); margin-bottom: 4px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; }}
-    .linkcard strong {{ color: var(--accent2); font-size: 13px; word-break: break-all; }}
-    .list {{ margin: 14px 0 0; padding-left: 18px; color: var(--muted); }}
-    .list li {{ margin: 8px 0; }}
-    .note {{ margin-top: 14px; font-size: 12px; }}
-    .repo {{ margin-top: 16px; font-size: 12px; }}
-    .repo a, .value a {{ color: var(--accent2); }}
+
+    .linkcard:hover {{
+      transform: translateY(-1px);
+      border-color: var(--line-strong);
+      background: rgba(255,255,255,0.1);
+    }}
+
+    .linkcard span {{
+      display: block;
+      color: var(--muted-soft);
+      margin-bottom: 6px;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }}
+
+    .linkcard strong {{
+      color: var(--primary);
+      font-size: 13px;
+      font-weight: 500;
+      word-break: break-all;
+    }}
+
+    .list {{
+      margin: 18px 0 0;
+      padding: 0;
+      list-style: none;
+      color: var(--muted);
+    }}
+
+    .list li {{
+      margin: 0;
+      padding: 14px 0;
+      border-bottom: 1px solid rgba(31, 31, 37, 0.08);
+      line-height: 1.6;
+    }}
+
+    .list li:last-child {{
+      border-bottom: 0;
+      padding-bottom: 0;
+    }}
+
+    .list strong {{
+      color: var(--foreground);
+      font-weight: 500;
+    }}
+
+    .note {{
+      margin-top: 16px;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: var(--primary-soft);
+      color: rgba(31, 31, 37, 0.72);
+      font-size: 13px;
+      line-height: 1.55;
+    }}
+
+    .repo {{
+      margin-top: 18px;
+      font-size: 13px;
+      color: rgba(31, 31, 37, 0.72);
+    }}
+
+    .repo a,
+    .value a {{
+      color: var(--primary);
+    }}
+
+    .section-head {{
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 16px;
+    }}
+
+    .section-head p {{
+      max-width: 32rem;
+    }}
+
     @media (max-width: 860px) {{
       .hero, .grid, .stats {{ grid-template-columns: 1fr; }}
       body {{ padding: 16px; }}
+      .hero-shell {{ border-radius: 24px; padding: 14px; }}
+      .card {{ padding: 18px; }}
+      h1 {{ max-width: none; }}
+      .hero-meta {{ margin-top: 16px; }}
+      .stat {{ min-height: 0; }}
     }}
   </style>
 </head>
 <body>
   <div class='wrap'>
-    <section class='hero'>
-      <div class='card'>
-        <span class='eyebrow'>Radius Hermes Agent</span>
-        <h1>{html.escape(agent_name)}</h1>
-        <p>Public discovery profile for this agent. Use the links below to inspect its A2A surface, DID identity, and published skills.</p>
-        <div class='stats'>
-          <div class='stat'>
-            <span class='label'>DID</span>
-            <div class='value small'>{html.escape(did)}</div>
+    <section class='hero-shell'>
+      <div class='hero'>
+        <div class='card hero-main'>
+          <span class='eyebrow'>Radius Hermes Agent</span>
+          <h1>{html.escape(agent_name)}</h1>
+          <p class='lede'>Public discovery profile for this agent. Inspect its A2A surface, DID identity, wallet footprint, and published capabilities from one page.</p>
+          <div class='hero-meta'>
+            <span class='pill'>A2A-ready discovery</span>
+            <span class='pill'>ERC-8004 identity</span>
+            <span class='pill'>Radius wallet visibility</span>
           </div>
-          <div class='stat'>
-            <span class='label'>EVM Address</span>
-            <div class='value small'><a href='{html.escape(explorer_link)}' target='_blank' rel='noopener'>{html.escape(wallet_address)}</a></div>
+          <div class='stats'>
+            <div class='stat'>
+              <span class='label'>DID</span>
+              <div class='value small'>{html.escape(did)}</div>
+            </div>
+            <div class='stat'>
+              <span class='label'>EVM Address</span>
+              <div class='value small'><a href='{html.escape(explorer_link)}' target='_blank' rel='noopener'>{html.escape(wallet_address)}</a></div>
+            </div>
+            <div class='stat'>
+              <span class='label'>SBC Balance</span>
+              <div class='value'>{html.escape(sbc_balance)}</div>
+            </div>
+            <div class='stat'>
+              <span class='label'>RUSD Balance</span>
+              <div class='value'>{html.escape(rusd_balance)}</div>
+            </div>
           </div>
-          <div class='stat'>
-            <span class='label'>SBC Balance</span>
-            <div class='value'>{html.escape(sbc_balance)}</div>
-          </div>
-          <div class='stat'>
-            <span class='label'>RUSD Balance</span>
-            <div class='value'>{html.escape(rusd_balance)}</div>
-          </div>
+          {wallet_note}
+          <p class='repo'>Deploy your own: <a href='https://github.com/radius-workshop/radius-hermes-railway-template' target='_blank' rel='noopener'>radius-workshop/radius-hermes-railway-template</a></p>
         </div>
-        {wallet_note}
-        <p class='repo'>Deploy your own: <a href='https://github.com/radius-workshop/radius-hermes-railway-template' target='_blank' rel='noopener'>radius-workshop/radius-hermes-railway-template</a></p>
-      </div>
-      <div class='card'>
-        <span class='eyebrow'>Discovery</span>
-        <p>These endpoints are public and intended for operators, agent browsers, and other A2A-compatible systems.</p>
-        <div class='links'>{links_html}</div>
+        <div class='card hero-side'>
+          <span class='eyebrow'>Discovery</span>
+          <p>These endpoints are public and intended for operators, agent browsers, and other A2A-compatible systems.</p>
+          <div class='links'>{links_html}</div>
+        </div>
       </div>
     </section>
 
     <section class='grid'>
-      <div class='card'>
-        <span class='eyebrow'>Published Skills</span>
-        <p>This list is rendered from the public skills index and updates automatically as published skills change.</p>
+      <div class='card section-card'>
+        <div class='section-head'>
+          <div>
+            <span class='eyebrow'>Published Skills</span>
+            <p>This list is rendered from the public skills index and updates automatically as published skills change.</p>
+          </div>
+        </div>
         <ul class='list'>{skills_html}</ul>
       </div>
-      <div class='card'>
+      <div class='card section-card'>
         <span class='eyebrow'>What To Inspect</span>
         <ul class='list'>
           <li><strong>Agent Card</strong> for supported interfaces and auth scheme</li>
