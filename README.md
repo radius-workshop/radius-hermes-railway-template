@@ -467,92 +467,32 @@ References:
 - [Railway Logs documentation](https://docs.railway.com/observability/logs)
 - [Hermes CLI log files documentation](https://hermes-agent.nousresearch.com/docs/reference/cli-commands?_highlight=logging#log-files)
 
-### Endpoints
+## Agent server
 
-| Path | Auth | Spec | Description |
-|---|---|---|---|
-| `/.well-known/did.json` | Public | [W3C DID](https://www.w3.org/TR/did-core/) | DID document for this agent's `did:web` identity — public key, verification methods |
-| `/.well-known/agent-card.json` | Public | [A2A](https://github.com/a2aproject/A2A) | A2A agent card — identity, skills, supported interfaces, auth scheme |
-| `/.well-known/agent-registration.json` | Public | [ERC 8004](https://eips.ethereum.org/EIPS/eip-8004) | ERC-8004 self-registration profile and advertised services |
-| `/.well-known/agent-skills/index.json` | Public | [Cloudflare Agent Skills Discovery RFC](https://github.com/cloudflare/agent-skills-discovery-rfc) | Index of published skills with digests and URLs |
-| `/.well-known/agent-skills/:name/SKILL.md` | Public | Cloudflare Agent Skills Discovery RFC | Individual skill document |
+The FastAPI agent server lives in [scripts/agent_server](/Users/eriks/dev/radius/hermes-railway-template/scripts/agent_server) and owns:
 
-**`agent-card.json`** is the A2A discovery document. Other agents fetch it to learn how to authenticate and what this agent can do. It includes the agent's `did:web` identity (derived from `RADIUS_PRIVATE_KEY`), the `POST /a2a` interface, and the `bearer_jwt` security scheme. Skills are pulled live from the skill discovery index.
+- the public discovery endpoints under `/.well-known/*`
+- `did:web` identity and JWT auth
+- `POST /token`
+- `POST /a2a`
+- the public homepage at `/`
+- structured agent-server logging
 
-**`agent-registration.json`** advertises this agent's ERC-8004 self-registration profile. It follows the `registration-v1` schema, derives `web`, `A2A`, and `DID` services from the running agent, and returns `503` with missing-field guidance until required operator metadata such as `AGENT_NAME`, `AGENT_DESCRIPTION`, `AGENT_IMAGE`, and `AGENT_SUPPORTED_TRUST` is configured.
+The implementation details now live in the local agent-server README:
 
-**`agent-skills/index.json`** lets other agents and tools enumerate what this agent can do. Each entry includes the skill name, description, a URL to fetch the full skill document, and a SHA-256 content digest so consumers can detect updates.
+- [scripts/agent_server/README.md](/Users/eriks/dev/radius/hermes-railway-template/scripts/agent_server/README.md)
 
-In this template, the template-owned Radius-facing skills are installed into the Hermes catalog-style `radius` bucket under `${HERMES_HOME}/skills/radius/...`. Vendored marketplace skills are discovered through Hermes `skills.external_dirs` using their upstream names:
+That file contains:
 
-- `radius-wallet`
-- `a2a-comms`
-- `registering-agent`
+- endpoint inventory and auth behavior
+- discovery, registration, and skill publishing rules
+- A2A modes, variables, and delegated webhook setup
+- observability notes
+- local mock-data workflow for fast homepage/UI iteration
 
-### Publishing a skill
+At the repo level, the main thing to know is that this template exposes a first-class A2A surface with Radius-backed identity and wallet state. Other agents can discover it via `agent-card.json`, verify it via `did.json`, inspect capabilities via `agent-skills/index.json`, and interact with it over `POST /a2a`.
 
-Skills are opt-in. A skill file is only surfaced through the discovery endpoints if its frontmatter contains `published: true`:
-
-```markdown
----
-name: my-skill
-description: What this skill does
-published: true
----
-
-# My Skill
-...
-```
-
-Skills without `published: true` are installed into Hermes for the agent's own use but are never served publicly.
-
-### Variables
-
-| Variable | Description |
-|---|---|
-| `AGENT_NAME` | Display name across all discovery endpoints. Defaults to `Hermes Agent`. |
-| `AGENT_DESCRIPTION` | One-line description published in `agent-card.json`. |
-| `AGENT_IMAGE` | Required for ERC-8004 self-registration and `agent-registration.json`. Public image URL. |
-| `AGENT_SUPPORTED_TRUST` | Required for ERC-8004 self-registration when not passed directly. Comma-separated trust modes such as `reputation,crypto-economic`. |
-| `AGENT_X402_SUPPORT` | Optional ERC-8004 x402 support flag. Defaults to `false`. |
-| `AGENT_ACTIVE` | Optional ERC-8004 active flag. Defaults to `true`. |
-| `AGENT_EMAIL` | Optional email service endpoint advertised in ERC-8004 registration. |
-| `AGENT_ENS` | Optional ENS name advertised in ERC-8004 registration. |
-| `AGENT_A2A_VERSION` | Optional A2A version string for ERC-8004 registration. Defaults to `0.3.0`. |
-| `AGENT_MCP_ENDPOINT` | Optional MCP service endpoint advertised in ERC-8004 registration. |
-| `AGENT_MCP_VERSION` | Optional MCP version string. |
-| `AGENT_OASF_ENDPOINT` | Optional OASF service endpoint. |
-| `AGENT_OASF_VERSION` | Optional OASF version string. |
-| `AGENT_OASF_SKILLS` | Optional comma-separated OASF skills list. |
-| `AGENT_OASF_DOMAINS` | Optional comma-separated OASF domains list. |
-| `DEBUG_SKILLS=1` | Enables a gated `/debug/skills` endpoint showing config external dirs, vendored skill scans, local skills, and the public index. Off by default. |
-| `EXPECTED_VENDORED_SKILLS` | Optional comma-separated list of upstream vendored skill names expected in the image. Logs a warning if any are missing. |
-| `STRICT_VENDORED_SKILLS` | When `true`, fail boot if any `EXPECTED_VENDORED_SKILLS` are missing. Defaults to `false`. |
-| `VENDORED_SKILLS_SOURCE` | Optional override for the vendored Radius skills repo root. Defaults to `/app/vendor/radius-skills`. |
-
-## Agent-to-agent (A2A) communication
-
-This template implements the [A2A protocol](https://github.com/a2aproject/A2A), making your Hermes agent a first-class participant in a network of autonomous agents. Any other A2A-compatible agent can discover yours, verify its identity, and delegate tasks to it — without any pre-shared secrets or manual coordination.
-
-Combined with the built-in Radius wallet, this unlocks **agent-to-agent payments**: agents can pay each other for work, request tokens in exchange for services, or settle tasks on-chain as part of a larger workflow. Every agent in this network has a persistent cryptographic identity tied to an Ethereum-compatible wallet, so value and trust travel together.
-
-### How identity works
-
-On first boot, a secp256k1 keypair is derived from `RADIUS_PRIVATE_KEY` (the same key as the Radius wallet). A `did:web` DID is constructed from the public domain (e.g. `did:web:my-agent.railway.app`) and becomes the agent's persistent cryptographic identity. It appears in:
-
-- `/.well-known/did.json` — the W3C DID document, with the agent's public key in JWK format
-- `/.well-known/agent-card.json` — in `provider.did`
-- `/.well-known/agent-registration.json` — in `did`
-- Every JWT this agent issues — as the `iss` claim
-- Every startup log — so you can copy it for use as a `TRUSTED_DIDS` value on another agent
-
-The `did:web` method means the DID is resolvable over HTTPS — any agent that knows the domain can fetch `/.well-known/did.json`, retrieve the public key, and verify signatures without any pre-shared secrets.
-
-Because the wallet key and the signing key are the same, one `RADIUS_PRIVATE_KEY` gives you an Ethereum address for payments and a DID for verifiable agent identity.
-
-### Aggregating discovery metadata
-
-The bundled `agent-info` plugin exposes a `get_agent_info` tool that retrieves the public discovery bundle for an agent in one call:
+The bundled `agent-info` plugin is the easiest way to aggregate a full public discovery bundle for any compatible agent:
 
 ```text
 get_agent_info()
@@ -560,258 +500,7 @@ get_agent_info({"agent":"https://other-agent.example"})
 get_agent_info({"agent":"did:web:other-agent.example","include_skill_docs":false})
 ```
 
-It aggregates:
-
-- `/.well-known/agent-card.json`
-- `/.well-known/agent-skills/index.json`
-- published `SKILL.md` documents
-- `/.well-known/agent-registration.json`
-- `/.well-known/did.json`
-
-If no `agent` argument is supplied, the tool defaults to the current agent.
-
-### JWT gate
-
-All non-discovery endpoints (`/health`, `/debug/skills`, `/a2a`) require a Bearer JWT in the `Authorization` header. The gate accepts:
-
-- **Any cryptographically valid DID JWT** — the caller signs a JWT with their own DID and presents it. In this template the issuer is `did:web`.
-- **Self-issued tokens** — tokens issued by `POST /token` on this agent. Always accepted regardless of `TRUSTED_DIDS`.
-
-To restrict access to specific agents, set `TRUSTED_DIDS` to a comma-separated list of allowed DID values. When unset, any agent with a valid DID can call gated endpoints.
-
-#### Issuing tokens via `POST /token`
-
-For callers that don't have their own DID infrastructure, this agent can issue tokens:
-
-```bash
-curl -X POST https://your-agent.railway.app/token \
-  -H "X-Api-Key: $JWT_API_KEY"
-# → { "token": "eyJ..." }
-```
-
-Set `JWT_API_KEY` in Railway to enable this endpoint. Leave it unset to disable it entirely.
-
-The returned token is a 24-hour JWT signed by this agent's `did:web` identity. Use it as a Bearer token on any gated endpoint.
-
-#### Signing your own JWT (agent-to-agent)
-
-If the calling agent also runs this template (or uses [agentcommercekit](https://github.com/agentcommercekit/ack)), it can sign its own JWT with a DID-compatible keypair:
-
-```ts
-import { createJwt, createJwtSigner, generateKeypair, createDidKeyUri, hexStringToBytes } from "agentcommercekit"
-
-const keypair = await generateKeypair("secp256k1", hexStringToBytes(process.env.RADIUS_PRIVATE_KEY))
-const did = createDidKeyUri(keypair)
-const signer = createJwtSigner(keypair)
-
-const now = Math.floor(Date.now() / 1000)
-const token = await createJwt(
-  { sub: "my-agent", iat: now, exp: now + 3600 },
-  { issuer: did, signer },
-  { alg: "ES256K" }
-)
-// → use as Bearer token on POST /a2a
-```
-
-To allow this agent to call yours, add its DID (logged at startup) to your `TRUSTED_DIDS`.
-
-### Reducing "dangerous command" prompts during A2A
-
-The container bootstraps a default Claude permission allowlist in `${HOME}/.claude/settings.json` so routine A2A commands do not require manual confirmation each turn. It includes:
-
-- `curl` calls to discovery endpoints, `/token`, and `/a2a`
-- `python3 /app/scripts/agent_server/gen_jwt.py` to generate JWTs with the correct ES256K signature format
-
-### A2A endpoint (`POST /a2a`)
-
-The `/a2a` endpoint accepts [A2A](https://github.com/a2aproject/A2A) JSON-RPC 2.0 requests and now supports two execution modes controlled by `A2A_MODE`.
-Request/response validation and JSON-RPC envelope shaping are implemented with the official [`a2a-sdk`](https://github.com/a2aproject/a2a-python) models for protocol compliance.
-
-For outbound A2A calls initiated by this agent, prefer the bundled `send_a2a_message` tool rather than raw `curl`. It records sender-side correlation fields in Hermes logs, including:
-
-- `rpc_id`
-- `a2a_message_id`
-- `context_id`
-- returned `a2a_task_id`
-- remote agent URL
-
-Example:
-
-```text
-send_a2a_message({"agent":"https://other-agent.example","task":"Run this analysis"})
-```
-
-For long-running conversations, `send_a2a_message` also accepts optional managed-session fields:
-
-```text
-send_a2a_message({
-  "agent":"https://other-agent.example",
-  "task":"Start the design review",
-  "goal":"Iterate on the architecture until the proposal is complete",
-  "auto_continue":true,
-  "max_turns":200
-})
-```
-
-When `auto_continue` is enabled, the local agent server persists an A2A session under `${HERMES_HOME}/a2a-sessions`, tracks the shared `context_id`, records inbound/outbound turns, and can keep generating the next local turn automatically instead of treating the exchange as one-shot.
-When the same host thread keeps talking to the same remote agent, the outbound helper now reuses the active managed session by default instead of creating a fresh `session_id` on every turn.
-
-Each managed session now also stores Telegram/Discord-ready per-turn cards in its session JSON and internal session API payloads:
-
-```json
-{
-  "latest_card": {
-    "title": "Turn 4/10 • Peer Agent",
-    "body": "Use a manual oracle first so pricing stays deterministic during testing.",
-    "footer": "Preparing next turn • Context 93f062e91",
-    "text": "Turn 4/10 • Peer Agent\n\nUse a manual oracle first so pricing stays deterministic during testing.\n\nPreparing next turn • Context 93f062e91"
-  }
-}
-```
-
-This renderer layer is intended for host-platform mirroring in Telegram or Discord so the user sees clean per-turn cards instead of a raw transcript dump.
-The outbound `send_a2a_message` tool also surfaces a `user_update` string plus the resolved `session` payload so host agents can reply with that polished text directly.
-
-**Direct mode (`A2A_MODE=direct`)**
-
-- `message/send` returns an inline completed result from Hermes.
-- `message/stream` returns SSE events with incremental text deltas and a final completion event.
-- `context_id` is forwarded as `X-Hermes-Session-Id` for session continuity.
-
-**Delegated mode (`A2A_MODE=delegated`)**
-
-- Preserves the existing webhook handoff behavior (`/a2a` → Hermes `/webhooks/a2a`).
-- `message/send` returns `TASK_STATE_SUBMITTED`.
-- `message/stream` is not supported in delegated mode.
-
-**Auto mode (`A2A_MODE=auto`, default)**
-
-- Uses direct handling when `HERMES_API_KEY` is configured.
-- Falls back to delegated handling for `message/send` otherwise.
-- Managed A2A sessions work across both modes: direct replies can continue inline, while delegated peers can re-enter the same session by sending follow-up turns on the same `context_id`.
-
-```bash
-curl -X POST https://your-agent.railway.app/a2a \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "message/send",
-    "params": {
-      "message": {
-        "role": "ROLE_USER",
-        "parts": [{ "text": "Summarize the latest news about AI agents" }]
-      }
-    }
-  }'
-```
-
-Example response in delegated mode:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "id": "550e8400-e29b-41d4-a716-446655440000",
-    "context_id": "550e8400-e29b-41d4-a716-446655440000",
-    "status": {
-      "state": "TASK_STATE_SUBMITTED",
-      "timestamp_ms": 1712345678000
-    }
-  }
-}
-```
-
-In direct mode, the response contains completed text content directly from Hermes.
-
-The caller's DID (from the JWT `iss` claim) is forwarded to Hermes in the webhook payload as `issuer_did`, so Hermes can identify which agent sent the task.
-
-### Configuring direct and delegated bridges
-
-#### Direct bridge variables
-
-| Variable | Description |
-|---|---|
-| `A2A_MODE` | `auto` (default), `direct`, or `delegated`. |
-| `HERMES_API_KEY` | Required for direct mode. Used as Bearer auth to Hermes OpenAI endpoint. If unset, the bridge also accepts `API_SERVER_KEY`. |
-| `HERMES_URL` | Hermes OpenAI-compatible base URL. Default: `http://127.0.0.1:8642`. |
-| `HERMES_MODEL` | Model name for direct bridge requests. Default: `hermes-agent`. |
-| `HERMES_TIMEOUT` | Direct bridge timeout in seconds. Default: `120`. |
-| `A2A_PUBLIC_URL` | Optional URL used in attachment links. Defaults to service base URL. |
-| `A2A_FILE_SERVE_PATHS` | Optional comma-separated file roots allowed for `/files/{path}` serving. |
-| `A2A_SESSION_TICK_SECONDS` | Optional poll interval for the managed A2A session worker. Default: `2.5`. |
-
-#### Delegated webhook bridge
-
-The `/a2a` endpoint works by forwarding tasks to Hermes's internal webhook server over HMAC-authenticated HTTP. To enable it:
-
-**1. Set `WEBHOOK_SECRET` in Railway** (any strong random string):
-
-```
-WEBHOOK_SECRET=your-random-secret-here
-```
-
-**2. Set `WEBHOOK_ENABLED=true` in Railway.**
-
-**3. Add an `a2a` route to Hermes `config.yaml`:**
-
-```yaml
-platforms:
-  webhook:
-    extra:
-      routes:
-        a2a:
-          events: ["*"]
-          secret: "${WEBHOOK_SECRET}"
-          prompt: "{text}"
-```
-
-This tells Hermes to accept webhook POSTs at `/webhooks/a2a` and use the `text` field from the payload as the prompt. The `secret` must match `WEBHOOK_SECRET`.
-
-Once configured, `POST /a2a` → Hermes is live. The agent card at `/.well-known/agent-card.json` will automatically advertise `capabilities.push_notifications: true`.
-
-### Agent-to-agent payments
-
-Because every Hermes agent in this template has both a `did:web` identity and a Radius wallet derived from the same key, agents can pay each other for work as part of any A2A conversation.
-
-**How it works:**
-
-1. Agent A calls Agent B via `POST /a2a` with a task (e.g. "run this analysis and invoice me")
-2. Agent B completes the task and responds with its wallet address and a requested amount
-3. Agent A uses its built-in wallet skill to send SBC tokens to Agent B on-chain
-4. Either agent can verify settlement by checking the on-chain balance
-
-No payment processor, no API keys for billing, no off-chain accounting — just two agents with wallets settling directly on the Radius testnet.
-
-To connect two agents for both task delegation and payments:
-
-| Agent | Required env vars |
-|---|---|
-| Calling agent (A) | `A2A_PEER_URL=https://<agent-b-domain>`, `TRUSTED_DIDS=did:web:<agent-b-domain>` |
-| Receiving agent (B) | `WEBHOOK_ENABLED=true`, `WEBHOOK_SECRET=<shared-secret>`, `TRUSTED_DIDS=did:web:<agent-a-domain>` |
-
-Each agent's DID and wallet address are logged at startup and available at `/.well-known/did.json` and `/.well-known/agent-registration.json`.
-
-### A2A variables
-
-| Variable | Description |
-|---|---|
-| `A2A_MODE` | `auto` (default), `direct`, or `delegated`. Controls routing behavior for `/a2a`. |
-| `HERMES_API_KEY` | Required for direct mode. Hermes OpenAI-compatible API key. If unset, the bridge also accepts `API_SERVER_KEY`. |
-| `HERMES_URL` | Hermes OpenAI-compatible base URL. Defaults to `http://127.0.0.1:8642`. |
-| `HERMES_MODEL` | Model name for direct bridge requests. Defaults to `hermes-agent`. |
-| `HERMES_TIMEOUT` | Direct bridge timeout in seconds. Defaults to `120`. |
-| `A2A_PUBLIC_URL` | Optional public URL used for generated attachment links. |
-| `A2A_FILE_SERVE_PATHS` | Optional comma-separated list of file roots allowed for `/files/{path}` serving. |
-| `WEBHOOK_SECRET` | Required to enable the A2A bridge. HMAC key for Hermes webhook authentication. |
-| `WEBHOOK_ENABLED` | Set to `true` to start the Hermes webhook server. |
-| `WEBHOOK_PORT` | Hermes webhook server port. Defaults to `8644`. |
-| `JWT_API_KEY` | Enables `POST /token`. Callers present this key to receive a signed JWT. `JWT_EXCHANGE_KEY` is also accepted for backward compatibility. |
-| `TRUSTED_DIDS` | Comma-separated DID allowlist. When set, only these DIDs (plus self-issued tokens) can call gated endpoints. Leave unset to accept any valid DID JWT. |
-| `A2A_PEER_URL` | URL of a pre-configured peer agent. Used by the `a2a-comms` skill as the default call target. |
-| `A2A_PEER_API_KEY` | API key for the peer's `/token` endpoint, if they require one. |
+If you are actively changing the homepage or agent-server behavior, work from the dedicated local docs in `scripts/agent_server/README.md` instead of this top-level README.
 
 ---
 

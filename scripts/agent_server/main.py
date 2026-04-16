@@ -87,10 +87,22 @@ _a2a_session_worker: Optional[asyncio.Task] = None
 _wallet_summary_cache: Optional[dict] = None
 _wallet_summary_built_at: float = 0
 _WALLET_SUMMARY_TTL = 45.0
+_MOCK_MODE = os.environ.get("AGENT_SERVER_MOCK_DATA", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _hermes_api_key() -> Optional[str]:
     return os.environ.get("HERMES_API_KEY") or os.environ.get("API_SERVER_KEY")
+
+
+def _mock_wallet_summary() -> Optional[dict]:
+    if not _MOCK_MODE:
+        return None
+    return {
+        "address": os.environ.get("MOCK_RADIUS_WALLET_ADDRESS", "0x4D8020F43A9EFb829DBe4Cb93cbb29d5B52aEc6b"),
+        "sbc": os.environ.get("MOCK_RADIUS_SBC_BALANCE", "40.05199"),
+        "rusd": os.environ.get("MOCK_RADIUS_RUSD_BALANCE", "10.099815153377649216"),
+        "error": os.environ.get("MOCK_RADIUS_WALLET_ERROR") or None,
+    }
 
 
 def _parse_allowed_roots() -> list[Path]:
@@ -186,6 +198,10 @@ def _wallet_address() -> Optional[str]:
 
 
 def _build_wallet_summary() -> dict:
+    mocked = _mock_wallet_summary()
+    if mocked is not None:
+        return mocked
+
     address = _wallet_address()
     if not address:
         return {"address": None, "sbc": None, "rusd": None, "error": "wallet_unavailable"}
@@ -584,6 +600,19 @@ def _build_index() -> str:
 
 def _get_index() -> str:
     global _skills_cache, _cache_built_at
+    mock_index_file = " ".join(os.environ.get("MOCK_AGENT_SKILLS_INDEX_FILE", "").split())
+    if mock_index_file:
+        try:
+            return Path(mock_index_file).read_text(encoding="utf-8")
+        except Exception as exc:
+            log_event(
+                logger,
+                logging.WARNING,
+                "Mock skills index unavailable; falling back to generated index",
+                event="skills.index.mock_unavailable",
+                mock_index_file=mock_index_file,
+                error=str(exc),
+            )
     now = time.time()
     if not _skills_cache or now - _cache_built_at > _CACHE_TTL:
         _skills_cache = _build_index()
@@ -934,6 +963,11 @@ async def index():
         if wallet_error
         else "<p class='note'>Wallet balances refresh automatically with a short cache to keep the public page fast.</p>"
     )
+    radius_site = "https://radiustech.xyz"
+    radius_mainnet = "https://network.radiustech.xyz"
+    radius_testnet = "https://testnet.radiustech.xyz"
+    radius_docs = "https://docs.radiustech.xyz"
+    template_repo = "https://github.com/radius-workshop/radius-hermes-railway-template"
 
     return HTMLResponse(
         f"""<!DOCTYPE html>
@@ -1017,6 +1051,107 @@ async def index():
       margin: 0 auto;
       position: relative;
       z-index: 1;
+    }}
+
+    .site-header {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 18px;
+      padding: 14px 18px;
+      border: 1px solid rgba(255, 255, 255, 0.6);
+      border-radius: 22px;
+      background: rgba(255, 255, 255, 0.62);
+      box-shadow: 0 18px 50px rgba(65, 45, 36, 0.08);
+      backdrop-filter: blur(18px);
+    }}
+
+    .brand {{
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }}
+
+    .brand-mark {{
+      width: 42px;
+      height: 30px;
+      color: var(--foreground);
+      flex-shrink: 0;
+    }}
+
+    .brand-copy {{
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }}
+
+    .brand-name {{
+      font-size: 1.1rem;
+      line-height: 1;
+      color: var(--foreground);
+    }}
+
+    .brand-subtitle {{
+      margin-top: 3px;
+      font-size: 12px;
+      line-height: 1.2;
+      color: var(--muted);
+      font-weight: 500;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }}
+
+    .site-nav {{
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+      gap: 10px;
+    }}
+
+    .nav-link,
+    .nav-cta {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 44px;
+      border-radius: 999px;
+      padding: 0 16px;
+      transition: transform 160ms ease, border-color 160ms ease, background 160ms ease, color 160ms ease;
+      white-space: nowrap;
+    }}
+
+    .nav-link {{
+      border: 1px solid rgba(31, 31, 37, 0.1);
+      background: rgba(255, 255, 255, 0.66);
+      color: rgba(31, 31, 37, 0.82);
+      font-size: 14px;
+      font-weight: 500;
+    }}
+
+    .nav-link:hover {{
+      transform: translateY(-1px);
+      border-color: rgba(31, 31, 37, 0.18);
+      background: rgba(255, 255, 255, 0.92);
+    }}
+
+    .nav-cta {{
+      padding: 0 20px;
+      background: var(--primary);
+      color: #fff;
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      box-shadow: 0 14px 30px rgba(235, 99, 89, 0.26);
+    }}
+
+    .nav-cta:hover {{
+      transform: translateY(-1px);
+      background: #df5a50;
     }}
 
     .hero-shell {{
@@ -1305,16 +1440,54 @@ async def index():
     @media (max-width: 860px) {{
       .hero, .grid, .stats {{ grid-template-columns: 1fr; }}
       body {{ padding: 16px; }}
+      .site-header {{
+        padding: 14px;
+      }}
+      .site-nav {{
+        justify-content: flex-start;
+      }}
       .hero-shell {{ border-radius: 24px; padding: 14px; }}
       .card {{ padding: 18px; }}
       h1 {{ max-width: none; }}
       .hero-meta {{ margin-top: 16px; }}
       .stat {{ min-height: 0; }}
     }}
+
+    @media (max-width: 700px) {{
+      .site-header {{
+        flex-direction: column;
+        align-items: stretch;
+      }}
+      .site-nav {{
+        width: 100%;
+      }}
+      .nav-link,
+      .nav-cta {{
+        flex: 1 1 calc(50% - 10px);
+      }}
+    }}
   </style>
 </head>
 <body>
   <div class='wrap'>
+    <header class='site-header'>
+      <a class='brand' href='{radius_site}' target='_blank' rel='noopener'>
+        <svg class='brand-mark' viewBox='0 0 111 78' fill='none' xmlns='http://www.w3.org/2000/svg' aria-hidden='true'>
+          <path d='M55.4453 3.95455C69.815 -3.13177 87.7166 -0.694272 99.6572 11.2661C106.923 18.5439 110.916 28.2165 110.916 38.5053C110.916 48.7943 106.911 58.4676 99.6572 65.7456C92.4029 73.0235 82.3162 77.0112 72.4619 77.0112C66.6326 77.0112 60.808 75.696 55.4697 73.0678C50.1251 75.7038 44.292 77.0229 38.4541 77.0229V77.0112C28.5998 77.0112 18.7569 73.2561 11.2588 65.7456C5.04447 59.5209 1.21728 51.5301 0.24707 42.8989H0V33.9936H0.262695C1.25884 25.4167 5.07865 17.4781 11.2588 11.2778C23.1925 -0.675684 41.0799 -3.11677 55.4453 3.95455ZM38.4541 8.91744C30.8864 8.91744 23.3068 11.8005 17.5498 17.5786C13.0464 22.0894 10.1758 27.8034 9.2334 33.9936H34.0088V42.8989H9.21094C10.1307 49.144 13.0119 54.9111 17.5498 59.4565C25.3924 67.3119 36.5822 69.8188 46.5645 66.9838C46.1252 66.5826 45.6912 66.1709 45.2666 65.7456C30.2707 50.7246 30.2707 26.287 45.2666 11.2661C45.6859 10.846 46.1133 10.438 46.5469 10.0415C43.9052 9.2928 41.1798 8.91747 38.4541 8.91744ZM76.6387 42.9702C75.6788 51.3024 72.017 59.379 65.6494 65.7573C65.2278 66.1796 64.7964 66.5882 64.3604 66.9868C74.3404 69.8176 85.526 67.3096 93.3662 59.4565C97.8869 54.9284 100.763 49.1878 101.694 42.9702H76.6387ZM55.4551 14.2895C54.0856 15.2556 52.7803 16.3514 51.5576 17.5786C45.9748 23.1707 42.8985 30.6114 42.8984 38.5171C42.8984 46.4228 45.9747 53.8643 51.5576 59.4565C52.7813 60.6822 54.0876 61.7762 55.457 62.7417C56.8269 61.776 58.1344 60.6826 59.3584 59.4565C64.9413 53.8643 68.0166 46.4228 68.0166 38.5171C68.0165 30.6115 64.9412 23.1706 59.3584 17.5786C58.1331 16.3512 56.8255 15.2557 55.4551 14.2895ZM72.4619 8.91744C69.7328 8.91744 67.0026 9.29391 64.3564 10.0444C64.7939 10.4441 65.2265 10.8542 65.6494 11.2778C72.017 17.6561 75.6788 25.7327 76.6387 34.0649H101.694C100.763 27.8472 97.8869 22.1067 93.3662 17.5786C87.7833 11.9864 80.0296 8.91748 72.4619 8.91744Z' fill='currentColor'/>
+        </svg>
+        <span class='brand-copy'>
+          <span class='brand-name'>Radius</span>
+          <span class='brand-subtitle'>Hermes Agent</span>
+        </span>
+      </a>
+      <nav class='site-nav' aria-label='Primary'>
+        <a class='nav-link' href='{radius_mainnet}' target='_blank' rel='noopener'>Mainnet</a>
+        <a class='nav-link' href='{radius_testnet}' target='_blank' rel='noopener'>Testnet</a>
+        <a class='nav-link' href='{radius_docs}' target='_blank' rel='noopener'>Docs</a>
+        <a class='nav-cta' href='{template_repo}' target='_blank' rel='noopener'>Create Your Own Agent</a>
+      </nav>
+    </header>
+
     <section class='hero-shell'>
       <div class='hero'>
         <div class='card hero-main'>
