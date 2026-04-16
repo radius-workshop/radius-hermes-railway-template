@@ -63,6 +63,7 @@ from logging_utils import (
     set_request_context,
     update_request_context,
 )
+from security_headers import apply_browser_security_headers, wallet_explorer_link
 from url_utils import get_base_url
 
 configure_logging()
@@ -761,30 +762,37 @@ app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None)
 @app.middleware("http")
 async def _cors_skills(request: Request, call_next):
     if request.url.path == "/a2a" and request.method == "OPTIONS":
-        return Response(
+        return apply_browser_security_headers(
+            Response(
             status_code=204,
             headers={
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Methods": "POST, OPTIONS",
                 "Access-Control-Allow-Headers": "Authorization, Content-Type",
             },
+            ),
+            request.url.path,
         )
     if request.url.path.startswith("/.well-known/agent-skills/"):
         if request.method == "OPTIONS":
-            return Response(
-                status_code=204,
-                headers={
-                    "Access-Control-Allow-Origin": "*",
-                    "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
-                    "Access-Control-Allow-Headers": "Content-Type",
-                },
+            return apply_browser_security_headers(
+                Response(
+                    status_code=204,
+                    headers={
+                        "Access-Control-Allow-Origin": "*",
+                        "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+                        "Access-Control-Allow-Headers": "Content-Type",
+                    },
+                ),
+                request.url.path,
             )
         response = await call_next(request)
         response.headers["Access-Control-Allow-Origin"] = "*"
         response.headers["Access-Control-Allow-Methods"] = "GET, HEAD, OPTIONS"
         response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-        return response
-    return await call_next(request)
+        return apply_browser_security_headers(response, request.url.path)
+    response = await call_next(request)
+    return apply_browser_security_headers(response, request.url.path)
 
 
 @app.middleware("http")
@@ -813,7 +821,7 @@ async def _request_logging(request: Request, call_next):
                 duration_ms=duration_ms,
                 client_ip=_client_ip(request),
             )
-        return response
+        return apply_browser_security_headers(response, request.url.path)
     except Exception:
         duration_ms = round((time.perf_counter() - started) * 1000, 2)
         log_event(
@@ -1306,10 +1314,17 @@ async def index():
     sbc_balance = wallet_summary.get("sbc") or "Unavailable"
     rusd_balance = wallet_summary.get("rusd") or "Unavailable"
     wallet_error = wallet_summary.get("error")
-    explorer_link = (
-        f"https://testnet.radiustech.xyz/address/{wallet_address}"
-        if wallet_summary.get("address")
-        else "https://testnet.radiustech.xyz"
+    explorer_link = wallet_explorer_link(wallet_summary.get("address"))
+
+    links = [
+        ("Agent Card", "/.well-known/agent-card.json"),
+        ("Agent Skills", "/.well-known/agent-skills/index.json"),
+        ("DID Document", "/.well-known/did.json"),
+        ("ERC-8004 Registration", "/.well-known/agent-registration.json"),
+    ]
+    links_html = "".join(
+        f"<a class='linkcard' href='{html.escape(href)}'><span>{html.escape(label)}</span><strong>{html.escape(href)}</strong></a>"
+        for label, href in links
     )
     published_skills = skills_index.get("skills", [])
     skills_html = _format_skill_cards(published_skills)
