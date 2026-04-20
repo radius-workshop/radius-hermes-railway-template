@@ -1836,6 +1836,118 @@ def _format_discovery_cards(agent_card: dict) -> tuple[str, str]:
     return "".join(cards), facts_html
 
 
+def _canonical_urls() -> list[str]:
+    return [
+        f"{BASE_URL}/",
+        f"{BASE_URL}/og-image.svg",
+        f"{BASE_URL}/.well-known/agent-card.json",
+        f"{BASE_URL}/.well-known/agent-skills/index.json",
+        f"{BASE_URL}/.well-known/did.json",
+        f"{BASE_URL}/.well-known/agent-registration.json",
+        f"{BASE_URL}/.well-known/api-catalog",
+    ]
+
+
+def _build_sitemap_xml() -> str:
+    urls = "".join(f"<url><loc>{html.escape(url)}</loc></url>" for url in _canonical_urls())
+    return (
+        "<?xml version='1.0' encoding='UTF-8'?>"
+        "<urlset xmlns='http://www.sitemaps.org/schemas/sitemap/0.9'>"
+        f"{urls}"
+        "</urlset>"
+    )
+
+
+def _build_robots_txt() -> str:
+    content_signal = os.environ.get(
+        "CONTENT_SIGNAL_POLICY", "ai-train=no, search=yes, ai-input=no"
+    )
+    lines = [
+        "User-agent: *",
+        "Allow: /",
+        "Disallow: /internal/",
+        "Disallow: /files/",
+        "",
+        "User-agent: GPTBot",
+        "Allow: /",
+        "Disallow: /internal/",
+        "Disallow: /files/",
+        "",
+        "User-agent: OAI-SearchBot",
+        "Allow: /",
+        "Disallow: /internal/",
+        "Disallow: /files/",
+        "",
+        "User-agent: Claude-Web",
+        "Allow: /",
+        "Disallow: /internal/",
+        "Disallow: /files/",
+        "",
+        "User-agent: Google-Extended",
+        "Allow: /",
+        "Disallow: /internal/",
+        "Disallow: /files/",
+        "",
+        f"Content-Signal: {content_signal}",
+        f"Sitemap: {BASE_URL}/sitemap.xml",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _homepage_link_header() -> str:
+    return ", ".join(
+        [
+            '</.well-known/api-catalog>; rel="api-catalog"',
+            '</.well-known/agent-card.json>; rel="service-desc"',
+            '</.well-known/agent-skills/index.json>; rel="service-doc"',
+        ]
+    )
+
+
+def _render_home_markdown(
+    agent_name: str,
+    agent_description: str,
+    did: str,
+    wallet_address: str,
+    sbc_balance: str,
+    rusd_balance: str,
+    explorer_link: str,
+    published_skills: list[dict],
+    skill_summary: str,
+) -> str:
+    lines = [
+        f"# {agent_name}",
+        "",
+        agent_description,
+        "",
+        "## Identity",
+        f"- **DID:** `{did}`",
+        f"- **Base URL:** {BASE_URL}",
+        "",
+        "## Wallet",
+        f"- **Address:** `{wallet_address}`",
+        f"- **SBC:** `{sbc_balance}`",
+        f"- **RUSD:** `{rusd_balance}`",
+        f"- **Explorer:** {explorer_link}",
+        "",
+        "## Discovery",
+        f"- Agent Card: {BASE_URL}/.well-known/agent-card.json",
+        f"- Skills Index: {BASE_URL}/.well-known/agent-skills/index.json",
+        f"- DID Document: {BASE_URL}/.well-known/did.json",
+        f"- ERC-8004 Registration: {BASE_URL}/.well-known/agent-registration.json",
+        f"- API Catalog: {BASE_URL}/.well-known/api-catalog",
+        f"- Sitemap: {BASE_URL}/sitemap.xml",
+        "",
+        "## Skills",
+        f"- {skill_summary}",
+    ]
+    for skill in published_skills:
+        skill_name = _humanize_slug(str(skill.get("name") or "unknown"))
+        description = str(skill.get("description") or "Published capability")
+        lines.append(f"- **{skill_name}:** {description}")
+    return "\n".join(lines).strip() + "\n"
+
+
 def _build_social_svg(
     agent_name: str, description: str, skill_labels: list[str]
 ) -> str:
@@ -1892,8 +2004,25 @@ async def social_preview_image():
     )
 
 
+@app.get("/robots.txt")
+async def robots_txt():
+    return PlainTextResponse(
+        _build_robots_txt(),
+        headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
+@app.get("/sitemap.xml")
+async def sitemap_xml():
+    return Response(
+        content=_build_sitemap_xml(),
+        media_type="application/xml",
+        headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
 @app.get("/")
-async def index():
+async def index(request: Request):
     agent_card = _build_agent_card_payload()
     agent_name = agent_card["name"]
     agent_description = agent_card["description"]
@@ -1956,7 +2085,28 @@ async def index():
         else "No published skills yet, but the canonical discovery documents are available now."
     )
 
-    return HTMLResponse(
+    markdown = _render_home_markdown(
+        agent_name=agent_name,
+        agent_description=agent_description,
+        did=did,
+        wallet_address=wallet_address,
+        sbc_balance=sbc_balance,
+        rusd_balance=rusd_balance,
+        explorer_link=explorer_link,
+        published_skills=published_skills,
+        skill_summary=skill_summary,
+    )
+    if "text/markdown" in request.headers.get("accept", "").lower():
+        token_count = len(markdown.split())
+        response = Response(
+            content=markdown,
+            media_type="text/markdown; charset=utf-8",
+            headers={"x-markdown-tokens": str(token_count)},
+        )
+        response.headers["Link"] = _homepage_link_header()
+        return response
+
+    response = HTMLResponse(
         f"""<!DOCTYPE html>
 <html lang='en'>
 <head>
@@ -3035,6 +3185,93 @@ async def index():
   </script>
 </body>
 </html>"""
+    )
+    response.headers["Link"] = _homepage_link_header()
+    return response
+
+
+@app.get("/.well-known/api-catalog")
+async def api_catalog():
+    a2a_endpoint = f"{BASE_URL}/a2a"
+    docs_url = f"{BASE_URL}/"
+    status_url = f"{BASE_URL}/health"
+    payload = {
+        "linkset": [
+            {
+                "anchor": a2a_endpoint,
+                "links": [
+                    {"rel": "service-desc", "href": f"{BASE_URL}/.well-known/agent-card.json"},
+                    {"rel": "service-doc", "href": docs_url},
+                    {"rel": "status", "href": status_url},
+                ],
+            }
+        ]
+    }
+    return Response(
+        content=json.dumps(payload),
+        media_type="application/linkset+json",
+        headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
+@app.get("/.well-known/openid-configuration")
+async def openid_configuration():
+    issuer = os.environ.get("OAUTH_ISSUER", BASE_URL)
+    authorization_endpoint = os.environ.get(
+        "OAUTH_AUTHORIZATION_ENDPOINT", f"{issuer}/oauth/authorize"
+    )
+    token_endpoint = os.environ.get("OAUTH_TOKEN_ENDPOINT", f"{issuer}/token")
+    jwks_uri = os.environ.get("OAUTH_JWKS_URI", f"{issuer}/.well-known/jwks.json")
+    grant_types_supported = os.environ.get(
+        "OAUTH_GRANT_TYPES_SUPPORTED", "client_credentials"
+    ).split(",")
+    return JSONResponse(
+        {
+            "issuer": issuer,
+            "authorization_endpoint": authorization_endpoint,
+            "token_endpoint": token_endpoint,
+            "jwks_uri": jwks_uri,
+            "grant_types_supported": [item.strip() for item in grant_types_supported if item.strip()],
+        },
+        headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
+@app.get("/.well-known/oauth-authorization-server")
+async def oauth_authorization_server():
+    issuer = os.environ.get("OAUTH_ISSUER", BASE_URL)
+    token_endpoint = os.environ.get("OAUTH_TOKEN_ENDPOINT", f"{issuer}/token")
+    jwks_uri = os.environ.get("OAUTH_JWKS_URI", f"{issuer}/.well-known/jwks.json")
+    grant_types_supported = os.environ.get(
+        "OAUTH_GRANT_TYPES_SUPPORTED", "client_credentials"
+    ).split(",")
+    return JSONResponse(
+        {
+            "issuer": issuer,
+            "token_endpoint": token_endpoint,
+            "jwks_uri": jwks_uri,
+            "grant_types_supported": [item.strip() for item in grant_types_supported if item.strip()],
+        },
+        headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
+@app.get("/.well-known/oauth-protected-resource")
+async def oauth_protected_resource():
+    resource = os.environ.get("OAUTH_RESOURCE", BASE_URL)
+    authorization_servers = os.environ.get("OAUTH_AUTHORIZATION_SERVERS", BASE_URL).split(",")
+    scopes_supported = os.environ.get(
+        "OAUTH_SCOPES_SUPPORTED", "a2a.read a2a.write health.read files.read"
+    ).split()
+    return JSONResponse(
+        {
+            "resource": resource,
+            "authorization_servers": [
+                server.strip() for server in authorization_servers if server.strip()
+            ],
+            "scopes_supported": [scope.strip() for scope in scopes_supported if scope.strip()],
+        },
+        headers={"Cache-Control": "public, max-age=300"},
     )
 
 
