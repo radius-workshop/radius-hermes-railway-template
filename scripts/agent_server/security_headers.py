@@ -13,7 +13,10 @@ BASE_SECURITY_HEADERS = {
 
 HTML_CSP = (
     "default-src 'none'; "
-    "style-src 'unsafe-inline'; "
+    "script-src 'self' https://cdn.jsdelivr.net 'sha256-eozjN019WMI8WCqwdCewQ3q7v0FwM3wU4t0jMhgxSZ4='; "
+    "connect-src 'self'; "
+    "style-src 'unsafe-inline' https://fonts.googleapis.com; "
+    "font-src https://fonts.gstatic.com data:; "
     "img-src 'self' data: https:; "
     "base-uri 'none'; "
     "form-action 'none'; "

@@ -16,6 +16,8 @@ class XSSHygieneTests(unittest.TestCase):
         self.assertEqual(response.headers["X-Frame-Options"], "DENY")
         self.assertEqual(response.headers["Referrer-Policy"], "no-referrer")
         self.assertIn("default-src 'none'", response.headers["Content-Security-Policy"])
+        self.assertIn("script-src 'self' https://cdn.jsdelivr.net", response.headers["Content-Security-Policy"])
+        self.assertIn("connect-src 'self'", response.headers["Content-Security-Policy"])
         self.assertIn("object-src 'none'", response.headers["Content-Security-Policy"])
 
     def test_non_html_routes_do_not_receive_homepage_csp(self) -> None:
