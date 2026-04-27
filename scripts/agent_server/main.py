@@ -28,13 +28,18 @@ from urllib.parse import unquote
 import httpx
 import uvicorn
 import yaml
-from a2a.types import (
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from a2a_compat import (
     InternalError,
     InvalidParamsError,
     InvalidRequestError,
+    JSONParseError,
     MethodNotFoundError,
+    jsonrpc_error_payload,
 )
-from a2a.utils.errors import A2AError, JSON_RPC_ERROR_CODE_MAP
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import (
     HTMLResponse,
@@ -45,8 +50,6 @@ from fastapi.responses import (
 )
 from pydantic import BaseModel, ConfigDict
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from erc8004_registry import (
     MissingSelfRegistrationFields,
     build_self_registration,
@@ -135,23 +138,8 @@ class JSONRPCSuccessResponse(BaseModel):
     result: Any
 
 
-class JSONParseError(A2AError):
-    message = "Parse error"
-
-
 def _jsonrpc_error_payload(error_obj: Any) -> dict[str, Any]:
-    if hasattr(error_obj, "model_dump"):
-        return error_obj.model_dump(by_alias=True, exclude_none=True)
-    if isinstance(error_obj, A2AError):
-        return JSONRPCError(
-            code=JSON_RPC_ERROR_CODE_MAP.get(type(error_obj), -32603),
-            message=getattr(error_obj, "message", str(error_obj) or "Internal error"),
-            data=getattr(error_obj, "data", None),
-        ).model_dump(exclude_none=True)
-    return JSONRPCError(
-        code=-32603,
-        message=str(error_obj) or "Internal error",
-    ).model_dump(exclude_none=True)
+    return jsonrpc_error_payload(error_obj)
 
 
 def _hermes_api_key() -> Optional[str]:

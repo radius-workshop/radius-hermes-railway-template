@@ -284,7 +284,9 @@ Use this interface for ERC-8004 work instead of temporary scripts. The plugin ex
 - inspecting registry stats
 - registering the current agent from defaults
 - registering a new agent
-- updating an existing agent URI
+- updating an existing agent URI with a complete replacement registration
+- patching an existing registration while preserving current metadata
+- adding canonical web/A2A/DID aliases plus a GoDaddy ANS pointer
 
 The plugin ships with checked-in Radius network constants for `testnet` and `mainnet`. `testnet` is enabled now and uses the deployed registry at `0x5cd923Ce1244d5498Bf3f9E0F3a374C2567F1A31` on chain `72344`.
 
@@ -303,7 +305,8 @@ The canonical registration shape used by both the plugin and `/.well-known/agent
     },
     {
       "name": "A2A",
-      "endpoint": "https://agent.example/.well-known/agent-card.json",
+      "endpoint": "https://agent.example/a2a",
+      "metadata": "https://agent.example/.well-known/agent-card.json",
       "version": "0.3.0"
     },
     {
@@ -312,9 +315,11 @@ The canonical registration shape used by both the plugin and `/.well-known/agent
       "version": "v1"
     }
   ],
+  "aliases": [],
   "x402Support": false,
   "active": true,
   "registrations": [],
+  "externalRegistrations": [],
   "supportedTrust": ["reputation"]
 }
 ```
@@ -322,6 +327,26 @@ The canonical registration shape used by both the plugin and `/.well-known/agent
 The plugin normalizes this JSON and encodes it as a `data:application/json;base64,...` URI before submitting the transaction.
 
 For the common case, use `erc8004_register_self` instead of hand-constructing a full `registration` object. It derives `web`, `A2A`, and `DID` service entries from the current agent runtime, but it expects operator-owned metadata like `name`, `description`, `image`, and `supportedTrust` to be supplied either as tool params or env vars. Read tools also return both the raw `token_uri` and `normalized_token_uri` so quoted contract responses are easier to debug.
+
+For partial metadata updates, use `erc8004_patch_agent_registration` with `dry_run=true` first. It fetches the current registration, merges `services_add`, `services_update`, `aliases_add`, `externalRegistrations_add`, and `fields`, deduplicates entries, validates the full result, and returns a data URI plus structural diff without submitting a transaction. Use `erc8004_add_ans_pointer` for the common GoDaddy ANS flow; it adds web/A2A/DID aliases, an `ANS` service, and an `externalRegistrations[]` entry.
+
+Safe update workflow: dry-run the intended specialized tool, inspect the diff, submit that same tool once, then verify with on-chain readback and tx status. For GoDaddy ANS/domain updates, use `erc8004_add_ans_pointer`; do not use generic patch or full replacement tools as probes after the ANS dry-run already shows the intended diff. Keep `erc8004_update_agent_uri` for deliberate full replacement writes only, with `replace_full_registration=true`.
+
+### ERC-8004 variables
+
+| Variable | Description |
+|---|---|
+| `ERC8004_NETWORK` | Defaults to `testnet`. |
+| `ERC8004_TESTNET_RPC_URL` | Defaults to `https://rpc.testnet.radiustech.xyz`. |
+| `ERC8004_TESTNET_REGISTRY` | Defaults to `0x5cd923Ce1244d5498Bf3f9E0F3a374C2567F1A31`. |
+| `ERC8004_TESTNET_EXPLORER_URL` | Defaults to `https://testnet.radiustech.xyz`. |
+| `ERC8004_GAS_LIMIT` | Defaults to `2000000`. |
+| `AGENT_ERC8004_ID` | Optional on-chain token ID for public metadata. |
+| `AGENT_ERC8004_REGISTRY` | Optional registry ref override for public metadata. |
+| `AGENT_ANS_NAME` | Optional ANS pointer, e.g. `ans://v1.0.0.agent0.72344.xyz`. |
+| `AGENT_ANS_AGENT_ID` | Optional GoDaddy ANS UUID. |
+| `AGENT_ANS_HOST` | Optional host, e.g. `agent0.72344.xyz`. |
+| `AGENT_ANS_STATUS` | Optional ANS lifecycle status. |
 
 ### Radius variables (all optional)
 
@@ -518,6 +543,8 @@ Any `.md` file you place in the `skills/` directory of this repo will be copied 
 
 The `radius-wallet.md` skill is already included and tells the agent to prefer the bundled Radius wallet tools, with script fallback where needed.
 
+The `using-godaddy.md` skill is also included. It tells Hermes to route GoDaddy domain availability and suggestion requests to the configured GoDaddy MCP server, and to route Agent Name Service registry requests to the local `godaddy-ans` plugin tools. GoDaddy ANS defaults to production; set `GODADDY_ANS_ENV=ote` only when OTE is explicitly required. For example, ANS registry searches should call `godaddy_ans_search` directly instead of inspecting plugin files, running Python scripts, installing packages, or reading GoDaddy API secrets in a terminal. ANS registration uses `godaddy_ans_prepare_registration` to inspect the Swagger-aligned payload and CSRs, then `godaddy_ans_register` to submit once the agent host, endpoint URLs, and domain-validation prerequisites are correct.
+
 Radius-maintained marketplace skills are seeded from `https://github.com/radiustechsystems/skills` at image build time, then managed at runtime as one persistent Hermes external directory (`RADIUS_SKILLS_DIR`, default `/data/.hermes/external-skills/radius-skills`). On boot, the template scans that directory for every `SKILL.md`, derives `skills.external_dirs`, and exposes those skills to Hermes as read-only external skills without copying them into `${HERMES_HOME}/skills/`.
 
 ### Auto-updating Radius external skills
@@ -618,7 +645,7 @@ hermes pairing list
 6. Copies all local `skills/*.md` files to `${HERMES_HOME}/skills/` (overwrites on each boot).
 7. Ensures the managed Radius external directory exists on persistent storage (`RADIUS_SKILLS_DIR`), bootstraps it from `/app/vendor/radius-skills` when empty (optional), scans all upstream skill directories, writes a discovery manifest, registers the derived parent roots as Hermes `skills.external_dirs`, and optionally warns or fails if `EXPECTED_VENDORED_SKILLS` are missing.
 8. Copies bundled plugins from `plugins/*` to `${HERMES_HOME}/plugins/`.
-9. Enables the bundled `gen-jwt`, `a2a-send`, and `radius-cast` plugin toolsets so A2A auth, outbound A2A calls, and Radius wallet tools are available immediately.
+9. Enables every bundled plugin in both `toolsets` and `plugins.enabled`, and removes bundled plugins from any stale `plugins.disabled` entry so persisted Railway config cannot hide newly bundled tools.
 10. Links `HERMES.md`, `.hermes.md`, `AGENTS.md`, `README.md`, `skills/`, `plugins/`, and `scripts/` into `${MESSAGING_CWD}` so gateway sessions see the bundled project context immediately. The three context files are force-overwritten on each boot.
 11. Copies published skills to `${HERMES_HOME}/well-known-skills/` for skill discovery endpoints.
 12. Starts the FastAPI agent server in background (binds `PORT`).

@@ -106,7 +106,12 @@ def build_self_registration(
         else _csv_list(os.environ.get("AGENT_OASF_DOMAINS")),
     )
 
-    return build_registration(
+    resolved_registrations = (
+        deepcopy(registrations)
+        if registrations is not None
+        else _default_registrations(network)
+    )
+    registration = build_registration(
         network,
         name=resolved_name,
         description=resolved_description,
@@ -114,9 +119,20 @@ def build_self_registration(
         services=resolved_services,
         x402_support=resolved_x402_support,
         active=resolved_active,
-        registrations=deepcopy(registrations or []),
+        registrations=resolved_registrations,
         supported_trust=resolved_supported_trust,
     )
+    registration["aliases"] = []
+    registration["externalRegistrations"] = []
+
+    wallet = _clean_string(os.environ.get("AGENT_WALLET")) or _clean_string(
+        os.environ.get("RADIUS_WALLET_ADDRESS")
+    )
+    if wallet:
+        registration["agentWallet"] = wallet
+
+    _add_ans_metadata(registration)
+    return registration
 
 
 def self_registration_missing_fields_error(err: MissingSelfRegistrationFields) -> dict:
@@ -168,7 +184,8 @@ def _default_services(
         },
         {
             "name": "A2A",
-            "endpoint": f"{normalized_base_url}/.well-known/agent-card.json",
+            "endpoint": f"{normalized_base_url}/a2a",
+            "metadata": f"{normalized_base_url}/.well-known/agent-card.json",
             "version": a2a_version,
         },
         {
@@ -256,6 +273,57 @@ def _clean_string(value: str | None) -> str | None:
         return None
     cleaned = str(value).strip()
     return cleaned or None
+
+
+def _default_registrations(network: NetworkConfig) -> list[dict]:
+    raw_agent_id = _clean_string(os.environ.get("AGENT_ERC8004_ID"))
+    if raw_agent_id is None:
+        return []
+    try:
+        agent_id = int(raw_agent_id)
+    except ValueError:
+        return []
+    registry = _clean_string(os.environ.get("AGENT_ERC8004_REGISTRY"))
+    return [
+        {
+            "agentId": agent_id,
+            "agentRegistry": registry or network.identity_registry_ref,
+        }
+    ]
+
+
+def _add_ans_metadata(registration: dict) -> None:
+    ans_name = _clean_string(os.environ.get("AGENT_ANS_NAME"))
+    ans_agent_id = _clean_string(os.environ.get("AGENT_ANS_AGENT_ID"))
+    ans_host = _clean_string(os.environ.get("AGENT_ANS_HOST"))
+    ans_status = _clean_string(os.environ.get("AGENT_ANS_STATUS"))
+    if not (ans_name and ans_agent_id and ans_host):
+        return
+
+    registration["services"].append(
+        {
+            "name": "ANS",
+            "endpoint": ans_name,
+            "version": "1.0.0",
+            "registry": "godaddy-ans",
+            "registryId": ans_agent_id,
+            "agentHost": ans_host,
+            **({"status": ans_status} if ans_status else {}),
+        }
+    )
+    registration["aliases"].append(
+        {"type": "ans", "endpoint": ans_name, "primary": True}
+    )
+    registration["externalRegistrations"].append(
+        {
+            "registry": "godaddy-ans",
+            "registryId": ans_agent_id,
+            "name": ans_name,
+            "agentHost": ans_host,
+            "version": "1.0.0",
+            **({"status": ans_status} if ans_status else {}),
+        }
+    )
 
 
 def _snake_case(value: str) -> str:

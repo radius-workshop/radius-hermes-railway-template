@@ -63,6 +63,7 @@ COPY scripts/entrypoint.sh /app/scripts/entrypoint.sh
 RUN sed -i 's/\r$//' /app/scripts/entrypoint.sh && chmod +x /app/scripts/entrypoint.sh
 
 COPY scripts/radius /app/scripts/radius
+COPY scripts/godaddy /app/scripts/godaddy
 
 # Install and build linear-claude-skill (still Node.js)
 RUN git clone --depth 1 https://github.com/radius-workshop/linear-claude-skill /app/scripts/linear-skill \

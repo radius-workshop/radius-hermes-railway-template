@@ -11,10 +11,13 @@ CANONICAL_FIELD_ORDER = [
     "description",
     "image",
     "services",
+    "aliases",
     "x402Support",
     "active",
     "registrations",
+    "externalRegistrations",
     "supportedTrust",
+    "agentWallet",
 ]
 
 REGISTRATION_TYPE = "https://eips.ethereum.org/EIPS/eip-8004#registration-v1"
@@ -118,6 +121,16 @@ def normalize_registration(
     elif not isinstance(supported_trust, list):
         raise ValueError("registration.supportedTrust must be an array")
 
+    aliases = normalized.get("aliases")
+    if aliases is not None and not isinstance(aliases, list):
+        raise ValueError("registration.aliases must be an array")
+
+    external_registrations = normalized.get("externalRegistrations")
+    if external_registrations is not None and not isinstance(
+        external_registrations, list
+    ):
+        raise ValueError("registration.externalRegistrations must be an array")
+
     _validate_registration(normalized)
     return _order_registration(normalized)
 
@@ -212,6 +225,51 @@ def _validate_registration(registration: dict) -> None:
                 raise ValueError(
                     f"registration.services[{index}].{list_field} must be a string array"
                 )
+        for string_field in (
+            "metadata",
+            "registry",
+            "registryId",
+            "agentHost",
+            "status",
+        ):
+            value = service.get(string_field)
+            if value is not None and (
+                not isinstance(value, str) or not value.strip()
+            ):
+                raise ValueError(
+                    f"registration.services[{index}].{string_field} must be a non-empty string"
+                )
+        for list_field in ("supportedAssets", "supportedNetworks"):
+            if list_field in service and (
+                not isinstance(service[list_field], list)
+                or not all(
+                    isinstance(item, str) and item.strip()
+                    for item in service[list_field]
+                )
+            ):
+                raise ValueError(
+                    f"registration.services[{index}].{list_field} must be a string array"
+                )
+        if "primary" in service and not isinstance(service["primary"], bool):
+            raise ValueError(f"registration.services[{index}].primary must be a boolean")
+
+    aliases = registration.get("aliases", [])
+    if aliases is not None:
+        if not isinstance(aliases, list):
+            raise ValueError("registration.aliases must be an array")
+        for index, alias in enumerate(aliases):
+            if not isinstance(alias, dict):
+                raise ValueError(f"registration.aliases[{index}] must be an object")
+            for field in ("type", "endpoint"):
+                value = alias.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError(
+                        f"registration.aliases[{index}].{field} must be a non-empty string"
+                    )
+            if "primary" in alias and not isinstance(alias["primary"], bool):
+                raise ValueError(
+                    f"registration.aliases[{index}].primary must be a boolean"
+                )
 
     if not isinstance(registration["registrations"], list):
         raise ValueError("registration.registrations must be an array")
@@ -233,6 +291,37 @@ def _validate_registration(registration: dict) -> None:
         isinstance(item, str) and item.strip() for item in supported_trust
     ):
         raise ValueError("registration.supportedTrust must be a non-empty string array")
+
+    external_registrations = registration.get("externalRegistrations", [])
+    if external_registrations is not None:
+        if not isinstance(external_registrations, list):
+            raise ValueError("registration.externalRegistrations must be an array")
+        for index, item in enumerate(external_registrations):
+            if not isinstance(item, dict):
+                raise ValueError(
+                    f"registration.externalRegistrations[{index}] must be an object"
+                )
+            for field in (
+                "registry",
+                "registryId",
+                "name",
+                "agentHost",
+                "version",
+                "status",
+            ):
+                value = item.get(field)
+                if value is not None and (
+                    not isinstance(value, str) or not value.strip()
+                ):
+                    raise ValueError(
+                        f"registration.externalRegistrations[{index}].{field} must be a non-empty string"
+                    )
+            for field in ("registry", "registryId"):
+                value = item.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError(
+                        f"registration.externalRegistrations[{index}].{field} must be a non-empty string"
+                    )
 
 
 def _order_registration(registration: dict) -> dict:

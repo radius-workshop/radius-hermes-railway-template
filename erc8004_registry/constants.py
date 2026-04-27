@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import os
 
 
 @dataclass(frozen=True)
@@ -41,16 +42,41 @@ NETWORKS = {
 DEFAULT_NETWORK = "testnet"
 
 
+def _env(name: str) -> str:
+    return os.environ.get(name, "").strip()
+
+
+def _with_env_overrides(config: NetworkConfig) -> NetworkConfig:
+    prefix = f"ERC8004_{config.name.upper()}"
+    chain_id = int(_env(f"{prefix}_CHAIN_ID") or config.chain_id)
+    rpc_url = _env(f"{prefix}_RPC_URL") or config.rpc_url
+    explorer_url = _env(f"{prefix}_EXPLORER_URL") or config.explorer_url
+    identity_registry = _env(f"{prefix}_REGISTRY") or config.identity_registry
+    enabled = config.enabled
+    if config.name == "mainnet":
+        enabled = bool(rpc_url and explorer_url and identity_registry and chain_id)
+    return NetworkConfig(
+        name=config.name,
+        chain_id=chain_id,
+        rpc_url=rpc_url,
+        explorer_url=explorer_url,
+        identity_registry=identity_registry,
+        enabled=enabled,
+    )
+
+
 def get_network_config(network: str | None) -> NetworkConfig:
-    key = (network or DEFAULT_NETWORK).strip().lower()
+    key = (network or _env("ERC8004_NETWORK") or DEFAULT_NETWORK).strip().lower()
     if key not in NETWORKS:
         raise ValueError(
             f"Unsupported network '{network}'. Expected one of: {', '.join(NETWORKS)}."
         )
-    config = NETWORKS[key]
+    config = _with_env_overrides(NETWORKS[key])
     if not config.enabled:
         raise ValueError(
-            f"Radius {config.name} is not enabled yet in this build."
+            f"Radius {config.name} is not configured. Set ERC8004_{config.name.upper()}_RPC_URL, "
+            f"ERC8004_{config.name.upper()}_REGISTRY, ERC8004_{config.name.upper()}_EXPLORER_URL, "
+            f"and ERC8004_{config.name.upper()}_CHAIN_ID before using this network."
         )
     return config
 

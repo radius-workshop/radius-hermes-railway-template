@@ -205,6 +205,8 @@ for key in \
   TERMINAL_BACKEND TERMINAL_DOCKER_IMAGE TERMINAL_SINGULARITY_IMAGE TERMINAL_MODAL_IMAGE TERMINAL_CWD TERMINAL_TIMEOUT TERMINAL_LIFETIME_SECONDS TERMINAL_CONTAINER_CPU TERMINAL_CONTAINER_MEMORY TERMINAL_CONTAINER_DISK TERMINAL_CONTAINER_PERSISTENT TERMINAL_SANDBOX_DIR TERMINAL_SSH_HOST TERMINAL_SSH_USER TERMINAL_SSH_PORT TERMINAL_SSH_KEY SUDO_PASSWORD \
   WEB_TOOLS_DEBUG VISION_TOOLS_DEBUG MOA_TOOLS_DEBUG IMAGE_TOOLS_DEBUG CONTEXT_COMPRESSION_ENABLED CONTEXT_COMPRESSION_THRESHOLD CONTEXT_COMPRESSION_MODEL HERMES_MAX_ITERATIONS HERMES_TOOL_PROGRESS HERMES_TOOL_PROGRESS_MODE \
   RADIUS_PRIVATE_KEY RADIUS_WALLET_ADDRESS RADIUS_NETWORK RADIUS_AUTO_FUND \
+  ERC8004_NETWORK ERC8004_TESTNET_RPC_URL ERC8004_TESTNET_REGISTRY ERC8004_TESTNET_EXPLORER_URL ERC8004_TESTNET_CHAIN_ID ERC8004_MAINNET_RPC_URL ERC8004_MAINNET_REGISTRY ERC8004_MAINNET_EXPLORER_URL ERC8004_MAINNET_CHAIN_ID ERC8004_GAS_LIMIT ERC8004_MAX_AGENT_URI_BYTES \
+  AGENT_NAME AGENT_DESCRIPTION AGENT_IMAGE AGENT_ACTIVE AGENT_X402_SUPPORT AGENT_SUPPORTED_TRUST AGENT_A2A_VERSION AGENT_ERC8004_ID AGENT_ERC8004_REGISTRY AGENT_ANS_NAME AGENT_ANS_AGENT_ID AGENT_ANS_HOST AGENT_ANS_STATUS AGENT_WALLET AGENT_EMAIL AGENT_ENS \
   PARA_API_KEY PARA_SECRET_API_KEY PARA_ENVIRONMENT PARA_REST_BASE_URL PARA_WALLET_ID \
   WEBHOOK_PORT WEBHOOK_SECRET DEBUG_SKILLS \
   EXPECTED_VENDORED_SKILLS STRICT_VENDORED_SKILLS VENDORED_SKILLS_SOURCE \
@@ -360,42 +362,99 @@ else
   echo "[bootstrap] BYTEROVER_API_KEY not set and BYTEROVER_LOCAL not enabled — skipping ByteRover setup."
 fi
 
-# === bundled plugins: ensure their toolsets are enabled in config.yaml ===
-if ! python3 -c "
-import yaml, os, sys
-cfg_file = os.environ['HERMES_HOME'] + '/config.yaml'
+# === bundled plugins: ensure plugins and their toolsets are enabled in config.yaml ===
+echo "[bootstrap] Discovering bundled plugins and plugin toolsets..."
+python3 - <<'PYEOF'
+import os
+from pathlib import Path
+
+import yaml
+
+cfg_file = Path(os.environ["HERMES_HOME"]) / "config.yaml"
+plugins_root = Path(os.environ.get("BUNDLED_PLUGINS_SOURCE", "/app/plugins"))
+
 try:
-    cfg = yaml.safe_load(open(cfg_file)) or {}
-except Exception:
-    cfg = {}
-ts = cfg.get('toolsets', [])
-required = {'gen-jwt', 'radius-cast', 'a2a-send', 'erc8004-registry'}
-sys.exit(0 if ('all' in ts or required.issubset(set(ts))) else 1)
-" 2>/dev/null; then
-  echo "[bootstrap] Adding bundled plugin toolsets to enabled toolsets in config.yaml..."
-  python3 - <<'PYEOF'
-import yaml, os
-cfg_file = os.environ['HERMES_HOME'] + '/config.yaml'
-try:
-    with open(cfg_file) as f:
+    with cfg_file.open() as f:
         cfg = yaml.safe_load(f) or {}
 except Exception:
     cfg = {}
-toolsets = cfg.get('toolsets', [])
-required_toolsets = ['gen-jwt', 'radius-cast', 'a2a-send', 'erc8004-registry']
-if 'all' not in toolsets:
-    changed = False
-    for toolset in required_toolsets:
-        if toolset not in toolsets:
-            toolsets.append(toolset)
-            changed = True
-    cfg['toolsets'] = toolsets
-    if changed:
-        with open(cfg_file, 'w') as f:
-            yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
-        print('[bootstrap] Bundled plugin toolsets enabled.')
+
+
+def discover_plugin_names(root: Path) -> list[str]:
+    names: list[str] = []
+    if not root.exists():
+        return names
+    for manifest_path in sorted(root.glob("*/plugin.yaml")):
+        try:
+            manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            manifest = {}
+        name = str(manifest.get("name") or manifest_path.parent.name).strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+bundled_plugins = discover_plugin_names(plugins_root)
+if not bundled_plugins:
+    print(f"[bootstrap] No bundled plugin manifests discovered under {plugins_root}.")
+else:
+    print(f"[bootstrap] Bundled plugin manifests discovered: {bundled_plugins}")
+
+toolsets = cfg.get("toolsets") or []
+if not isinstance(toolsets, list):
+    toolsets = []
+
+plugins_cfg = cfg.get("plugins") or {}
+if not isinstance(plugins_cfg, dict):
+    plugins_cfg = {}
+enabled_plugins = plugins_cfg.get("enabled") or []
+if not isinstance(enabled_plugins, list):
+    enabled_plugins = []
+disabled_plugins = plugins_cfg.get("disabled") or []
+if not isinstance(disabled_plugins, list):
+    disabled_plugins = []
+
+added_toolsets: list[str] = []
+if "all" not in toolsets:
+    for plugin_name in bundled_plugins:
+        if plugin_name not in toolsets:
+            toolsets.append(plugin_name)
+            added_toolsets.append(plugin_name)
+
+added_plugins: list[str] = []
+if "all" not in enabled_plugins and "*" not in enabled_plugins:
+    for plugin_name in bundled_plugins:
+        if plugin_name not in enabled_plugins:
+            enabled_plugins.append(plugin_name)
+            added_plugins.append(plugin_name)
+
+bundled_plugin_set = set(bundled_plugins)
+removed_disabled_plugins = [
+    plugin_name for plugin_name in disabled_plugins if plugin_name in bundled_plugin_set
+]
+if removed_disabled_plugins:
+    disabled_plugins = [
+        plugin_name for plugin_name in disabled_plugins if plugin_name not in bundled_plugin_set
+    ]
+
+cfg["toolsets"] = toolsets
+plugins_cfg["enabled"] = enabled_plugins
+plugins_cfg["disabled"] = disabled_plugins
+cfg["plugins"] = plugins_cfg
+
+if added_toolsets or added_plugins or removed_disabled_plugins:
+    with cfg_file.open("w") as f:
+        yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
+    if added_toolsets:
+        print(f"[bootstrap] Enabled bundled plugin toolsets: {added_toolsets}")
+    if added_plugins:
+        print(f"[bootstrap] Enabled bundled plugins: {added_plugins}")
+    if removed_disabled_plugins:
+        print(f"[bootstrap] Removed bundled plugins from plugins.disabled: {removed_disabled_plugins}")
+else:
+    print("[bootstrap] Bundled plugins and toolsets already enabled.")
 PYEOF
-fi
 
 # === vendored skills: persist Radius external directory and discover skill roots ===
 RADIUS_SKILLS_DIR="${RADIUS_SKILLS_DIR:-/data/.hermes/external-skills/radius-skills}"
@@ -533,16 +592,19 @@ for skill_file in /app/skills/*.md; do
   skill_basename="$(basename "$skill_file")"
   skill_name="${skill_basename%.md}"
   cp "$skill_file" "${SKILLS_DIR}/${skill_basename}"
+  skill_target_dir="${SKILLS_DIR}/${skill_name}"
+  mkdir -p "$skill_target_dir"
+  cp "$skill_file" "${skill_target_dir}/SKILL.md"
 
   case "$skill_name" in
     radius-wallet|a2a-comms|registering-agent)
       target_dir="${SKILLS_DIR}/radius/${skill_name}"
       mkdir -p "$target_dir"
       cp "$skill_file" "${target_dir}/SKILL.md"
-      echo "[bootstrap] Installed skill: ${skill_basename} (category: radius)"
+      echo "[bootstrap] Installed skill: ${skill_basename} (category: radius, directory layout)"
       ;;
     *)
-      echo "[bootstrap] Installed skill: ${skill_basename}"
+      echo "[bootstrap] Installed skill: ${skill_basename} (directory layout)"
       ;;
   esac
 done
@@ -587,6 +649,117 @@ for plugin_dir in /app/plugins/*/; do
   cp -r "$plugin_dir" "${PLUGINS_DIR}/${plugin_name}"
   echo "[bootstrap] Installed plugin: ${plugin_name}"
 done
+
+# GoDaddy surfaces have two independent paths: the remote GoDaddy MCP domain
+# server and the local godaddy-ans plugin. Verify the local plugin can register
+# tools before Hermes gateway starts so missing manifests/imports are visible in
+# deployment logs instead of only as model-side terminal fallbacks.
+STRICT_GODADDY_RUNTIME="${STRICT_GODADDY_RUNTIME:-false}"
+export STRICT_GODADDY_RUNTIME
+python3 - <<'PYEOF'
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+import yaml
+
+
+class _ToolCtx:
+    def __init__(self) -> None:
+        self.tools = []
+        self.hooks = []
+
+    def register_tool(self, **kwargs) -> None:
+        self.tools.append(kwargs)
+
+    def register_hook(self, name, callback) -> None:
+        self.hooks.append((name, callback))
+
+
+def _is_strict() -> bool:
+    return os.environ.get("STRICT_GODADDY_RUNTIME", "").lower() in {"1", "true", "yes", "on"}
+
+
+cfg_file = Path(os.environ["HERMES_HOME"]) / "config.yaml"
+plugins_dir = Path(os.environ["HERMES_HOME"]) / "plugins"
+plugin_dir = plugins_dir / "godaddy-ans"
+errors = []
+warnings = []
+
+try:
+    cfg = yaml.safe_load(cfg_file.read_text(encoding="utf-8")) or {}
+except Exception as exc:
+    cfg = {}
+    warnings.append(f"could not read config.yaml: {exc}")
+
+mcp_servers = cfg.get("mcp_servers") or {}
+if isinstance(mcp_servers, dict) and "godaddy" not in mcp_servers:
+    warnings.append("mcp_servers.godaddy is not configured; GoDaddy domain MCP tools may be unavailable.")
+
+plugins_cfg = cfg.get("plugins") or {}
+enabled_plugins = plugins_cfg.get("enabled") or []
+disabled_plugins = plugins_cfg.get("disabled") or []
+if isinstance(enabled_plugins, list):
+    if "all" not in enabled_plugins and "*" not in enabled_plugins and "godaddy-ans" not in enabled_plugins:
+        errors.append("plugins.enabled does not include godaddy-ans.")
+if isinstance(disabled_plugins, list) and "godaddy-ans" in disabled_plugins:
+    errors.append("plugins.disabled still includes godaddy-ans.")
+
+manifest_path = plugin_dir / "plugin.yaml"
+module_path = plugin_dir / "__init__.py"
+if not manifest_path.exists():
+    errors.append(f"missing GoDaddy ANS plugin manifest: {manifest_path}")
+if not module_path.exists():
+    errors.append(f"missing GoDaddy ANS plugin module: {module_path}")
+
+expected_tools = {
+    "godaddy_ans_capabilities",
+    "godaddy_ans_prepare_registration",
+    "godaddy_ans_register",
+    "godaddy_ans_search",
+    "godaddy_ans_get_agent",
+    "godaddy_ans_resolve",
+    "godaddy_ans_revoke",
+    "godaddy_ans_verify_acme",
+    "godaddy_ans_verify_dns",
+    "godaddy_ans_get_identity_certificates",
+    "godaddy_ans_submit_identity_csr",
+    "godaddy_ans_get_server_certificates",
+    "godaddy_ans_submit_server_csr",
+    "godaddy_ans_get_csr_status",
+    "godaddy_ans_events",
+}
+
+if module_path.exists():
+    try:
+        spec = importlib.util.spec_from_file_location("godaddy_ans_runtime_check", module_path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        ctx = _ToolCtx()
+        module.register(ctx)
+        registered = {tool.get("name") for tool in ctx.tools}
+        missing = sorted(expected_tools - registered)
+        if missing:
+            errors.append(f"godaddy-ans did not register expected tools: {missing}")
+        if "pre_llm_call" not in {name for name, _callback in ctx.hooks}:
+            errors.append("godaddy-ans did not register its pre_llm_call routing hook.")
+    except Exception as exc:
+        errors.append(f"could not import/register godaddy-ans plugin: {exc}")
+
+for warning in warnings:
+    print(f"[bootstrap] WARNING: {warning}", file=sys.stderr)
+
+if errors:
+    message = "[bootstrap] GoDaddy MCP and ANS runtime surfaces check failed: " + "; ".join(errors)
+    if _is_strict():
+        print(message, file=sys.stderr)
+        sys.exit(1)
+    print(f"[bootstrap] WARNING: {message}", file=sys.stderr)
+else:
+    print("[bootstrap] GoDaddy MCP and ANS runtime surfaces verified.")
+PYEOF
 
 # Seed the messaging workspace so gateway sessions discover bundled project context
 # from MESSAGING_CWD immediately.

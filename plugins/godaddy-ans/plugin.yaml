@@ -1,0 +1,19 @@
+name: godaddy-ans
+version: "1.0.0"
+description: "GoDaddy Agent Name Service registry tools for registration, search, lookup, resolution, and validation"
+provides_tools:
+  - godaddy_ans_capabilities
+  - godaddy_ans_prepare_registration
+  - godaddy_ans_register
+  - godaddy_ans_search
+  - godaddy_ans_get_agent
+  - godaddy_ans_resolve
+  - godaddy_ans_revoke
+  - godaddy_ans_verify_acme
+  - godaddy_ans_verify_dns
+  - godaddy_ans_get_identity_certificates
+  - godaddy_ans_submit_identity_csr
+  - godaddy_ans_get_server_certificates
+  - godaddy_ans_submit_server_csr
+  - godaddy_ans_get_csr_status
+  - godaddy_ans_events
