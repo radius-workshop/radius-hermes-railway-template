@@ -34,6 +34,7 @@ SEMVER_RE = re.compile(
 VALID_PROTOCOLS = {"A2A", "MCP", "HTTP-API"}
 VALID_TRANSPORTS = {"STREAMABLE-HTTP", "SSE", "JSON-RPC", "GRPC", "REST", "HTTP"}
 VALID_AGENT_STATUSES = {"PENDING_DNS", "ACTIVE", "DEPRECATED", "REVOKED", "ALL"}
+VALID_DNS_RECORD_TYPES = {"A", "AAAA", "CNAME", "MX", "NS", "SOA", "SRV", "TXT"}
 VALID_REVOCATION_REASONS = {
     "KEY_COMPROMISE",
     "CESSATION_OF_OPERATION",
@@ -433,8 +434,9 @@ def _json_request(
     method: str,
     path: str,
     *,
-    body: dict[str, Any] | None = None,
+    body: Any | None = None,
     query: Mapping[str, Any] | None = None,
+    headers: Mapping[str, str] | None = None,
     env: Mapping[str, str] | None = None,
     timeout: int = 30,
 ) -> dict[str, Any]:
@@ -446,14 +448,18 @@ def _json_request(
             url = f"{url}?{encoded}"
 
     data = None if body is None else json.dumps(body).encode("utf-8")
+    request_headers = {
+        "Authorization": _auth_header(current_env),
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    if headers:
+        request_headers.update({key: value for key, value in headers.items() if value})
+
     request = urllib.request.Request(
         url,
         data=data,
-        headers={
-            "Authorization": _auth_header(current_env),
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        },
+        headers=request_headers,
         method=method.upper(),
     )
 
@@ -887,6 +893,67 @@ def get_events(
     if limit is not None:
         query["limit"] = max(1, min(int(limit), MAX_EVENT_LIMIT))
     return _json_request("GET", "/v1/agents/events", query=query, env=env)
+
+
+def _normalize_dns_record_type(record_type: str) -> str:
+    normalized = str(record_type).strip().upper()
+    if normalized not in VALID_DNS_RECORD_TYPES:
+        raise ValueError("record_type must be one of A, AAAA, CNAME, MX, NS, SOA, SRV, or TXT.")
+    return normalized
+
+
+def _normalize_dns_record_name(name: str) -> str:
+    stripped = str(name).strip().strip(".")
+    if not stripped:
+        raise ValueError("record name is required.")
+    return "@" if stripped == "@" else stripped.lower()
+
+
+def _dns_record_payload(record: Mapping[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    data = record.get("data")
+    if data is None or str(data).strip() == "":
+        raise ValueError("each DNS record requires data.")
+    payload["data"] = str(data).strip()
+
+    for key in ("ttl", "priority", "port", "weight"):
+        value = record.get(key)
+        if value is not None:
+            payload[key] = int(value)
+    for key in ("protocol", "service"):
+        value = record.get(key)
+        if value is not None and str(value).strip():
+            payload[key] = str(value).strip()
+    return payload
+
+
+def set_dns_records(
+    *,
+    domain: str,
+    record_type: str,
+    name: str,
+    records: list[Mapping[str, Any]],
+    shopper_id: str | None = None,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    normalized_domain = _normalize_agent_host(domain)
+    normalized_type = _normalize_dns_record_type(record_type)
+    normalized_name = _normalize_dns_record_name(name)
+    if not records:
+        raise ValueError("records must contain at least one DNS record.")
+
+    body = [_dns_record_payload(record) for record in records]
+    encoded_domain = urllib.parse.quote(normalized_domain, safe="")
+    encoded_type = urllib.parse.quote(normalized_type, safe="")
+    encoded_name = urllib.parse.quote(normalized_name, safe="")
+    headers = {"X-Shopper-Id": shopper_id} if shopper_id else None
+    return _json_request(
+        "PUT",
+        f"/v1/domains/{encoded_domain}/records/{encoded_type}/{encoded_name}",
+        body=body,
+        headers=headers,
+        env=env,
+    )
 
 
 def _parser() -> argparse.ArgumentParser:

@@ -24,6 +24,7 @@ ANS_TOOLS = [
     "godaddy_ans_revoke",
     "godaddy_ans_verify_acme",
     "godaddy_ans_verify_dns",
+    "godaddy_dns_set_records",
     "godaddy_ans_get_identity_certificates",
     "godaddy_ans_submit_identity_csr",
     "godaddy_ans_get_server_certificates",
@@ -116,7 +117,9 @@ def _go_daddy_turn_context(**kwargs) -> str:
 
     return (
         "GoDaddy routing reminder: use GoDaddy MCP tools for domain availability and "
-        "domain suggestions. For ANS registry actions, call the local godaddy-ans "
+        "domain suggestions. Use godaddy_dns_set_records to set DNS records on a "
+        "known GoDaddy-managed domain; it replaces all records for the exact "
+        "type/name pair. For ANS registry actions, call the local godaddy-ans "
         "plugin tools directly. Use godaddy_ans_search for ANS registry searches, "
         "godaddy_ans_capabilities for capability questions, and "
         "godaddy_ans_prepare_registration for offline registration artifacts. Default "
@@ -143,6 +146,7 @@ def _capabilities_payload() -> dict[str, Any]:
             "use_for": [
                 "domain availability checks",
                 "domain name suggestions",
+                "DNS record replacement via the local godaddy_dns_set_records tool",
                 "other GoDaddy domain workflows exposed by the remote MCP server",
             ],
         },
@@ -172,6 +176,7 @@ def _capabilities_payload() -> dict[str, Any]:
         },
         "default_routing": {
             "domain_search_or_suggestions": "Use GoDaddy MCP.",
+            "domain_dns_record_writes": "Use godaddy_dns_set_records for exact type/name replacements.",
             "ans_registration_search_lookup_resolution_or_verification": "Use the godaddy-ans plugin tools.",
         },
     }
@@ -301,6 +306,39 @@ def register(ctx):
         if not agent_id:
             return "Error: missing required parameter 'agent_id'."
         return _json_result(lambda: ans.verify_dns(agent_id))
+
+    def godaddy_dns_set_records(params, **kwargs):
+        params = params or {}
+        domain = _first_non_empty(params, "domain")
+        record_type = _first_non_empty(params, "record_type", "type")
+        name = _first_non_empty(params, "name")
+        data = _first_non_empty(params, "data")
+        records = params.get("records")
+        if not domain:
+            return "Error: missing required parameter 'domain'."
+        if not record_type:
+            return "Error: missing required parameter 'record_type'."
+        if not name:
+            return "Error: missing required parameter 'name'."
+        if records is None:
+            if not data:
+                return "Error: provide either 'records' or 'data'."
+            record: dict[str, Any] = {"data": data}
+            for key in ("ttl", "priority", "port", "weight", "protocol", "service"):
+                if key in params and params[key] is not None:
+                    record[key] = params[key]
+            records = [record]
+        if not isinstance(records, list):
+            return "Error: 'records' must be an array when provided."
+        return _json_result(
+            lambda: ans.set_dns_records(
+                domain=domain,
+                record_type=record_type,
+                name=name,
+                records=records,
+                shopper_id=_first_non_empty(params, "shopper_id"),
+            )
+        )
 
     def godaddy_ans_get_identity_certificates(params, **kwargs):
         params = params or {}
@@ -514,6 +552,34 @@ def register(ctx):
             "Trigger GoDaddy ANS final DNS records verification for external domain registration. This checks required HTTPS, TLSA, _ans, and _ra-badge records after certificates/DNS provisioning; it is not the ACME TXT challenge verifier.",
             {"agent_id": {"type": "string"}},
             godaddy_ans_verify_dns,
+        ),
+        (
+            "godaddy_dns_set_records",
+            "Replace all GoDaddy DNS records for one domain, record type, and record name using PUT /v1/domains/{domain}/records/{type}/{name}. This is intentionally narrow: it sets the exact record set for that name and type, so include every value that should remain. The tool reads GODADDY_API_KEY and GODADDY_API_SECRET from the runtime environment.",
+            {
+                "domain": {"type": "string", "description": "Domain name, for example example.com."},
+                "record_type": {
+                    "type": "string",
+                    "enum": ["A", "AAAA", "CNAME", "MX", "NS", "SOA", "SRV", "TXT"],
+                    "description": "DNS record type to replace.",
+                },
+                "type": {"type": "string", "description": "Alias for record_type."},
+                "name": {"type": "string", "description": "Record name such as @, www, _acme-challenge, or _ans."},
+                "data": {"type": "string", "description": "Single record value. Use records for multiple values."},
+                "records": {
+                    "type": "array",
+                    "description": "Complete replacement records for this type and name. Each item requires data and may include ttl, priority, port, weight, protocol, and service.",
+                    "items": {"type": "object"},
+                },
+                "ttl": {"type": "integer", "description": "Optional TTL for single-record calls."},
+                "priority": {"type": "integer", "description": "Optional priority for MX or SRV records."},
+                "port": {"type": "integer", "description": "Optional service port for SRV records."},
+                "weight": {"type": "integer", "description": "Optional weight for SRV records."},
+                "protocol": {"type": "string", "description": "Optional protocol for SRV records."},
+                "service": {"type": "string", "description": "Optional service for SRV records."},
+                "shopper_id": {"type": "string", "description": "Optional X-Shopper-Id header for reseller/subaccount use."},
+            },
+            godaddy_dns_set_records,
         ),
         (
             "godaddy_ans_get_identity_certificates",

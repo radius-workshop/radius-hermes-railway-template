@@ -10,8 +10,11 @@ GoDaddy has two distinct capability surfaces in this agent:
 
 - GoDaddy MCP: domain availability checks, domain suggestions, and other registrar/domain workflows exposed by the configured `mcp_servers.godaddy` server.
 - GoDaddy ANS: Agent Name Service registry registration, search, lookup, resolution, certificate, event, and verification workflows exposed by the local `godaddy-ans` plugin.
+- GoDaddy DNS writes: the local `godaddy_dns_set_records` tool replaces records for one exact domain/type/name pair.
 
 Use the MCP domain tools when the user asks about domain names, domain availability, or domain suggestions.
+
+Use `godaddy_dns_set_records` when the user asks to set DNS records on a known GoDaddy-managed domain. This uses `PUT /v1/domains/{domain}/records/{type}/{name}` and replaces all existing values for that record type and name, so include every value that should remain.
 
 Use the `godaddy-ans` plugin tools when the user asks about ANS, Agent Name Service, registered agents, resolving agent hosts, registering agents, revoking agents, certificates, events, or validating ANS registrations.
 
@@ -32,6 +35,7 @@ The ANS API source of truth is `https://developer.godaddy.com/swagger/swagger_an
 - `godaddy_ans_revoke`: revoke an active agent or cancel an eligible pending registration.
 - `godaddy_ans_verify_acme`: trigger ACME domain-control validation for a pending registration.
 - `godaddy_ans_verify_dns`: verify final external-domain DNS records after ACME/certificate steps.
+- `godaddy_dns_set_records`: replace all DNS records for one domain/type/name pair, for example `{"domain":"example.com","record_type":"TXT","name":"_acme-challenge","data":"token","ttl":600}`.
 - `godaddy_ans_get_identity_certificates` / `godaddy_ans_get_server_certificates`: retrieve issued certificates.
 - `godaddy_ans_submit_identity_csr` / `godaddy_ans_submit_server_csr`: submit base64 CSR payloads for certificate issuance.
 - `godaddy_ans_get_csr_status`: inspect CSR processing status.

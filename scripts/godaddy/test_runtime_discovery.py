@@ -20,6 +20,7 @@ EXPECTED_ANS_TOOLS = [
     "godaddy_ans_revoke",
     "godaddy_ans_verify_acme",
     "godaddy_ans_verify_dns",
+    "godaddy_dns_set_records",
     "godaddy_ans_get_identity_certificates",
     "godaddy_ans_submit_identity_csr",
     "godaddy_ans_get_server_certificates",
@@ -96,6 +97,7 @@ class GoDaddyRuntimeDiscoveryTests(unittest.TestCase):
         self.assertIn("http_01", payload["godaddy_ans"]["acme_validation_workflow"])
         self.assertIn("verify_dns", payload["godaddy_ans"]["acme_validation_workflow"])
         self.assertIn("godaddy_ans_search", payload["godaddy_ans"]["tools"])
+        self.assertIn("godaddy_dns_set_records", payload["godaddy_ans"]["tools"])
         self.assertIn("godaddy_ans_revoke", payload["godaddy_ans"]["tools"])
         self.assertIn("godaddy_ans_events", payload["godaddy_ans"]["tools"])
         self.assertIn(
@@ -129,6 +131,7 @@ class GoDaddyRuntimeDiscoveryTests(unittest.TestCase):
         prepare_description = schemas["godaddy_ans_prepare_registration"]["description"]
         verify_acme_description = schemas["godaddy_ans_verify_acme"]["description"]
         verify_dns_description = schemas["godaddy_ans_verify_dns"]["description"]
+        set_records_description = schemas["godaddy_dns_set_records"]["description"]
 
         self.assertIn("Swagger-aligned", register_description)
         self.assertIn("godaddy_ans_prepare_registration", register_description)
@@ -137,6 +140,7 @@ class GoDaddyRuntimeDiscoveryTests(unittest.TestCase):
         self.assertIn("HTTP-01", verify_acme_description)
         self.assertIn("DNS-01", verify_acme_description)
         self.assertIn("HTTPS, TLSA, _ans", verify_dns_description)
+        self.assertIn("PUT /v1/domains/{domain}/records/{type}/{name}", set_records_description)
 
     def test_ans_search_module_imports_without_cryptography_installed(self) -> None:
         real_import = builtins.__import__

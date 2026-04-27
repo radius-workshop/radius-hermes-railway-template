@@ -723,6 +723,7 @@ expected_tools = {
     "godaddy_ans_revoke",
     "godaddy_ans_verify_acme",
     "godaddy_ans_verify_dns",
+    "godaddy_dns_set_records",
     "godaddy_ans_get_identity_certificates",
     "godaddy_ans_submit_identity_csr",
     "godaddy_ans_get_server_certificates",

@@ -26,7 +26,7 @@ This repository is a batteries-included Hermes template. Assume these bundled re
 - `generate_a2a_token` is provided by the bundled `gen-jwt` plugin and should be treated as the canonical way to create A2A bearer tokens.
 - `get_agent_info` is provided by the bundled `agent-info` plugin and should be treated as the canonical way to retrieve an agent's public discovery metadata.
 - `radius_wallet_address`, `radius_balance`, `radius_send_sbc`, and `radius_tx_status` are provided by the bundled `radius-cast` plugin and should be treated as the canonical way to perform Radius wallet actions.
-- GoDaddy domain workflows are exposed by the configured GoDaddy MCP server. GoDaddy Agent Name Service registry workflows are exposed by the bundled `godaddy-ans` plugin.
+- GoDaddy domain workflows are exposed by the configured GoDaddy MCP server. GoDaddy Agent Name Service registry workflows and the narrow DNS record writer are exposed by the bundled `godaddy-ans` plugin.
 - `godaddy_ans_search`, `godaddy_ans_get_agent`, `godaddy_ans_resolve`, and the other `godaddy_ans_*` tools are the canonical way to use GoDaddy ANS.
 - `/app/scripts/radius/*` contains the built-in Radius wallet scripts.
 - `/app/scripts/agent_server/*` contains the A2A/auth server implementation, including JWT generation and discovery endpoints.
@@ -37,6 +37,7 @@ For Radius wallet actions, prefer the `radius-cast` plugin tools. Treat `/app/sc
 For GoDaddy work, keep the two surfaces separate:
 
 - Domain search, domain availability, and domain suggestions: use the GoDaddy MCP tools.
+- DNS record writes for a known GoDaddy-managed domain: use `godaddy_dns_set_records`, which replaces all records for one type/name pair.
 - ANS / Agent Name Service registration, search, lookup, resolution, and verification: use the `godaddy-ans` plugin tools, especially `godaddy_ans_search` for registry searches.
 
 Default GoDaddy ANS API calls to production. Use OTE only when the operator explicitly asks for it or sets `GODADDY_ANS_ENV=ote`.

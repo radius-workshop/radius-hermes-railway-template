@@ -289,6 +289,42 @@ class GoDaddyAnsBootstrapTests(unittest.TestCase):
             {"providerId": "provider-1", "lastLogId": "cursor-1", "limit": 200},
         )
 
+    def test_set_dns_records_replaces_one_type_and_name(self) -> None:
+        with unittest.mock.patch.object(
+            ans,
+            "_json_request",
+            return_value={"status_code": 200, "url": "x", "body": None},
+        ) as request:
+            ans.set_dns_records(
+                domain="Example.com",
+                record_type="txt",
+                name="_acme-challenge",
+                records=[{"data": "challenge-token", "ttl": "600"}],
+                shopper_id="shopper-1",
+            )
+
+        self.assertEqual(
+            request.call_args.args[:2],
+            ("PUT", "/v1/domains/example.com/records/TXT/_acme-challenge"),
+        )
+        self.assertEqual(
+            request.call_args.kwargs["body"],
+            [{"data": "challenge-token", "ttl": 600}],
+        )
+        self.assertEqual(
+            request.call_args.kwargs["headers"],
+            {"X-Shopper-Id": "shopper-1"},
+        )
+
+    def test_set_dns_records_rejects_unsupported_type(self) -> None:
+        with self.assertRaisesRegex(ValueError, "record_type"):
+            ans.set_dns_records(
+                domain="example.com",
+                record_type="CAA",
+                name="@",
+                records=[{"data": "0 issue ca.example"}],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
