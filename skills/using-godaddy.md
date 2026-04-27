@@ -28,7 +28,7 @@ The ANS API source of truth is `https://developer.godaddy.com/swagger/swagger_an
 - `godaddy_ans_get_agent`: fetch a specific ANS registration by agent id.
 - `godaddy_ans_resolve`: resolve an agent host plus version. This uses `POST /v1/agents/resolution` with `agentHost` and `version` in the JSON body.
 - `godaddy_ans_prepare_registration`: generate Swagger-aligned local CSR and registration payload artifacts without calling GoDaddy.
-- `godaddy_ans_register`: submit this agent's Swagger-aligned registration payload to the configured GoDaddy ANS API.
+- `godaddy_ans_register`: validate and submit this agent's Swagger-aligned registration payload to the configured GoDaddy ANS API. Use `dry_run: true` to generate and validate the exact payload without calling GoDaddy.
 - `godaddy_ans_revoke`: revoke an active agent or cancel an eligible pending registration.
 - `godaddy_ans_verify_acme`: trigger ACME domain-control validation for a pending registration.
 - `godaddy_ans_verify_dns`: verify final external-domain DNS records after ACME/certificate steps.
@@ -109,6 +109,18 @@ Both identity and server CSRs should include:
 - URI SAN: `ans://v<version>.<agentHost>`
 
 The bundled `godaddy_ans_prepare_registration` tool generates base64-encoded PEM CSR fields and includes DNS plus URI SANs. If manually generating CSRs, use an OpenSSL config file instead of relying on `-addext` for URI SANs.
+
+## Credential Configuration
+
+Live ANS API calls require `GODADDY_API_KEY` and `GODADDY_API_SECRET` in the agent runtime environment. Offline tools such as `godaddy_ans_capabilities` and `godaddy_ans_prepare_registration` do not require credentials.
+
+For deployed agents, configure these as deployment environment variables or secrets in the hosting platform, then restart/redeploy the agent so the plugin runtime receives them. A local `export GODADDY_API_KEY=...` only affects the current shell and usually does not configure Railway or another deployed runtime.
+
+Credential diagnostics:
+
+- Missing credentials are blocked locally before any GoDaddy request is sent.
+- `401` means GoDaddy rejected the supplied key/secret pair.
+- `403` means credentials were sent but GoDaddy did not authorize the ANS request. Check ANS entitlement, production versus OTE environment, and whether the client used placeholder credentials.
 
 ### OpenSSL Config Template
 
@@ -267,8 +279,9 @@ Events:
 
 | HTTP | Cause | Fix |
 |---|---|---|
-| 401 | Authentication failed | Check GoDaddy API key/secret configuration |
-| 403 | Authorization failed | Confirm credentials are allowed for ANS |
+| Local | Missing credentials | Configure `GODADDY_API_KEY` and `GODADDY_API_SECRET` in the agent runtime environment |
+| 401 | Authentication failed | Check GoDaddy API key/secret configuration and production versus OTE environment |
+| 403 | Authorization failed | Confirm credentials were sent, are not placeholders, and are allowed for ANS |
 | 409 | Agent ID or ANS name already exists | Use a different host/version or inspect existing agent |
 | 422 | Missing required registration field | Include `agentDisplayName`, `identityCsrPEM`, `version`, `agentHost`, and `endpoints` |
 | 422 | Invalid version | Use SemVer `major.minor.patch` |
@@ -297,18 +310,21 @@ jq . "$DIR/registration-payload.json"
 openssl req -in "$DIR/identity.csr.pem" -noout -text | grep -A3 "Subject Alternative"
 openssl req -in "$DIR/server.csr.pem" -noout -text | grep -A3 "Subject Alternative"
 
-# 4. Submit registration with the tool
-# Call godaddy_ans_register with the same params/state_dir
+# 4. Dry-run the exact registration submission
+# Call godaddy_ans_register with dry_run=true and the same params/state_dir
 
-# 5. If PENDING_VALIDATION, complete HTTP-01 or DNS-01
+# 5. Submit registration with the tool
+# Call godaddy_ans_register with the same params/state_dir after dry-run validation passes
+
+# 6. If PENDING_VALIDATION, complete HTTP-01 or DNS-01
 HERMES_HOME="${HERMES_HOME:-/data/.hermes}"
 mkdir -p "$HERMES_HOME/acme-challenges"
 echo -n '<keyAuthorization>' > "$HERMES_HOME/acme-challenges/<token>"
 curl http://localhost:8080/.well-known/acme-challenge/<token>
 
-# 6. Trigger ACME validation
+# 7. Trigger ACME validation
 # Call godaddy_ans_verify_acme(agent_id="...")
 
-# 7. If PENDING_DNS, configure the required DNS records from get_agent
+# 8. If PENDING_DNS, configure the required DNS records from get_agent
 # Call godaddy_ans_verify_dns(agent_id="...")
 ```

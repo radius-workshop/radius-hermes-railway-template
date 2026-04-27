@@ -133,8 +133,6 @@ def _go_daddy_turn_context(**kwargs) -> str:
 
 
 def _capabilities_payload() -> dict[str, Any]:
-    api_key = os.environ.get("GODADDY_API_KEY", "").strip()
-    api_secret = os.environ.get("GODADDY_API_SECRET", "").strip()
     return {
         "godaddy_mcp": {
             "purpose": "GoDaddy-hosted domain and registrar workflows exposed by the remote MCP server.",
@@ -164,11 +162,7 @@ def _capabilities_payload() -> dict[str, Any]:
             ],
             "resolution_behavior": "godaddy_ans_resolve sends POST /v1/agents/resolution with agentHost and version in the JSON body. Version can be a SemVer range, '*' or empty to match latest.",
             "tools": ANS_TOOLS,
-            "credential_status": {
-                "live_api_credentials_configured": bool(api_key and api_secret),
-                "required_for_live_calls": ["GODADDY_API_KEY", "GODADDY_API_SECRET"],
-                "offline_tools": ["godaddy_ans_capabilities", "godaddy_ans_prepare_registration"],
-            },
+            "credential_status": ans.credential_status(),
         },
         "default_routing": {
             "domain_search_or_suggestions": "Use GoDaddy MCP.",
@@ -179,9 +173,34 @@ def _capabilities_payload() -> dict[str, Any]:
 
 def _json_result(fn) -> str:
     try:
-        return json.dumps(fn(), indent=2)
+        result = fn()
+        if isinstance(result, dict) and "ok" not in result:
+            result = {"ok": True, **result}
+        return json.dumps(result, indent=2)
     except Exception as err:
-        return f"Error: {err}"
+        message = str(err)
+        error_type = err.__class__.__name__
+        if "GODADDY_API_KEY and GODADDY_API_SECRET" in message:
+            error_type = "missing_credentials"
+        return json.dumps(
+            {
+                "ok": False,
+                "error_type": error_type,
+                "message": message,
+            },
+            indent=2,
+        )
+
+
+def _missing_param(name: str) -> str:
+    return json.dumps(
+        {
+            "ok": False,
+            "error_type": "missing_parameter",
+            "message": f"missing required parameter '{name}'.",
+        },
+        indent=2,
+    )
 
 
 def _strip(value: Any) -> str | None:
@@ -218,6 +237,15 @@ def _state_dir(params: Mapping[str, Any]) -> str | None:
     return _strip(params.get("state_dir"))
 
 
+def _bool_param(params: Mapping[str, Any], key: str, default: bool = False) -> bool:
+    value = params.get(key)
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "on", "yes", "true"}
+
+
 def register(ctx):
     if hasattr(ctx, "register_hook"):
         ctx.register_hook("pre_llm_call", _go_daddy_turn_context)
@@ -235,7 +263,13 @@ def register(ctx):
     def godaddy_ans_register(params, **kwargs):
         params = params or {}
         env = _string_env_overrides(params)
-        return _json_result(lambda: ans.register_agent(env=env, state_dir=_state_dir(params)))
+        return _json_result(
+            lambda: ans.register_agent(
+                env=env,
+                state_dir=_state_dir(params),
+                dry_run=_bool_param(params, "dry_run"),
+            )
+        )
 
     def godaddy_ans_search(params, **kwargs):
         params = params or {}
@@ -261,7 +295,7 @@ def register(ctx):
         params = params or {}
         agent_id = _first_non_empty(params, "agent_id")
         if not agent_id:
-            return "Error: missing required parameter 'agent_id'."
+            return _missing_param("agent_id")
         return _json_result(lambda: ans.get_agent(agent_id))
 
     def godaddy_ans_resolve(params, **kwargs):
@@ -269,7 +303,7 @@ def register(ctx):
         agent_host = _first_non_empty(params, "agent_host")
         version = _strip(params.get("version"))
         if not agent_host:
-            return "Error: missing required parameter 'agent_host'."
+            return _missing_param("agent_host")
         return _json_result(lambda: ans.resolve_agent(agent_host, version or ""))
 
     def godaddy_ans_revoke(params, **kwargs):
@@ -277,9 +311,9 @@ def register(ctx):
         agent_id = _first_non_empty(params, "agent_id")
         reason = _first_non_empty(params, "reason")
         if not agent_id:
-            return "Error: missing required parameter 'agent_id'."
+            return _missing_param("agent_id")
         if not reason:
-            return "Error: missing required parameter 'reason'."
+            return _missing_param("reason")
         return _json_result(
             lambda: ans.revoke_agent(
                 agent_id,
@@ -292,21 +326,21 @@ def register(ctx):
         params = params or {}
         agent_id = _first_non_empty(params, "agent_id")
         if not agent_id:
-            return "Error: missing required parameter 'agent_id'."
+            return _missing_param("agent_id")
         return _json_result(lambda: ans.verify_acme(agent_id))
 
     def godaddy_ans_verify_dns(params, **kwargs):
         params = params or {}
         agent_id = _first_non_empty(params, "agent_id")
         if not agent_id:
-            return "Error: missing required parameter 'agent_id'."
+            return _missing_param("agent_id")
         return _json_result(lambda: ans.verify_dns(agent_id))
 
     def godaddy_ans_get_identity_certificates(params, **kwargs):
         params = params or {}
         agent_id = _first_non_empty(params, "agent_id")
         if not agent_id:
-            return "Error: missing required parameter 'agent_id'."
+            return _missing_param("agent_id")
         return _json_result(lambda: ans.get_identity_certificates(agent_id))
 
     def godaddy_ans_submit_identity_csr(params, **kwargs):
@@ -314,16 +348,16 @@ def register(ctx):
         agent_id = _first_non_empty(params, "agent_id")
         csr_pem = _first_non_empty(params, "csr_pem", "csrPEM")
         if not agent_id:
-            return "Error: missing required parameter 'agent_id'."
+            return _missing_param("agent_id")
         if not csr_pem:
-            return "Error: missing required parameter 'csr_pem'."
+            return _missing_param("csr_pem")
         return _json_result(lambda: ans.submit_identity_csr(agent_id, csr_pem))
 
     def godaddy_ans_get_server_certificates(params, **kwargs):
         params = params or {}
         agent_id = _first_non_empty(params, "agent_id")
         if not agent_id:
-            return "Error: missing required parameter 'agent_id'."
+            return _missing_param("agent_id")
         return _json_result(lambda: ans.get_server_certificates(agent_id))
 
     def godaddy_ans_submit_server_csr(params, **kwargs):
@@ -331,9 +365,9 @@ def register(ctx):
         agent_id = _first_non_empty(params, "agent_id")
         csr_pem = _first_non_empty(params, "csr_pem", "csrPEM")
         if not agent_id:
-            return "Error: missing required parameter 'agent_id'."
+            return _missing_param("agent_id")
         if not csr_pem:
-            return "Error: missing required parameter 'csr_pem'."
+            return _missing_param("csr_pem")
         return _json_result(lambda: ans.submit_server_csr(agent_id, csr_pem))
 
     def godaddy_ans_get_csr_status(params, **kwargs):
@@ -341,9 +375,9 @@ def register(ctx):
         agent_id = _first_non_empty(params, "agent_id")
         csr_id = _first_non_empty(params, "csr_id")
         if not agent_id:
-            return "Error: missing required parameter 'agent_id'."
+            return _missing_param("agent_id")
         if not csr_id:
-            return "Error: missing required parameter 'csr_id'."
+            return _missing_param("csr_id")
         return _json_result(lambda: ans.get_csr_status(agent_id, csr_id))
 
     def godaddy_ans_events(params, **kwargs):
@@ -415,8 +449,14 @@ def register(ctx):
         ),
         (
             "godaddy_ans_register",
-            "Generate the Swagger-aligned GoDaddy ANS registration payload for this agent and submit it to the configured GoDaddy ANS API using GODADDY_API_KEY and GODADDY_API_SECRET. Use godaddy_ans_prepare_registration first when you need to inspect artifacts. External domains may return PENDING_VALIDATION and require HTTP-01 or DNS-01 completion before godaddy_ans_verify_acme.",
-            override_properties,
+            "Generate the Swagger-aligned GoDaddy ANS registration payload for this agent, validate it locally, and submit it to the configured GoDaddy ANS API using GODADDY_API_KEY and GODADDY_API_SECRET unless dry_run is true. Use godaddy_ans_prepare_registration first when you need to inspect artifacts. External domains may return PENDING_VALIDATION and require HTTP-01 or DNS-01 completion before godaddy_ans_verify_acme.",
+            {
+                **override_properties,
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "When true, generate and validate the exact registration payload but do not call GoDaddy.",
+                },
+            },
             godaddy_ans_register,
         ),
         (

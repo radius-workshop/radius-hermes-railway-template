@@ -1,8 +1,10 @@
 import importlib.util
 import base64
+import io
 import tempfile
 import unittest
 import unittest.mock
+import urllib.error
 from pathlib import Path
 
 
@@ -136,6 +138,87 @@ class GoDaddyAnsBootstrapTests(unittest.TestCase):
             payload_text = Path(summary["payload_path"]).read_text(encoding="utf-8")
             self.assertIn("identityCsrPEM", payload_text)
             self.assertIn("serverCsrPEM", payload_text)
+            self.assertTrue(result["validation"]["valid"])
+            self.assertIn("credential_status", summary)
+
+    def test_validate_registration_payload_rejects_top_level_functions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = ans.build_registration_bundle(
+                env={"HERMES_HOME": tmpdir, "PUBLIC_URL": "https://agent.example.com"}
+            )
+
+        payload = dict(result["payload"])
+        payload["functions"] = []
+        validation = ans.validate_registration_payload(payload)
+
+        self.assertFalse(validation["valid"])
+        self.assertIn(
+            {"path": "functions", "message": "must be nested inside endpoint objects"},
+            validation["issues"],
+        )
+
+    def test_register_agent_dry_run_does_not_call_api_and_reports_missing_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env = {"HERMES_HOME": tmpdir, "PUBLIC_URL": "https://agent.example.com"}
+            with unittest.mock.patch.object(ans, "_json_request") as request:
+                result = ans.register_agent(env=env, dry_run=True)
+
+        request.assert_not_called()
+        self.assertTrue(result["dry_run"])
+        self.assertFalse(result["ready_to_submit"])
+        self.assertTrue(result["bundle"]["validation"]["valid"])
+        self.assertEqual(
+            result["credential_status"]["missing"],
+            ["GODADDY_API_KEY", "GODADDY_API_SECRET"],
+        )
+
+    def test_register_agent_missing_credentials_does_not_call_api(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env = {"HERMES_HOME": tmpdir, "PUBLIC_URL": "https://agent.example.com"}
+            with unittest.mock.patch.object(ans, "_json_request") as request:
+                result = ans.register_agent(env=env)
+
+        request.assert_not_called()
+        self.assertFalse(result["submitted"])
+        self.assertEqual(result["error_type"], "missing_credentials")
+
+    def test_register_agent_with_credentials_submits_valid_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env = {
+                "HERMES_HOME": tmpdir,
+                "PUBLIC_URL": "https://agent.example.com",
+                "GODADDY_API_KEY": "key",
+                "GODADDY_API_SECRET": "secret",
+            }
+            with unittest.mock.patch.object(
+                ans,
+                "_json_request",
+                return_value={"status_code": 202, "url": "x", "body": {}},
+            ) as request:
+                result = ans.register_agent(env=env)
+
+        self.assertTrue(result["submitted"])
+        request.assert_called_once()
+        self.assertEqual(request.call_args.args[:2], ("POST", "/v1/agents/register"))
+
+    def test_json_request_adds_403_authorization_diagnostic(self) -> None:
+        error = urllib.error.HTTPError(
+            "https://api.godaddy.com/v1/agents/register",
+            403,
+            "Forbidden",
+            {},
+            io.BytesIO(b"<html>Forbidden</html>"),
+        )
+        with unittest.mock.patch.object(ans.urllib.request, "urlopen", side_effect=error):
+            result = ans._json_request(
+                "POST",
+                "/v1/agents/register",
+                body={},
+                env={"GODADDY_API_KEY": "key", "GODADDY_API_SECRET": "secret"},
+            )
+
+        self.assertEqual(result["status_code"], 403)
+        self.assertEqual(result["diagnostic"]["error_type"], "authorization_failed")
 
     def test_search_agents_uses_server_side_filters_for_loose_query(self) -> None:
         calls = []

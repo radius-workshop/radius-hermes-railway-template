@@ -43,6 +43,7 @@ VALID_REVOCATION_REASONS = {
     "PRIVILEGE_WITHDRAWN",
     "AA_COMPROMISE",
 }
+LIVE_API_CREDENTIAL_KEYS = ("GODADDY_API_KEY", "GODADDY_API_SECRET")
 
 
 def _env(env: Mapping[str, str] | None = None) -> Mapping[str, str]:
@@ -146,6 +147,17 @@ def _auth_header(env: Mapping[str, str] | None = None) -> str:
             "GODADDY_API_KEY and GODADDY_API_SECRET are required for GoDaddy ANS API calls."
         )
     return f"sso-key {api_key}:{api_secret}"
+
+
+def credential_status(env: Mapping[str, str] | None = None) -> dict[str, Any]:
+    current_env = _env(env)
+    missing = [key for key in LIVE_API_CREDENTIAL_KEYS if not current_env.get(key, "").strip()]
+    return {
+        "live_api_credentials_configured": not missing,
+        "missing": missing,
+        "required_for_live_calls": list(LIVE_API_CREDENTIAL_KEYS),
+        "offline_tools": ["godaddy_ans_capabilities", "godaddy_ans_prepare_registration"],
+    }
 
 
 def _mcp_endpoint(env: Mapping[str, str] | None = None) -> str | None:
@@ -346,6 +358,184 @@ def _b64_pem(pem_bytes: bytes) -> str:
     return base64.b64encode(pem_bytes).decode("ascii")
 
 
+def _validation_issue(path: str, message: str) -> dict[str, str]:
+    return {"path": path, "message": message}
+
+
+def _is_base64_pem_csr(value: Any, *, agent_host: str, version: str) -> tuple[bool, str | None]:
+    from cryptography import x509
+
+    if not isinstance(value, str) or not value.strip():
+        return False, "must be a non-empty base64-encoded PEM CSR string"
+    try:
+        pem = base64.b64decode(value, validate=True)
+    except Exception:
+        return False, "must be valid base64"
+    if not pem.startswith(b"-----BEGIN CERTIFICATE REQUEST-----"):
+        return False, "decoded value must be a PEM certificate request"
+    try:
+        csr = x509.load_pem_x509_csr(pem)
+        san = csr.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+    except Exception as err:
+        return False, f"decoded CSR could not be parsed: {err}"
+
+    required_uri = _ans_name(agent_host, version)
+    dns_names = san.get_values_for_type(x509.DNSName)
+    uri_names = san.get_values_for_type(x509.UniformResourceIdentifier)
+    if agent_host not in dns_names:
+        return False, f"CSR SANs must include DNS:{agent_host}"
+    if required_uri not in uri_names:
+        return False, f"CSR SANs must include URI:{required_uri}"
+    return True, None
+
+
+def validate_registration_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    issues: list[dict[str, str]] = []
+
+    for field in ("agentDisplayName", "identityCsrPEM", "version", "agentHost", "endpoints"):
+        if field not in payload:
+            issues.append(_validation_issue(field, "is required"))
+
+    display_name = payload.get("agentDisplayName")
+    if isinstance(display_name, str):
+        if not display_name.strip():
+            issues.append(_validation_issue("agentDisplayName", "must not be blank"))
+        if len(display_name) > MAX_AGENT_DISPLAY_NAME_LENGTH:
+            issues.append(
+                _validation_issue(
+                    "agentDisplayName",
+                    f"must be {MAX_AGENT_DISPLAY_NAME_LENGTH} characters or fewer",
+                )
+            )
+    elif "agentDisplayName" in payload:
+        issues.append(_validation_issue("agentDisplayName", "must be a string"))
+
+    description = payload.get("agentDescription")
+    if description is not None:
+        if not isinstance(description, str):
+            issues.append(_validation_issue("agentDescription", "must be a string"))
+        elif len(description) > MAX_AGENT_DESCRIPTION_LENGTH:
+            issues.append(
+                _validation_issue(
+                    "agentDescription",
+                    f"must be {MAX_AGENT_DESCRIPTION_LENGTH} characters or fewer",
+                )
+            )
+
+    version = payload.get("version")
+    if isinstance(version, str):
+        if not SEMVER_RE.match(version):
+            issues.append(
+                _validation_issue(
+                    "version",
+                    "must be Semantic Versioning major.minor.patch without prerelease/build suffixes",
+                )
+            )
+    elif "version" in payload:
+        issues.append(_validation_issue("version", "must be a string"))
+
+    agent_host = payload.get("agentHost")
+    normalized_host: str | None = None
+    if isinstance(agent_host, str):
+        try:
+            normalized_host = _normalize_agent_host(agent_host)
+            if normalized_host != agent_host:
+                issues.append(_validation_issue("agentHost", "must be a normalized hostname"))
+        except ValueError as err:
+            issues.append(_validation_issue("agentHost", str(err)))
+    elif "agentHost" in payload:
+        issues.append(_validation_issue("agentHost", "must be a string"))
+
+    if "functions" in payload:
+        issues.append(_validation_issue("functions", "must be nested inside endpoint objects"))
+
+    has_server_csr = bool(payload.get("serverCsrPEM"))
+    has_server_cert = bool(payload.get("serverCertificatePEM"))
+    has_server_chain = bool(payload.get("serverCertificateChainPEM"))
+    if not has_server_csr and not has_server_cert:
+        issues.append(
+            _validation_issue(
+                "serverCsrPEM",
+                "is required when serverCertificatePEM is not supplied",
+            )
+        )
+    if has_server_chain and not has_server_cert:
+        issues.append(
+            _validation_issue(
+                "serverCertificateChainPEM",
+                "requires serverCertificatePEM",
+            )
+        )
+
+    if normalized_host and isinstance(version, str) and SEMVER_RE.match(version):
+        for field in ("identityCsrPEM", "serverCsrPEM"):
+            if field in payload and payload.get(field):
+                valid, message = _is_base64_pem_csr(
+                    payload[field],
+                    agent_host=normalized_host,
+                    version=version,
+                )
+                if not valid and message:
+                    issues.append(_validation_issue(field, message))
+
+    endpoints = payload.get("endpoints")
+    if not isinstance(endpoints, list) or not endpoints:
+        if "endpoints" in payload:
+            issues.append(_validation_issue("endpoints", "must be a non-empty array"))
+    else:
+        for index, endpoint in enumerate(endpoints):
+            path = f"endpoints[{index}]"
+            if not isinstance(endpoint, Mapping):
+                issues.append(_validation_issue(path, "must be an object"))
+                continue
+            agent_url = endpoint.get("agentUrl")
+            if not isinstance(agent_url, str) or not agent_url.strip():
+                issues.append(_validation_issue(f"{path}.agentUrl", "is required"))
+            protocol = endpoint.get("protocol")
+            if not isinstance(protocol, str) or protocol not in VALID_PROTOCOLS:
+                issues.append(
+                    _validation_issue(
+                        f"{path}.protocol",
+                        "must be one of A2A, MCP, or HTTP-API",
+                    )
+                )
+            transports = endpoint.get("transports")
+            if transports is not None:
+                if not isinstance(transports, list) or not all(
+                    isinstance(item, str) and item in VALID_TRANSPORTS
+                    for item in transports
+                ):
+                    issues.append(
+                        _validation_issue(
+                            f"{path}.transports",
+                            "must contain only valid transport strings",
+                        )
+                    )
+            functions = endpoint.get("functions")
+            if functions is not None:
+                if not isinstance(functions, list):
+                    issues.append(_validation_issue(f"{path}.functions", "must be an array"))
+                else:
+                    for function_index, function in enumerate(functions):
+                        function_path = f"{path}.functions[{function_index}]"
+                        if not isinstance(function, Mapping):
+                            issues.append(_validation_issue(function_path, "must be an object"))
+                            continue
+                        for field in ("id", "name"):
+                            value = function.get(field)
+                            if not isinstance(value, str) or not value.strip():
+                                issues.append(_validation_issue(f"{function_path}.{field}", "is required"))
+                            elif len(value) > MAX_FUNCTION_ID_LENGTH:
+                                issues.append(
+                                    _validation_issue(
+                                        f"{function_path}.{field}",
+                                        f"must be {MAX_FUNCTION_ID_LENGTH} characters or fewer",
+                                    )
+                                )
+
+    return {"valid": not issues, "issues": issues}
+
+
 def build_registration_bundle(
     env: Mapping[str, str] | None = None,
     state_dir: str | Path | None = None,
@@ -423,10 +613,40 @@ def build_registration_bundle(
         "server_key_path": str(server_key_path),
         "server_csr_path": str(server_csr_path),
         "curl_example": curl_example,
+        "credential_status": credential_status(current_env),
     }
+    validation = validate_registration_payload(payload)
+    summary["validation"] = validation
     summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 
-    return {"payload": payload, "summary": summary}
+    return {"payload": payload, "summary": summary, "validation": validation}
+
+
+def _http_error_hint(status_code: int) -> dict[str, Any] | None:
+    if status_code == 401:
+        return {
+            "error_type": "authentication_failed",
+            "message": "GoDaddy rejected the supplied API credentials.",
+            "next_steps": [
+                "Confirm GODADDY_API_KEY and GODADDY_API_SECRET are configured in the runtime environment.",
+                "Confirm the credentials belong to the intended production or OTE environment.",
+            ],
+        }
+    if status_code == 403:
+        return {
+            "error_type": "authorization_failed",
+            "message": (
+                "GoDaddy received credentials but did not authorize this ANS request. "
+                "This usually means the key/secret pair is invalid for ANS, lacks ANS access, "
+                "or is for the wrong production/OTE environment."
+            ),
+            "next_steps": [
+                "Check whether GODADDY_ANS_ENV points at the intended environment.",
+                "Confirm the configured GoDaddy credentials are enabled for ANS registry APIs.",
+                "If using curl or another client, verify the Authorization header is not using placeholders.",
+            ],
+        }
+    return None
 
 
 def _json_request(
@@ -471,12 +691,16 @@ def _json_request(
             parsed = json.loads(response_body)
         except Exception:
             parsed = {"raw": response_body}
-        return {
+        result = {
             "status_code": exc.code,
             "url": url,
             "body": parsed,
             "error": response_body,
         }
+        hint = _http_error_hint(exc.code)
+        if hint:
+            result["diagnostic"] = hint
+        return result
 
 
 def _query_variants(query_text: str) -> list[str]:
@@ -732,15 +956,52 @@ def _loose_query_search(
 def register_agent(
     env: Mapping[str, str] | None = None,
     state_dir: str | Path | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     bundle = build_registration_bundle(env=env, state_dir=state_dir)
+    validation = bundle["validation"]
+    credentials = credential_status(env)
+    if dry_run:
+        return {
+            "dry_run": True,
+            "ready_to_submit": validation["valid"] and credentials["live_api_credentials_configured"],
+            "bundle": bundle,
+            "credential_status": credentials,
+        }
+    if not validation["valid"]:
+        return {
+            "dry_run": False,
+            "submitted": False,
+            "error_type": "invalid_registration_payload",
+            "message": "Generated registration payload failed local validation.",
+            "validation": validation,
+            "bundle": bundle,
+        }
+    if not credentials["live_api_credentials_configured"]:
+        return {
+            "dry_run": False,
+            "submitted": False,
+            "error_type": "missing_credentials",
+            "message": (
+                "GODADDY_API_KEY and GODADDY_API_SECRET must be configured in the "
+                "runtime environment before submitting live GoDaddy ANS API calls."
+            ),
+            "credential_status": credentials,
+            "bundle": bundle,
+        }
     response = _json_request(
         "POST",
         "/v1/agents/register",
         body=bundle["payload"],
         env=env,
     )
-    return {"bundle": bundle, "response": response}
+    return {
+        "dry_run": False,
+        "submitted": 200 <= int(response.get("status_code", 0)) < 300,
+        "bundle": bundle,
+        "credential_status": credentials,
+        "response": response,
+    }
 
 
 def _base64_encoded_pem(value: str) -> str:
@@ -894,7 +1155,14 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("bootstrap", help="Generate ANS CSRs and a registration payload bundle.")
-    subparsers.add_parser("register", help="Generate the ANS bundle and submit it to GoDaddy.")
+    register_parser = subparsers.add_parser(
+        "register", help="Generate the ANS bundle and submit it to GoDaddy."
+    )
+    register_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Generate and validate the registration payload without calling GoDaddy.",
+    )
 
     search_parser = subparsers.add_parser("search", help="Search GoDaddy ANS agents.")
     search_parser.add_argument("--agent-display-name")
@@ -937,7 +1205,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "bootstrap":
             result = build_registration_bundle()
         elif args.command == "register":
-            result = register_agent()
+            result = register_agent(dry_run=args.dry_run)
         elif args.command == "search":
             result = search_agents(
                 query=args.query,
