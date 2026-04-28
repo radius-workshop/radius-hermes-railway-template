@@ -77,7 +77,7 @@ class RadiusSkillsBootstrapTests(unittest.TestCase):
             for skill_name in EXPECTED_SKILLS:
                 self.assertIn(skill_name, {item["name"] for item in manifest["skills"]})
             self.assertIn(str(radius_skills_dir / "skills"), manifest["roots"])
-            self.assertTrue((radius_skills_dir / "runtimes" / "python" / "radius_wallet_runtime.py").exists())
+            self.assertTrue((radius_skills_dir / "runtime" / "python" / "radius_wallet_runtime.py").exists())
 
             probe = r'''
 import importlib.util, json, os
