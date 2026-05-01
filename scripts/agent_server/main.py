@@ -2,8 +2,10 @@
 """
 Agent Server — A2A HTTP gateway and agent discovery endpoints.
 """
+import asyncio
 import hashlib
 import hmac
+import html
 import json
 import logging
 import os
@@ -52,8 +54,61 @@ HERMES_URL = os.environ.get("HERMES_URL", "http://127.0.0.1:8642")
 A2A_BRIDGE_MODEL = os.environ.get("A2A_BRIDGE_MODEL", "hermes-agent")
 HERMES_TIMEOUT = float(os.environ.get("HERMES_TIMEOUT", "120"))
 
+RADIUS_RPC_TESTNET = os.environ.get("RADIUS_RPC_TESTNET", "https://rpc.testnet.radiustech.xyz")
+RADIUS_RPC_MAINNET = os.environ.get("RADIUS_RPC_MAINNET", "https://rpc.radiustech.xyz")
+TX_COUNT_CACHE_TTL = float(os.environ.get("TX_COUNT_CACHE_TTL", "15"))
+
 _hermes_client: Optional[HermesClient] = None
 _a2a_bridge: Optional[A2ABridge] = None
+
+_tx_count_cache: dict[str, tuple[float, int | None]] = {}
+
+
+async def _fetch_tx_count(rpc_url: str, wallet_address: str) -> int | None:
+    if not wallet_address:
+        return None
+
+    cache_key = f"{rpc_url}|{wallet_address.lower()}"
+    now = time.time()
+    cached = _tx_count_cache.get(cache_key)
+    if cached and now - cached[0] < TX_COUNT_CACHE_TTL:
+        return cached[1]
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(
+                rpc_url,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "web3_getTransactionCount",
+                    "params": [wallet_address, "latest"],
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+            result_hex = data.get("result")
+            if not isinstance(result_hex, str):
+                _tx_count_cache[cache_key] = (now, None)
+                return None
+            tx_count = int(result_hex, 16)
+            _tx_count_cache[cache_key] = (now, tx_count)
+            return tx_count
+    except Exception as exc:
+        logger.warning("Failed to fetch tx count from %s: %s", rpc_url, exc)
+        _tx_count_cache[cache_key] = (now, None)
+        return None
+
+
+async def _get_wallet_tx_counts(wallet_address: str | None) -> dict[str, int | None]:
+    if not wallet_address:
+        return {"testnet": None, "mainnet": None}
+
+    testnet_count, mainnet_count = await asyncio.gather(
+        _fetch_tx_count(RADIUS_RPC_TESTNET, wallet_address),
+        _fetch_tx_count(RADIUS_RPC_MAINNET, wallet_address),
+    )
+    return {"testnet": testnet_count, "mainnet": mainnet_count}
 
 
 def _parse_allowed_roots() -> list[Path]:
@@ -335,9 +390,40 @@ async def agent_card():
 
 @app.get("/")
 async def index():
-    return HTMLResponse("""<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>Hermes Agent</title></head><body style='background:#000;color:#fff;font-family:monospace;padding:48px'>
-<div style='position:fixed;top:48px;right:32px;text-align:right;color:#888;font-size:11px'>clone &amp; deploy your own<br><a style='color:#bbb' href='https://github.com/radius-workshop/radius-hermes-railway-template' target='_blank' rel='noopener'>radius-workshop/radius-hermes-railway-template</a></div>
-<h1>Hermes Agent</h1><p>Discovery: <a style='color:#bbb' href='/.well-known/agent-card.json'>agent-card</a></p></body></html>""")
+    wallet_address = os.environ.get("RADIUS_WALLET_ADDRESS")
+    tx_counts = await _get_wallet_tx_counts(wallet_address)
+
+    def fmt_count(value: int | None) -> str:
+        return "unavailable" if value is None else f"{value:,}"
+
+    wallet_html = html.escape(wallet_address) if wallet_address else "not configured"
+
+    return HTMLResponse(
+        f"""<!DOCTYPE html>
+<html lang='en'>
+  <head>
+    <meta charset='UTF-8'>
+    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+    <title>Hermes Agent</title>
+  </head>
+  <body style='background:#000;color:#fff;font-family:monospace;padding:48px'>
+    <div style='position:fixed;top:48px;right:32px;text-align:right;color:#888;font-size:11px'>
+      clone &amp; deploy your own<br>
+      <a style='color:#bbb' href='https://github.com/radius-workshop/radius-hermes-railway-template' target='_blank' rel='noopener'>radius-workshop/radius-hermes-railway-template</a>
+    </div>
+
+    <h1>Hermes Agent</h1>
+    <p>Discovery: <a style='color:#bbb' href='/.well-known/agent-card.json'>agent-card</a></p>
+
+    <h2 style='margin-top:28px'>Agent Profile</h2>
+    <div style='max-width:900px;border:1px solid #333;padding:16px'>
+      <div style='margin-bottom:10px'><strong>Wallet address:</strong> {wallet_html}</div>
+      <div style='margin-bottom:6px'><strong>Total transactions (testnet):</strong> {fmt_count(tx_counts.get('testnet'))}</div>
+      <div><strong>Total transactions (mainnet):</strong> {fmt_count(tx_counts.get('mainnet'))}</div>
+    </div>
+  </body>
+</html>"""
+    )
 
 
 async def _handle_delegated(rpc_id, message: dict, issuer_did: str | None):
