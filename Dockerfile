@@ -63,6 +63,7 @@ COPY scripts/entrypoint.sh /app/scripts/entrypoint.sh
 RUN sed -i 's/\r$//' /app/scripts/entrypoint.sh && chmod +x /app/scripts/entrypoint.sh
 
 COPY scripts/radius /app/scripts/radius
+COPY scripts/godaddy /app/scripts/godaddy
 
 # Install and build linear-claude-skill (still Node.js)
 RUN git clone --depth 1 https://github.com/radius-workshop/linear-claude-skill /app/scripts/linear-skill \
@@ -71,9 +72,12 @@ RUN git clone --depth 1 https://github.com/radius-workshop/linear-claude-skill /
   && npm run build \
   && npm prune --omit=dev
 
+# Bootstrap snapshot only: entrypoint copies this to RADIUS_SKILLS_DIR on /data
+# when persistent external skills storage is empty.
 RUN git clone --depth 1 https://github.com/radiustechsystems/skills.git /app/vendor/radius-skills
 
 COPY scripts/agent_server /app/scripts/agent_server
+COPY erc8004_registry /app/erc8004_registry
 
 COPY HERMES.md /app/HERMES.md
 COPY AGENTS.md /app/AGENTS.md

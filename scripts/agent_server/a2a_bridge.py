@@ -66,6 +66,7 @@ class A2ABridge:
             raise ValueError("Invalid params: no text content in message parts")
 
         context_id = self.context_id(message)
+        task_id = str(uuid.uuid4())
         output = await self.hermes_client.complete(
             messages=[{"role": "user", "content": user_text}],
             session_id=context_id,
@@ -75,7 +76,7 @@ class A2ABridge:
             "jsonrpc": "2.0",
             "id": rpc_id,
             "result": {
-                "id": str(uuid.uuid4()),
+                "id": task_id,
                 "context_id": context_id,
                 "status": {"state": "TASK_STATE_COMPLETED", "timestamp_ms": int(time.time() * 1000)},
                 "message": {

@@ -1,6 +1,6 @@
 name: radius-cast
 version: "1.0.0"
-description: "Radius wallet tools backed by Foundry cast with Radius-specific defaults and script fallback"
+description: "Radius wallet tools with session-scoped local or Para wallet providers, backed by Foundry cast and Para REST signing"
 provides_tools:
   - radius_wallet_address
   - radius_balance

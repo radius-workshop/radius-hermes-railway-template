@@ -8,6 +8,7 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from fastapi import HTTPException, Request
+from logging_utils import log_event
 
 logger = logging.getLogger(__name__)
 
@@ -261,13 +262,25 @@ async def setup_auth(base_url: str) -> str:
         from cryptography.hazmat.primitives.asymmetric.ec import generate_private_key, SECP256K1
         from cryptography.hazmat.backends import default_backend
         _private_key = generate_private_key(SECP256K1(), default_backend())
-        logger.warning(
-            "[auth] RADIUS_PRIVATE_KEY not set — using ephemeral keypair. "
-            "Tokens will not survive restarts."
+        log_event(
+            logger,
+            logging.WARNING,
+            "Using ephemeral auth keypair",
+            event="auth.setup",
+            auth_mode="ephemeral",
+            warning_code="radius_private_key_missing",
         )
 
     _did, _did_document = create_did_web_document(_private_key, base_url)
-    logger.info(f"[auth] JWT issuer DID: {_did}")
+    log_event(
+        logger,
+        logging.INFO,
+        "Auth initialized",
+        event="auth.setup",
+        auth_mode="persistent" if raw_key else "ephemeral",
+        issuer_did=_did,
+        base_url=base_url,
+    )
     return _did
 
 
@@ -308,7 +321,13 @@ async def jwt_auth_dep(request: Request) -> dict:
     try:
         result = await _verify_jwt(token)
     except ValueError as e:
-        logger.error(f"[auth] JWT verification failed: {e}")
+        log_event(
+            logger,
+            logging.ERROR,
+            "JWT verification failed",
+            event="auth.jwt_rejected",
+            auth_error=str(e),
+        )
         raise HTTPException(status_code=403, detail="Forbidden")
 
     issuer = result["issuer"]
@@ -316,7 +335,15 @@ async def jwt_auth_dep(request: Request) -> dict:
     if trusted_env:
         allowed = {_did} | {d.strip() for d in trusted_env.split(",") if d.strip()}
         if issuer not in allowed:
-            logger.error(f"[auth] DID not trusted: {issuer} (allowed: {', '.join(sorted(allowed))})")
+            log_event(
+                logger,
+                logging.ERROR,
+                "Issuer DID not trusted",
+                event="auth.jwt_rejected",
+                auth_error="issuer_not_trusted",
+                issuer_did=issuer,
+                trusted_did_count=len(allowed),
+            )
             raise HTTPException(status_code=403, detail="Forbidden")
 
     return result
