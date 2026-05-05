@@ -40,6 +40,7 @@ RUN apt-get update \
     tini \
     nodejs \
     npm \
+  && npm install -g radius-cli \
   && rm -rf /var/lib/apt/lists/*
 
 # Install Foundry to a stable path that remains available after HOME is remapped.

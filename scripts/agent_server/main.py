@@ -2149,15 +2149,6 @@ def _build_agent_graph_payload() -> dict[str, Any]:
             tags=["Memory"],
             metadata={"source": "runtime", "tools": []},
         )
-    if os.environ.get("PARA_API_KEY") or os.environ.get("PARA_WALLET_ID"):
-        add_capability(
-            "para",
-            "Para Wallet",
-            "Optional Para-backed session wallet provider is configured alongside the local Radius wallet.",
-            status="enabled",
-            tags=["Wallet", "Para"],
-            metadata={"source": "runtime", "tools": []},
-        )
 
     surface_specs = [
         (

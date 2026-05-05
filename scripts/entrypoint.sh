@@ -158,14 +158,12 @@ fi
 
 validate_platforms
 
-# === Radius: pre-load stored wallet keys into environment ===
-RADIUS_KEY_FILE="${HERMES_HOME}/.radius/key"
-RADIUS_ADDR_FILE="${HERMES_HOME}/.radius/address"
-mkdir -p "${HERMES_HOME}/.radius"
-if [[ -z "${RADIUS_PRIVATE_KEY:-}" && -f "$RADIUS_KEY_FILE" ]]; then
-  export RADIUS_PRIVATE_KEY="$(cat "$RADIUS_KEY_FILE")"
-  echo "[bootstrap] Loaded stored Radius wallet key."
-fi
+# === Radius CLI: ensure persistent wallet home ===
+RADIUS_HOME="${RADIUS_HOME:-${HERMES_HOME}/.radius-cli}"
+RADIUS_CONFIG_FILE="${RADIUS_HOME}/config.json"
+RADIUS_ADDR_FILE="${RADIUS_HOME}/address"
+mkdir -p "${RADIUS_HOME}"
+export RADIUS_HOME
 if [[ -z "${RADIUS_WALLET_ADDRESS:-}" && -f "$RADIUS_ADDR_FILE" ]]; then
   export RADIUS_WALLET_ADDRESS="$(cat "$RADIUS_ADDR_FILE")"
 fi
@@ -204,10 +202,9 @@ for key in \
   TINKER_API_KEY WANDB_API_KEY RL_API_URL GITHUB_TOKEN BYTEROVER_API_KEY BYTEROVER_LOCAL LINEAR_API_KEY LINEAR_TEAM_ID LINEAR_PROJECT_ID \
   TERMINAL_BACKEND TERMINAL_DOCKER_IMAGE TERMINAL_SINGULARITY_IMAGE TERMINAL_MODAL_IMAGE TERMINAL_CWD TERMINAL_TIMEOUT TERMINAL_LIFETIME_SECONDS TERMINAL_CONTAINER_CPU TERMINAL_CONTAINER_MEMORY TERMINAL_CONTAINER_DISK TERMINAL_CONTAINER_PERSISTENT TERMINAL_SANDBOX_DIR TERMINAL_SSH_HOST TERMINAL_SSH_USER TERMINAL_SSH_PORT TERMINAL_SSH_KEY SUDO_PASSWORD \
   WEB_TOOLS_DEBUG VISION_TOOLS_DEBUG MOA_TOOLS_DEBUG IMAGE_TOOLS_DEBUG CONTEXT_COMPRESSION_ENABLED CONTEXT_COMPRESSION_THRESHOLD CONTEXT_COMPRESSION_MODEL HERMES_MAX_ITERATIONS HERMES_TOOL_PROGRESS HERMES_TOOL_PROGRESS_MODE \
-  RADIUS_PRIVATE_KEY RADIUS_WALLET_ADDRESS RADIUS_NETWORK RADIUS_AUTO_FUND \
+  RADIUS_HOME RADIUS_WALLET_ADDRESS RADIUS_NETWORK RADIUS_RPC_URL RADIUS_SBC_ADDRESS RADIUS_CHAIN_ID RADIUS_EXPLORER_URL RADIUS_CLI_BIN RADIUS_AUTO_FUND \
   ERC8004_NETWORK ERC8004_TESTNET_RPC_URL ERC8004_TESTNET_REGISTRY ERC8004_TESTNET_EXPLORER_URL ERC8004_TESTNET_CHAIN_ID ERC8004_MAINNET_RPC_URL ERC8004_MAINNET_REGISTRY ERC8004_MAINNET_EXPLORER_URL ERC8004_MAINNET_CHAIN_ID ERC8004_GAS_LIMIT ERC8004_MAX_AGENT_URI_BYTES \
   AGENT_NAME AGENT_DESCRIPTION AGENT_IMAGE AGENT_ACTIVE AGENT_X402_SUPPORT AGENT_SUPPORTED_TRUST AGENT_A2A_VERSION AGENT_ERC8004_ID AGENT_ERC8004_REGISTRY AGENT_ANS_NAME AGENT_ANS_AGENT_ID AGENT_ANS_HOST AGENT_ANS_STATUS AGENT_WALLET AGENT_EMAIL AGENT_ENS \
-  PARA_API_KEY PARA_SECRET_API_KEY PARA_ENVIRONMENT PARA_REST_BASE_URL PARA_WALLET_ID \
   WEBHOOK_PORT WEBHOOK_SECRET DEBUG_SKILLS \
   EXPECTED_VENDORED_SKILLS STRICT_VENDORED_SKILLS VENDORED_SKILLS_SOURCE \
   RADIUS_SKILLS_AUTO_UPDATE RADIUS_SKILLS_REPO RADIUS_SKILLS_BRANCH RADIUS_SKILLS_WEBHOOK_SECRET RADIUS_SKILLS_GITHUB_TOKEN RADIUS_SKILLS_DIR RADIUS_SKILLS_SYNC_TIMEOUT_SECONDS RADIUS_SKILLS_BOOTSTRAP_FROM_IMAGE \
@@ -296,33 +293,67 @@ else
   echo "[bootstrap] Existing Hermes data found. Skipping one-time init."
 fi
 
-# === Radius: wallet setup ===
-RADIUS_WALLET_MARKER="${HERMES_HOME}/.radius/initialized"
+# === Radius CLI: wallet setup ===
+RADIUS_WALLET_MARKER="${RADIUS_HOME}/initialized"
+radius_cli_cmd=("${RADIUS_CLI_BIN:-radius-cli}")
+if ! command -v "${radius_cli_cmd[0]}" >/dev/null 2>&1; then
+  if command -v npx >/dev/null 2>&1; then
+    radius_cli_cmd=(npx --yes radius-cli)
+  fi
+fi
+
 if [[ ! -f "$RADIUS_WALLET_MARKER" ]]; then
-  echo "[bootstrap] Setting up Radius wallet..."
-  if python3 /app/scripts/radius/wallet_init.py; then
-    date -u +"%Y-%m-%dT%H:%M:%SZ" > "$RADIUS_WALLET_MARKER"
-    # Reload keys generated during init into the current process environment so
-    # the agent server and JWT auth use the persistent wallet immediately.
-    if [[ -f "$RADIUS_KEY_FILE" ]]; then
-      export RADIUS_PRIVATE_KEY="$(cat "$RADIUS_KEY_FILE")"
-    fi
-    if [[ -f "$RADIUS_ADDR_FILE" ]]; then
-      export RADIUS_WALLET_ADDRESS="$(cat "$RADIUS_ADDR_FILE")"
+  echo "[bootstrap] Setting up Radius wallet via radius-cli..."
+
+  if "${radius_cli_cmd[@]}" \
+    --network "${RADIUS_NETWORK:-testnet}" \
+    --rpc-url "${RADIUS_RPC_URL:-https://rpc.testnet.radiustech.xyz}" \
+    --sbc "${RADIUS_SBC_ADDRESS:-0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb}" \
+    wallet address >/tmp/radius_wallet_address.txt 2>&1; then
+    radius_addr="$(grep -Eo '0x[a-fA-F0-9]{40}' /tmp/radius_wallet_address.txt | head -n1 || true)"
+    if [[ -n "$radius_addr" ]]; then
+      echo "$radius_addr" > "$RADIUS_ADDR_FILE"
+      export RADIUS_WALLET_ADDRESS="$radius_addr"
+      if ! grep -q "^RADIUS_WALLET_ADDRESS=" "$ENV_FILE" 2>/dev/null; then
+        echo "RADIUS_WALLET_ADDRESS=${RADIUS_WALLET_ADDRESS}" >> "$ENV_FILE"
+      fi
     fi
 
-    # Persist generated values to .env for downstream tools.
-    if [[ -n "${RADIUS_PRIVATE_KEY:-}" ]] && ! grep -q "^RADIUS_PRIVATE_KEY=" "$ENV_FILE" 2>/dev/null; then
-      echo "RADIUS_PRIVATE_KEY=${RADIUS_PRIVATE_KEY}" >> "$ENV_FILE"
+    # Export private key to power JWT auth + ERC-8004 signing in existing components.
+    radius_export_out="$(printf 'y\n' | "${radius_cli_cmd[@]}" wallet export 2>/dev/null || true)"
+    radius_key="$(printf '%s\n' "$radius_export_out" | grep -Eo '0x[a-fA-F0-9]{64}' | tail -n1 || true)"
+    if [[ -n "$radius_key" ]]; then
+      export RADIUS_PRIVATE_KEY="$radius_key"
+      if ! grep -q "^RADIUS_PRIVATE_KEY=" "$ENV_FILE" 2>/dev/null; then
+        echo "RADIUS_PRIVATE_KEY=${RADIUS_PRIVATE_KEY}" >> "$ENV_FILE"
+      fi
     fi
-    if [[ -n "${RADIUS_WALLET_ADDRESS:-}" ]] && ! grep -q "^RADIUS_WALLET_ADDRESS=" "$ENV_FILE" 2>/dev/null; then
-      echo "RADIUS_WALLET_ADDRESS=${RADIUS_WALLET_ADDRESS}" >> "$ENV_FILE"
+
+    # Optional faucet funding for first boot.
+    # wallet_init.py now assumes wallet already exists in radius-cli keystore.
+    if [[ "${RADIUS_AUTO_FUND:-true}" != "false" && "${RADIUS_AUTO_FUND:-true}" != "0" ]]; then
+      echo "[bootstrap] Requesting Radius faucet funding via wallet init helper..."
+      python3 /app/scripts/radius/wallet_init.py || true
     fi
-    echo "[bootstrap] Radius wallet ready: $(cat "$RADIUS_ADDR_FILE" 2>/dev/null || echo 'unknown')"
+
+    date -u +"%Y-%m-%dT%H:%M:%SZ" > "$RADIUS_WALLET_MARKER"
+    echo "[bootstrap] Radius wallet ready: ${RADIUS_WALLET_ADDRESS:-unknown}"
   else
     echo "[bootstrap] WARNING: Radius wallet setup failed. Will retry on next boot." >&2
+    cat /tmp/radius_wallet_address.txt >&2 || true
   fi
 else
+  if [[ -f "$RADIUS_ADDR_FILE" ]]; then
+    export RADIUS_WALLET_ADDRESS="$(cat "$RADIUS_ADDR_FILE")"
+  fi
+  # Ensure auth key is available even on warm boots.
+  if [[ -z "${RADIUS_PRIVATE_KEY:-}" ]]; then
+    radius_export_out="$(printf 'y\n' | "${radius_cli_cmd[@]}" wallet export 2>/dev/null || true)"
+    radius_key="$(printf '%s\n' "$radius_export_out" | grep -Eo '0x[a-fA-F0-9]{64}' | tail -n1 || true)"
+    if [[ -n "$radius_key" ]]; then
+      export RADIUS_PRIVATE_KEY="$radius_key"
+    fi
+  fi
   echo "[bootstrap] Radius wallet already initialized: ${RADIUS_WALLET_ADDRESS:-unknown}"
 fi
 

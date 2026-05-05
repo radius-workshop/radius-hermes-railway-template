@@ -12,10 +12,10 @@ This template is worker-only: setup and configuration are done through Railway V
 - First-boot bootstrap from environment variables
 - Persistent Hermes state on a Railway volume at `/data`
 - Telegram, Discord, or Slack support (at least one required)
-- Built-in Radius Testnet wallet (auto-generated on first boot, auto-funded via faucet)
+- Built-in Radius Testnet wallet (instantiated via radius-cli on first boot, auto-funded via faucet)
 - Agent discovery layer served at `/.well-known/*` — ERC 8004 registration, Cloudflare agent skills discovery, and A2A agent card
 - Agent-to-agent (A2A) communication with two execution modes: direct (inline `message/send` + `message/stream`) and delegated (webhook-backed async submission)
-- Persistent cryptographic identity derived from the wallet key — the same `RADIUS_PRIVATE_KEY` signs both transactions and JWTs
+- Persistent cryptographic identity derived from the radius-cli wallet keystore; exported key material is used for JWT and on-chain signing paths
 - Built-in discovery aggregation tool via `get_agent_info`
 - Built-in deterministic ERC-8004 registry tools for reading and writing Radius agent registrations
 - Built-in outbound A2A helper via `send_a2a_message` with sender-side correlation logging
@@ -259,19 +259,18 @@ Use any model ID supported by your provider. OpenRouter model IDs look like `ope
 
 This template includes a built-in Radius Testnet wallet. On first boot, the entrypoint:
 
-1. Generates a private key (or uses `RADIUS_PRIVATE_KEY` if you set one).
-2. Persists the key and address under `/data/.hermes/.radius/`.
-3. Requests SBC testnet tokens from the Radius faucet.
-4. Installs a wallet skill so Hermes knows how to use it.
+1. Instantiates a local radius-cli keystore (or reuses an existing one) under `${RADIUS_HOME:-/data/.hermes/.radius-cli}`.
+2. Caches the wallet address for runtime metadata and homepage display.
+3. Exports key material for JWT + ERC-8004 signing compatibility.
+4. Requests SBC testnet tokens from the Radius faucet (unless `RADIUS_AUTO_FUND=false`).
 
 The agent can then check balances, send SBC tokens, and show explorer links — all via natural language in chat.
 
-The bundled wallet tools now support two wallet providers for wallet actions:
+The bundled wallet tools are backed by `radius-cli` and use a local persistent keystore under `${RADIUS_HOME:-/data/.hermes/.radius-cli}`.
 
-- `local` — the default for every new session, backed by the persisted `RADIUS_PRIVATE_KEY`
-- `para` — an optional Para-backed operator wallet for session-scoped wallet actions
-
-This provider choice only affects wallet actions. The agent's public wallet identity, DID/JWT auth, homepage wallet summary, and ERC-8004 identity remain pinned to the local wallet.
+- Wallet creation happens automatically on first boot via `radius-cli wallet address`.
+- The same local wallet is used for wallet actions, DID/JWT auth, homepage wallet summary, and ERC-8004 identity.
+- Para-backed wallet provider support is removed in this template revision.
 
 ## ERC-8004 registry tools
 
@@ -352,33 +351,17 @@ Safe update workflow: dry-run the intended specialized tool, inspect the diff, s
 
 | Variable | Description |
 |---|---|
-| `RADIUS_PRIVATE_KEY` | BYO private key (`0x...`). Auto-generated if not set. |
-| `RADIUS_WALLET_ADDRESS` | Derived from key automatically. |
+| `RADIUS_HOME` | Optional radius-cli home directory. Default: `/data/.hermes/.radius-cli`. |
+| `RADIUS_WALLET_ADDRESS` | Optional explicit wallet address override. Normally auto-derived from radius-cli keystore. |
+| `RADIUS_NETWORK` | Wallet network. Default: `testnet`. |
+| `RADIUS_RPC_URL` | Optional RPC override. Default testnet RPC is `https://rpc.testnet.radiustech.xyz`. |
+| `RADIUS_SBC_ADDRESS` | Optional SBC token address override. |
+| `RADIUS_CHAIN_ID` | Optional chain ID override. Default testnet chain id `72344`. |
+| `RADIUS_EXPLORER_URL` | Optional explorer override. Default `https://testnet.radiustech.xyz`. |
+| `RADIUS_CLI_BIN` | Optional radius-cli binary path override. |
 | `RADIUS_AUTO_FUND` | Set to `false` to skip faucet on boot. Default: enabled. |
-| `PARA_API_KEY` | Optional Para server secret key for the alternate `para` wallet provider. |
-| `PARA_SECRET_API_KEY` | Optional alias for `PARA_API_KEY`. |
-| `PARA_ENVIRONMENT` | Optional Para environment. `beta` by default, or `prod` / `production`. |
-| `PARA_REST_BASE_URL` | Optional explicit Para REST base URL override. |
-| `PARA_WALLET_ID` | Optional Para wallet ID to pin the operator wallet if the project has multiple EVM wallets. |
 
-The wallet key is stored at `/data/.hermes/.radius/key` with permissions `600`. It persists across redeploys via the Railway volume.
-
-### Para wallet setup notes
-
-If you want to use the optional `para` wallet provider in this project, a Secret API key alone is not enough. The Para project also needs an existing operator-owned EVM wallet.
-
-Recommended setup:
-
-1. Set `PARA_API_KEY` or `PARA_SECRET_API_KEY` to your Para Secret API key.
-2. Create an EVM wallet in the Para project before trying to switch the session wallet provider to `para`.
-3. Use `scheme: "DKLS"` for this project's EVM wallet.
-4. If the Para project has multiple EVM wallets, also set `PARA_WALLET_ID` so the agent uses the intended operator wallet.
-
-Notes:
-
-- This project treats Para as a wallet provider for wallet actions only. It does not replace the agent's canonical local identity wallet.
-- `ED25519` is not the right choice for this EVM wallet flow.
-- If no EVM wallet exists in the Para project, the agent will hard-error when a session tries to switch to `para`.
+The radius-cli keystore is stored under `${RADIUS_HOME}` with restricted permissions and persists across redeploys via the Railway volume.
 
 ### Wallet commands (via chat)
 
@@ -388,19 +371,15 @@ Once deployed, you can ask the agent:
 - *"Check my balance"*
 - *"Send 10 SBC to 0x..."*
 - *"Get testnet tokens"*
-- *"Use Para wallet for this session"*
-- *"Switch back to local wallet"*
-- *"What is my local wallet address?"*
-- *"What is my Para wallet address?"*
+- *"What is my wallet address?"*
+- *"Check my Radius wallet balance now."*
 
-The preferred interface is the bundled `radius-cast` plugin tools. The underlying wallet bootstrap and fallback scripts live under `/app/scripts/radius/`.
+The preferred interface is the bundled `radius-cli` plugin tools. The underlying wallet bootstrap/faucet helper scripts live under `/app/scripts/radius/`.
 
-The wallet tool behavior is:
+Wallet tool behavior:
 
-- Every new session defaults to `local`.
-- If the user explicitly switches the session to `para`, wallet actions default to the Para wallet for the rest of that session.
-- Users can still override per request by explicitly asking for the `local` or `para` wallet.
-- If `para` is requested but not configured, the agent returns a hard error instead of silently falling back.
+- Uses one persistent local radius-cli keystore.
+- No Para provider path in this template revision.
 
 ## Linear integration
 
