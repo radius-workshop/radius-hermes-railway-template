@@ -170,7 +170,7 @@ Once deployed, you can ask the agent:
 - *"Send 10 SBC to 0x..."*
 - *"Get testnet tokens"*
 
-The agent runs the preconfigured Node.js scripts at `/app/scripts/radius/` using its terminal tool.
+The agent uses built-in Radius wallet tools (`radius_wallet_address`, `radius_balance`, `radius_send_sbc`, `radius_tx_status`) for wallet actions. The scripts under `/app/scripts/radius/` remain available for debugging and bootstrap internals.
 
 ## Agent discovery
 
@@ -224,7 +224,7 @@ Any `.md` file you place in the `skills/` directory of this repo will be copied 
 2. Write instructions in plain Markdown — what the agent should know, how to behave, what commands to run.
 3. Redeploy. The skill will be installed on next boot.
 
-The `radius-wallet.md` skill is already included and tells the agent how to use the wallet scripts.
+The `radius-wallet.md` skill is already included and tells the agent how to use the built-in Radius wallet tools (with script fallback reserved for explicit debug/legacy paths).
 
 ### System prompt
 
@@ -270,8 +270,8 @@ hermes pairing list
 3. Clears empty integer-typed variables from the process environment (prevents `ValueError` in Hermes).
 4. Creates `${HERMES_HOME}/config.yaml` if it doesn't exist.
 5. Initializes Radius wallet if not already done (generates key, calls faucet).
-6. Copies all `skills/*.md` files to `${HERMES_HOME}/skills/` (overwrites on each boot).
-7. Copies skills with `published: true` frontmatter to `${HERMES_HOME}/skills/` in `name/SKILL.md` structure.
+6. Synchronizes bundled skill directories to `${HERMES_HOME}/skills/` on boot (including linked files like `references/`, `templates/`, and `scripts/`).
+7. Publishes skills with `published: true` frontmatter to the discovery server in `name/SKILL.md` structure.
 8. Starts the Bun skills server in background (binds `PORT`).
 9. Starts `hermes gateway` in foreground.
 
