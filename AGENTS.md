@@ -8,7 +8,7 @@ This repository is a batteries-included Hermes template. Treat the bundled files
 - `skills/*.md` are bundled agent skills. Read the relevant skill before using the associated capability.
 - `plugins/gen-jwt` provides the `generate_a2a_token` tool used for A2A bearer tokens.
 - `plugins/agent-info` provides the `get_agent_info` tool used to retrieve an agent's public discovery metadata.
-- `plugins/radius-cast` provides Foundry-backed Radius wallet tools for address lookup, balances, transfers, and tx status.
+- `plugins/radius-cast` now packages the `radius-cli` wallet integration and provides Radius wallet tools for address lookup, balances, transfers, and tx status.
 - `plugins/godaddy-ans` provides GoDaddy Agent Name Service registry tools such as `godaddy_ans_search`, lookup, resolution, registration, and validation, plus the narrow `godaddy_dns_set_records` domain DNS record writer.
 - `scripts/radius/*` contains the built-in Radius wallet scripts.
 - `scripts/godaddy/*` contains GoDaddy ANS helper scripts behind the plugin tools.
