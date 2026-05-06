@@ -6,7 +6,29 @@ Deploy [Hermes Agent](https://github.com/NousResearch/hermes-agent) to Railway a
 
 This template is worker-only: setup and configuration are done through Railway Variables, then the container bootstraps Hermes automatically on first run.
 
-## What you get
+## Radius skills + tools bootstrap
+
+Agents created from this template automatically bootstrap the Radius skills repo snapshot into persistent external skills storage at startup:
+
+- `/app/vendor/radius-skills` is cloned into the image from `https://github.com/radiustechsystems/skills.git`
+- on first boot, `scripts/entrypoint.sh` copies that snapshot to `RADIUS_SKILLS_DIR` (default `/data/.hermes/external-skills/radius-skills`)
+- Hermes `skills.external_dirs` is populated with the discovered Radius skill roots
+- the Radius `radius-cast` Hermes plugin remains enabled so the agent has deterministic Radius wallet tools
+
+This means new Railway-template agents should see both the portable skills and the tool/plugin surface:
+
+- skills: `radius-dev`, `x402`, `dripping-faucet`, `radius-agent-ops`
+- tools: `radius_wallet_address`, `radius_balance`, `radius_send_sbc`, `radius_send_rusd`, `radius_tx_status`, `radius_chain_info`
+
+Local verification:
+
+```bash
+RADIUS_SKILLS_REPO_CHECKOUT=/app/skills python3 -m unittest tests/test_radius_skills_bootstrap.py -v
+```
+
+This test intentionally does not cover the GitHub Action / webhook subscriber notification path.
+
+## What You Get
 
 - Hermes gateway running as a Railway worker
 - First-boot bootstrap from environment variables
