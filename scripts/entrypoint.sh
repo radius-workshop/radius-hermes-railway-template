@@ -333,7 +333,7 @@ if [[ ! -f "$RADIUS_WALLET_MARKER" ]]; then
     # wallet_init.py now assumes wallet already exists in radius-cli keystore.
     if [[ "${RADIUS_AUTO_FUND:-true}" != "false" && "${RADIUS_AUTO_FUND:-true}" != "0" ]]; then
       echo "[bootstrap] Requesting Radius faucet funding via wallet init helper..."
-      python3 /app/scripts/radius/wallet_init.py || true
+      /opt/venv/bin/python /app/scripts/radius/wallet_init.py || true
     fi
 
     date -u +"%Y-%m-%dT%H:%M:%SZ" > "$RADIUS_WALLET_MARKER"
