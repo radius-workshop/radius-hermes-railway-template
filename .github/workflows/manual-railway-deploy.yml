@@ -1,0 +1,83 @@
+name: Manual Railway Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_ids:
+        description: "Railway project ID(s), comma-separated (e.g. prj_a,prj_b,prj_c)"
+        required: true
+        type: string
+      environment:
+        description: "Railway environment to deploy to"
+        required: true
+        default: production
+        type: string
+      service:
+        description: "Optional Railway service name (leave blank to deploy default service)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy main via Railway CLI
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main branch
+        uses: actions/checkout@v6
+        with:
+          ref: main
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Link and deploy selected project(s)
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          PROJECT_IDS_INPUT: ${{ github.event.inputs.project_ids }}
+          RAILWAY_ENVIRONMENT: ${{ github.event.inputs.environment }}
+          RAILWAY_SERVICE: ${{ github.event.inputs.service }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${RAILWAY_TOKEN:-}" ]]; then
+            echo "RAILWAY_TOKEN is not set. Add it in: Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+          # Convert comma-separated input into an array and trim spaces.
+          IFS=',' read -r -a PROJECT_IDS <<< "$PROJECT_IDS_INPUT"
+          CLEANED_PROJECT_IDS=()
+          for id in "${PROJECT_IDS[@]}"; do
+            trimmed="$(echo "$id" | xargs)"
+            if [[ -n "$trimmed" ]]; then
+              CLEANED_PROJECT_IDS+=("$trimmed")
+            fi
+          done
+
+          if [[ ${#CLEANED_PROJECT_IDS[@]} -eq 0 ]]; then
+            echo "No valid project IDs were provided."
+            exit 1
+          fi
+
+          echo "Deploying main to ${#CLEANED_PROJECT_IDS[@]} Railway project(s) in environment '$RAILWAY_ENVIRONMENT'."
+
+          for project_id in "${CLEANED_PROJECT_IDS[@]}"; do
+            echo "----------------------------------------"
+            echo "Deploying to project: $project_id"
+
+            if [[ -n "${RAILWAY_SERVICE:-}" ]]; then
+              railway link --project "$project_id" --environment "$RAILWAY_ENVIRONMENT" --service "$RAILWAY_SERVICE"
+              bash ./deploy.sh --ci --service "$RAILWAY_SERVICE"
+            else
+              railway link --project "$project_id" --environment "$RAILWAY_ENVIRONMENT"
+              bash ./deploy.sh --ci
+            fi
+          done
