@@ -60,6 +60,7 @@ from erc8004_registry import (
 from a2a_bridge import A2ABridge
 from a2a_sessions import A2ASessionStore
 from auth import get_did, get_did_document, issue_token, jwt_auth_dep, setup_auth
+import kya_verify
 from hermes_client import HermesClient, HermesUnavailableError, HermesUpstreamError
 from logging_utils import (
     clear_request_context,
@@ -1696,6 +1697,37 @@ async def did_document_route():
     )
 
 
+@app.get("/.well-known/jwks.json")
+async def jwks_document_route():
+    """Publish the JWKS for this agent's KYA / OAuth signing key.
+
+    The KYA spec mandates this URL exists at the issuer so verifying agents
+    can resolve the public half of the signing keypair. We always serve at
+    least the KYA P-256 key; the OAuth metadata endpoints already advertise
+    this URL and now it's no longer a dangling reference.
+    """
+    try:
+        jwks = kya_verify.get_kya_jwks()
+    except Exception as err:  # defensive — key dir unwritable, etc.
+        log_event(
+            logger,
+            logging.ERROR,
+            "Failed to assemble JWKS",
+            event="kya.jwks",
+            outcome="error",
+            error=str(err),
+        )
+        return JSONResponse({"error": "JWKS unavailable"}, status_code=503)
+    return Response(
+        content=json.dumps(jwks),
+        media_type="application/jwk-set+json",
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "public, max-age=3600",
+        },
+    )
+
+
 @app.get("/.well-known/agent-registration.json")
 async def agent_registration():
     try:
@@ -2171,6 +2203,13 @@ def _build_agent_graph_payload() -> dict[str, Any]:
             "surfaces",
             f"{BASE_URL}/.well-known/did.json",
             "Public DID used to verify bearer JWT signatures.",
+        ),
+        (
+            "surface:jwks",
+            "JWKS",
+            "surfaces",
+            f"{BASE_URL}/.well-known/jwks.json",
+            "Public JWK set for KYA/OAuth signature verification.",
         ),
         (
             "surface:registration",
@@ -5338,8 +5377,79 @@ def _hermes_error_response(rpc_id, exc: Exception) -> JSONResponse:
     )
 
 
+def a2a_auth_mode() -> str:
+    raw = (os.environ.get("A2A_AUTH_MODE") or "did_only").strip().lower()
+    if raw in {"did_only", "did_and_kya", "did_or_kya", "kya_only"}:
+        return raw
+    return "did_only"
+
+
+async def _try_did_auth(request: Request) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        auth = await jwt_auth_dep(request)
+        return auth, None
+    except Exception as err:  # HTTPException or unexpected error path
+        detail = getattr(err, "detail", None)
+        return None, str(detail or err)
+
+
+async def a2a_auth_dep(request: Request) -> dict[str, Any]:
+    mode = a2a_auth_mode()
+    did_auth, did_error = await _try_did_auth(request)
+    did_ok = did_auth is not None
+
+    # Reuse existing KYA verifier for consistent policy, audience/env/issuer checks.
+    kya_token = request.headers.get(kya_verify.inbound_header_name())
+    expected_aud = kya_verify.inbound_expected_audience() or BASE_URL
+
+    if mode == "did_only":
+        kya_policy = "off"
+    elif mode in {"did_and_kya", "kya_only"}:
+        kya_policy = "required"
+    else:  # did_or_kya
+        kya_policy = kya_verify.inbound_policy()
+
+    kya_decision = kya_verify.evaluate_inbound(
+        token=kya_token,
+        policy=kya_policy,
+        expected_audience=expected_aud,
+    )
+    kya_report = kya_decision.get("report")
+    kya_ok = kya_decision.get("action") == "accept"
+
+    allowed = False
+    if mode == "did_only":
+        allowed = did_ok
+    elif mode == "did_and_kya":
+        allowed = did_ok and kya_ok
+    elif mode == "did_or_kya":
+        allowed = did_ok or kya_ok
+    elif mode == "kya_only":
+        allowed = kya_ok
+
+    if not allowed:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    return {
+        "mode": mode,
+        "did_ok": did_ok,
+        "did_error": did_error,
+        "did_auth": did_auth,
+        "issuer": (did_auth or {}).get("issuer") if did_auth else None,
+        "kya_ok": kya_ok,
+        "kya_policy": kya_policy,
+        "kya_action": kya_decision.get("action"),
+        "kya_reason": kya_decision.get("reason"),
+        "kya_report": kya_report,
+        "kya_issuer": kya_report.issuer if kya_report else None,
+        "kya_signature_verified": kya_report.signature_verified if kya_report else False,
+    }
+
+
 @app.post("/a2a")
-async def handle_a2a(request: Request, auth: dict = Depends(jwt_auth_dep)):
+async def handle_a2a(request: Request, auth: dict = Depends(a2a_auth_dep)):
     try:
         body = await request.json()
     except Exception:
@@ -5424,7 +5534,7 @@ async def handle_a2a(request: Request, auth: dict = Depends(jwt_auth_dep)):
         rpc_id=rpc_id,
         rpc_method=method,
         a2a_mode=mode,
-        issuer_did=auth.get("issuer"),
+        issuer_did=auth.get("issuer") or auth.get("kya_issuer"),
         context_id=context_id,
         a2a_message_id=message_id,
     )
@@ -5438,11 +5548,58 @@ async def handle_a2a(request: Request, auth: dict = Depends(jwt_auth_dep)):
         rpc_id=rpc_id,
         rpc_method=method,
         a2a_mode=mode,
-        issuer_did=auth.get("issuer"),
+        issuer_did=auth.get("issuer") or auth.get("kya_issuer"),
         context_id=context_id,
         a2a_message_id=message_id,
         prompt_chars=prompt_chars,
     )
+
+    # ——— KYA inbound policy ———
+    # Auth mode and KYA policy are evaluated in a2a_auth_dep so we don't
+    # double-verify (which can trigger replay protection on a second pass).
+    kya_token = request.headers.get(kya_verify.inbound_header_name())
+    kya_decision = {
+        "action": auth.get("kya_action") or "skip",
+        "reason": auth.get("kya_reason"),
+        "report": auth.get("kya_report"),
+    }
+    kya_report = kya_decision.get("report")
+    kya_log_payload = {
+        "event": "a2a.kya",
+        "kya_action": kya_decision["action"],
+        "kya_policy": auth.get("kya_policy") or kya_verify.inbound_policy(),
+        "kya_present": bool(kya_token),
+        "rpc_id": rpc_id,
+        "rpc_method": method,
+        "issuer_did": auth.get("issuer") or auth.get("kya_issuer"),
+        "context_id": context_id,
+    }
+    if kya_report is not None:
+        kya_log_payload["kya_issuer"] = kya_report.issuer
+        kya_log_payload["kya_signature_verified"] = kya_report.signature_verified
+        if kya_report.errors:
+            kya_log_payload["kya_errors"] = kya_report.errors[:5]
+        if kya_report.warnings:
+            kya_log_payload["kya_warnings"] = kya_report.warnings[:5]
+    if kya_decision.get("reason"):
+        kya_log_payload["kya_reason"] = kya_decision["reason"]
+
+    if kya_decision["action"] == "reject":
+        log_event(logger, logging.WARNING, "A2A KYA gate rejected request", **kya_log_payload)
+        return _rpc_error_response(
+            rpc_id,
+            InvalidRequestError(message="KYA verification required"),
+            status_code=401,
+        )
+    if kya_decision["action"] == "warn":
+        log_event(logger, logging.WARNING, "A2A KYA gate accepted with errors", **kya_log_payload)
+    elif kya_decision["action"] == "accept":
+        log_event(logger, logging.INFO, "A2A KYA gate accepted request", **kya_log_payload)
+        update_request_context(kya_issuer=kya_report.issuer if kya_report else None)
+    # action == "skip" is the no-op default; only log when policy is on but token absent.
+    elif kya_decision.get("reason") == "no_token" and (auth.get("kya_policy") or kya_verify.inbound_policy()) != "off":
+        log_event(logger, logging.DEBUG, "A2A KYA gate skipped (no token)", **kya_log_payload)
+
     managed_session = (
         _a2a_session_store.find_by_context(context_id) if context_id else None
     )
@@ -5467,7 +5624,7 @@ async def handle_a2a(request: Request, auth: dict = Depends(jwt_auth_dep)):
             event="a2a.session.inbound",
             session_id=(session or managed_session).get("session_id"),
             context_id=context_id,
-            issuer_did=auth.get("issuer"),
+            issuer_did=auth.get("issuer") or auth.get("kya_issuer"),
             prompt_chars=prompt_chars,
         )
         result = {
@@ -5522,7 +5679,11 @@ async def handle_a2a(request: Request, auth: dict = Depends(jwt_auth_dep)):
                     message="message/stream is only supported in direct mode"
                 ),
             )
-        return await _handle_delegated(rpc_id, message, auth.get("issuer"))
+        return await _handle_delegated(
+            rpc_id,
+            message,
+            auth.get("issuer") or auth.get("kya_issuer"),
+        )
 
     if not _a2a_bridge:
         log_event(
@@ -5556,7 +5717,7 @@ async def handle_a2a(request: Request, auth: dict = Depends(jwt_auth_dep)):
                     rpc_method=method,
                     a2a_task_id=result.get("id"),
                     context_id=response_context or context_id,
-                    issuer_did=auth.get("issuer"),
+                    issuer_did=auth.get("issuer") or auth.get("kya_issuer"),
                     duration_ms=round((time.perf_counter() - started) * 1000, 2),
                 )
                 return _rpc_success_response(rpc_id, send_payload.get("result"))
@@ -5570,10 +5731,14 @@ async def handle_a2a(request: Request, auth: dict = Depends(jwt_auth_dep)):
                         event="a2a.fallback",
                         rpc_id=rpc_id,
                         rpc_method=method,
-                        issuer_did=auth.get("issuer"),
+                        issuer_did=auth.get("issuer") or auth.get("kya_issuer"),
                         context_id=context_id,
                     )
-                    return await _handle_delegated(rpc_id, message, auth.get("issuer"))
+                    return await _handle_delegated(
+                        rpc_id,
+                        message,
+                        auth.get("issuer") or auth.get("kya_issuer"),
+                    )
                 raise
 
         stream_context = get_request_context()
@@ -5592,7 +5757,7 @@ async def handle_a2a(request: Request, auth: dict = Depends(jwt_auth_dep)):
                     rpc_id=rpc_id,
                     rpc_method=method,
                     context_id=get_request_context().get("context_id"),
-                    issuer_did=auth.get("issuer"),
+                    issuer_did=auth.get("issuer") or auth.get("kya_issuer"),
                     duration_ms=round((time.perf_counter() - started) * 1000, 2),
                 )
             except (HermesUnavailableError, HermesUpstreamError) as exc:
@@ -5604,7 +5769,7 @@ async def handle_a2a(request: Request, auth: dict = Depends(jwt_auth_dep)):
                         event="a2a.direct_stream",
                         outcome="error",
                         rpc_id=rpc_id,
-                        issuer_did=auth.get("issuer"),
+                        issuer_did=auth.get("issuer") or auth.get("kya_issuer"),
                         context_id=get_request_context().get("context_id"),
                         hermes_error=str(exc),
                         error_type="unavailable",
@@ -5618,7 +5783,7 @@ async def handle_a2a(request: Request, auth: dict = Depends(jwt_auth_dep)):
                         event="a2a.direct_stream",
                         outcome="error",
                         rpc_id=rpc_id,
-                        issuer_did=auth.get("issuer"),
+                        issuer_did=auth.get("issuer") or auth.get("kya_issuer"),
                         context_id=get_request_context().get("context_id"),
                         hermes_error=str(exc),
                         error_type="upstream",
@@ -5638,7 +5803,7 @@ async def handle_a2a(request: Request, auth: dict = Depends(jwt_auth_dep)):
                     event="a2a.direct_stream",
                     outcome="error",
                     rpc_id=rpc_id,
-                    issuer_did=auth.get("issuer"),
+                    issuer_did=auth.get("issuer") or auth.get("kya_issuer"),
                     context_id=get_request_context().get("context_id"),
                     exc_info=True,
                 )

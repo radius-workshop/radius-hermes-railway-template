@@ -876,6 +876,75 @@ for key in \
   fi
 done
 
+# Hermes main can create idx_tasks_session_id before its additive migration
+# adds tasks.session_id on legacy kanban DBs. Repair existing boards first.
+echo "[bootstrap] Checking Hermes kanban SQLite migrations..."
+python3 - <<'PYEOF' || echo "[bootstrap] WARNING: Hermes kanban migration preflight failed; gateway will continue." >&2
+import os
+import sqlite3
+from pathlib import Path
+
+
+def _candidate_paths() -> list[Path]:
+    override = os.environ.get("HERMES_KANBAN_DB", "").strip()
+    if override:
+        return [Path(override).expanduser()]
+
+    root = Path(
+        os.environ.get("HERMES_KANBAN_HOME")
+        or os.environ.get("HERMES_HOME")
+        or "/data/.hermes"
+    ).expanduser()
+    paths = [root / "kanban.db"]
+    boards_root = root / "kanban" / "boards"
+    if boards_root.is_dir():
+        paths.extend(sorted(boards_root.glob("*/kanban.db")))
+    return paths
+
+
+seen: set[str] = set()
+for db_path in _candidate_paths():
+    resolved = str(db_path.resolve()) if db_path.exists() else str(db_path)
+    if resolved in seen:
+        continue
+    seen.add(resolved)
+
+    if not db_path.exists():
+        continue
+
+    conn = None
+    try:
+        conn = sqlite3.connect(str(db_path), isolation_level=None, timeout=30)
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        if "tasks" not in tables:
+            continue
+
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}
+        changed = False
+        if "session_id" not in cols:
+            conn.execute("ALTER TABLE tasks ADD COLUMN session_id TEXT")
+            changed = True
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_session_id "
+            "ON tasks(session_id)"
+        )
+        if changed:
+            print(f"[bootstrap] Repaired kanban DB migration: {db_path}")
+    except sqlite3.DatabaseError as exc:
+        print(
+            f"[bootstrap] WARNING: Could not inspect kanban DB {db_path}: {exc}",
+            flush=True,
+        )
+    finally:
+        if conn is not None:
+            conn.close()
+PYEOF
+
 echo "[bootstrap] Starting agent server..."
 python3 /app/scripts/agent_server/main.py &
 AGENT_PID=$!

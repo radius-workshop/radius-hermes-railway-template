@@ -92,6 +92,42 @@ curl -X POST http://localhost:3000/token \
 
 The server implements the [A2A protocol](https://github.com/a2aproject/A2A) over JSON-RPC 2.0 and uses the official `a2a-sdk` models for validation and envelope shaping.
 
+### A2A auth mode (`A2A_AUTH_MODE`)
+
+`POST /a2a` supports a configurable auth mode:
+
+- `did_only` (default): require DID-JWT auth, ignore KYA for authorization.
+- `did_and_kya`: require both DID-JWT and valid KYA.
+- `did_or_kya`: allow either DID-JWT or valid KYA.
+- `kya_only`: allow valid KYA without requiring DID allowlist pre-registration.
+
+### KYA inbound gate
+
+The KYA lane is implemented in `scripts/agent_server/kya_verify.py` and is evaluated by `/a2a` according to `A2A_AUTH_MODE`.
+
+The gate reads the JWT from the `skyfire-pay-id` HTTP header (per the KYA spec), resolves the issuer's JWKS at `{iss}/.well-known/jwks.json`, verifies the ES256 signature, enforces required-claim shape, audience binding (against the agent's `BASE_URL` unless `KYA_EXPECTED_AUDIENCE` is set), environment binding (`KYA_EXPECTED_ENVIRONMENT`), and a trusted-issuer allowlist (`TRUSTED_KYA_ISSUERS`). It also tracks `(iss, jti)` in a bounded in-process LRU to mitigate replay.
+
+`TRUSTED_KYA_ISSUERS` supports both exact issuers and wildcard host suffixes:
+
+- exact: `https://agent0.72344.xyz`
+- wildcard subdomain: `https://*.72344.xyz`, `https://*.radiustech.xyz`
+
+Wildcard entries match subdomains only (not the apex host).
+
+Policies, set via `KYA_INBOUND_POLICY`:
+
+- `off` (default): the header is ignored.
+- `opportunistic`: validate when present, log success/failure (`event=a2a.kya`), never reject.
+- `required`: validate when present, reject if missing or invalid (HTTP 401 with JSON-RPC `InvalidRequest`).
+
+The gate emits `a2a.kya` structured log events with `kya_action`, `kya_policy`, `kya_present`, `kya_issuer`, `kya_signature_verified`, `kya_errors`, and `kya_reason` fields for Railway filtering.
+
+### KYA outbound minting
+
+This agent can also mint its own KYA / PAY / KYA-PAY tokens via the `generate_kya_token` tool (bundled `kya-mint` plugin). Tokens are signed with a persistent ES256 / P-256 keypair stored at `${HERMES_HOME}/.radius/kya/key.pem` (mode 0600) and lazily generated on first use. The public half is published at `GET /.well-known/jwks.json` so verifying peers can resolve it per the KYA spec.
+
+The KYA signing key is intentionally separate from the agent's Radius wallet key (secp256k1 / ES256K) because KYA mandates ES256 (P-256); the two curves are not interchangeable.
+
 ### Modes
 
 - `A2A_MODE=direct`: `message/send` and `message/stream` are handled inline through the Hermes-compatible chat API.
@@ -294,6 +330,7 @@ Useful Railway filters:
 - `@event:a2a.request`
 - `@event:a2a.direct`
 - `@event:a2a.delegated`
+- `@event:a2a.kya`
 - `@event:auth.jwt_rejected`
 - `@request_id:<id>`
 - `@context_id:<context-id>`
@@ -334,6 +371,18 @@ The FastAPI server disables default uvicorn access logs so the structured lines 
 | `STRICT_VENDORED_SKILLS` | Fails boot when expected vendored skills are missing if `true` |
 | `VENDORED_SKILLS_SOURCE` | Override for vendored Radius skills repo root |
 | `VENDORED_SKILLS_MANIFEST` | Override for vendored skills manifest location |
+
+### KYA (KYAPay)
+
+| Variable | Description |
+|---|---|
+| `KYA_INBOUND_POLICY` | `off` (default), `opportunistic`, or `required`. Controls the KYA gate on `POST /a2a`. |
+| `KYA_INBOUND_HEADER` | HTTP header carrying the KYA JWT. Defaults to `skyfire-pay-id` (per spec). |
+| `KYA_EXPECTED_AUDIENCE` | Audience the gate enforces against `payload.aud`. Defaults to `BASE_URL`. |
+| `KYA_EXPECTED_ENVIRONMENT` | Optional environment value enforced against `payload.env` (`production`, `sandbox`, ...). |
+| `TRUSTED_KYA_ISSUERS` | Comma-separated allowlist of KYA issuer URLs. When empty, any signature-verified issuer is accepted. |
+| `AGENT_PUBLIC_IP` | Public IP used for the outbound `aid.creation_ip` claim when minting tokens via `generate_kya_token`. If unset, falls back to the A record of the public host. |
+| `AGENT_DID` | Default `sub` claim for minted KYA tokens. Falls back to `did:web:<public-host>` if unset. |
 
 ### Base URL and identity
 

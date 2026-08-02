@@ -19,6 +19,9 @@ This template is worker-only: setup and configuration are done through Railway V
 - Built-in discovery aggregation tool via `get_agent_info`
 - Built-in deterministic ERC-8004 registry tools for reading and writing Radius agent registrations
 - Built-in outbound A2A helper via `send_a2a_message` with sender-side correlation logging
+- Built-in KYA spec verification tool via `kya_validate_claims` (fetches issuer JWKS, verifies ES256 signatures, enforces claim shape, audience/environment binding, and jti replay protection)
+- Built-in KYA spec minting tool via `generate_kya_token` (signs KYA / PAY / KYA-PAY JWTs with a persistent P-256 keypair; public half published at `/.well-known/jwks.json`)
+- Optional KYA inbound enforcement at `POST /a2a` via the `KYA_INBOUND_POLICY` env var (`off` | `opportunistic` | `required`)
 - Railway-friendly observability: structured JSON logs from the agent server plus forwarded Hermes harness log files
 
 ## How it works
@@ -106,6 +109,17 @@ The bundled public Radius-facing skills include the template-owned skills plus a
 - *"Send a task to https://<other-agent>/a2a asking it to introduce itself."*
 - *"Use the outbound A2A tool to ask the peer agent what skills it has."*
 - *"Continue the existing A2A conversation with the peer agent and ask for a status update."*
+
+### KYA / KYAPay spec workflows
+
+- *"Verify this `kya+jwt` token from another agent against expected audience `swaps.radius.xyz`."*
+- *"Validate this KYA-PAY JWT and tell me whether the signature checks against the issuer JWKS."*
+- *"Check this KYA token but only accept it if the issuer is in our trusted allowlist."*
+- *"Validate this KYA token with replay protection disabled — I just want to inspect the claims."*
+- *"Mint a KYA token for audience https://peer.example so I can prove identity to that agent."*
+- *"Generate a kya-pay token paying 0.50 USD to https://swaps.radius.xyz with stp=coin."*
+- *"What URL should other agents use to fetch our JWKS?"* (Answer: `${PUBLIC_URL}/.well-known/jwks.json`)
+- *"Turn on KYA-required mode for inbound A2A requests."* (Set `KYA_INBOUND_POLICY=required` in Railway.)
 
 ### ERC-8004 registration workflows
 
