@@ -2,16 +2,19 @@ from telethon import TelegramClient
 import os
 import asyncio
 
-api_id = int(os.environ.get("API_ID", 0))
-api_hash = os.environ.get("API_HASH", "")
+# Fetch from Env Vars set in Railway
+api_id = os.environ.get("API_ID")
+api_hash = os.environ.get("API_HASH")
 
 async def main():
     if not api_id or not api_hash:
-        print("Error: API_ID and API_HASH not set.")
+        print("CRITICAL: API_ID or API_HASH not found in environment!")
         return
 
-    client = TelegramClient('/data/userbot', api_id, api_hash)
-    print("Userbot initializing...")
+    # Use /data/userbot.session for persistence in the volume
+    client = TelegramClient('/data/userbot.session', int(api_id), api_hash)
+    
+    print("Userbot starting...")
     await client.start()
     print("Userbot is running!")
     await client.run_until_disconnected()
