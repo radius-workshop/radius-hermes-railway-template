@@ -26,7 +26,8 @@ RUN pip install --no-cache-dir \
   "httpx>=0.25.0" \
   "a2a-sdk>=0.3.0" \
   "web3>=6.0.0" \
-  "requests>=2.28.0"
+  "requests>=2.28.0" \
+"ruamel.yaml"
 
 
 FROM python:3.11-slim
