@@ -39,6 +39,8 @@ railway link
 
 # 3. Set required env vars (at minimum: a provider + a platform)
 railway variables --set ANTHROPIC_API_KEY=sk-ant-...
+railway variables --set HERMES_INFERENCE_PROVIDER=anthropic
+railway variables --set LLM_MODEL=<anthropic-model-id>   # the default model is an OpenRouter/OpenAI ID
 railway variables --set TELEGRAM_BOT_TOKEN=123456:ABC...
 
 # 4. Run the pre-deploy check, then deploy
@@ -150,7 +152,8 @@ Template defaults (already included in `railway.toml`):
 - `HERMES_HOME=/data/.hermes`
 - `HOME=/data`
 - `MESSAGING_CWD=/data/workspace`
-- `LLM_MODEL=openai/gpt-5.4-nano`
+
+If `LLM_MODEL` is not set, `scripts/entrypoint.sh` writes `openai/gpt-5.4-nano` as the model in `config.yaml`.
 
 ## Important: how to set variables in Railway
 
@@ -236,6 +239,19 @@ SLACK_ALLOWED_USERS=U01234ABCDE,U09876WXYZ
 ```
 
 To find your Telegram user ID, message [@userinfobot](https://t.me/userinfobot).
+
+### Slack in a shared channel
+
+When the bot sits in a channel with other people (and other bots), these upstream Hermes Slack variables keep it scoped. They are read by the Hermes gateway from the Railway environment:
+
+```
+SLACK_ALLOWED_CHANNELS=C0123456789          # only respond in these channel IDs (DMs are exempt)
+SLACK_STRICT_MENTION=true                   # every channel message needs a fresh @mention
+SLACK_IGNORE_OTHER_USER_MENTIONS=true       # skip messages that open by @mentioning someone else
+SLACK_ALLOW_BOTS=mentions                   # other bots can reach it only by @mentioning it
+```
+
+`SLACK_ALLOWED_USERS` still applies on top of these. See the [Hermes Slack docs](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/slack) for the full list.
 
 ### Provider selection
 
@@ -473,7 +489,7 @@ References:
 
 ## Agent server
 
-The FastAPI agent server lives in [scripts/agent_server](/Users/eriks/dev/radius/hermes-railway-template/scripts/agent_server) and owns:
+The FastAPI agent server lives in [scripts/agent_server](scripts/agent_server) and owns:
 
 - the public discovery endpoints under `/.well-known/*`
 - `did:web` identity and JWT auth
@@ -484,7 +500,7 @@ The FastAPI agent server lives in [scripts/agent_server](/Users/eriks/dev/radius
 
 The implementation details now live in the local agent-server README:
 
-- [scripts/agent_server/README.md](/Users/eriks/dev/radius/hermes-railway-template/scripts/agent_server/README.md)
+- [scripts/agent_server/README.md](scripts/agent_server/README.md)
 
 That file contains:
 
@@ -579,12 +595,15 @@ At runtime, gateway sessions start in `MESSAGING_CWD` (`/data/workspace` by defa
 
 ### System prompt
 
-Set `HERMES_SYSTEM_PROMPT` in Railway Variables to give the agent a persistent identity and behavior context:
+Upstream Hermes does not read a `HERMES_SYSTEM_PROMPT` variable. To give the agent a persistent identity and behavior context, edit `HERMES.md` in your fork (it is force-copied into the workspace on every boot), or add per-channel prompts under `slack.channel_prompts` in `${HERMES_HOME}/config.yaml`:
 
-```
-You are a helpful assistant with a built-in Radius Testnet wallet. You can check
-balances, send SBC tokens, and help users interact with the Radius blockchain.
-Always confirm with the user before sending tokens.
+```yaml
+slack:
+  channel_prompts:
+    "C0123456789": |
+      You are a helpful assistant with a built-in Radius Testnet wallet. You can check
+      balances, send SBC tokens, and help users interact with the Radius blockchain.
+      Always confirm with the user before sending tokens.
 ```
 
 ## Simple usage guide

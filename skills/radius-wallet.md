@@ -120,7 +120,7 @@ Output is JSON with `tx_hash` and `status`. Share the tx hash and the explorer l
 
 4. **"Send X SBC to 0x..."** — confirm the recipient and amount with the user first, then use `radius_send_sbc`. Share the tx hash and explorer link.
 
-5. **"Fund wallet" / "get testnet tokens"** — explain that funding happens automatically on first boot. If needed, the user can redeploy to trigger another faucet request, or use the Radius testnet faucet directly at https://testnet.radiustech.xyz.
+5. **"Fund wallet" / "get testnet tokens"** — explain that the faucet is requested automatically only on the wallet's first boot (when `${RADIUS_HOME}/initialized` does not exist yet). A redeploy does **not** request funds again, because the marker persists on the volume. To top up, use the `dripping-faucet` skill, the Radius testnet web faucet at https://testnet.radiustech.xyz/wallet, or have someone send SBC to the wallet address, plus a little RUSD for gas.
 
 ## Error handling
 

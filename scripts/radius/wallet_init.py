@@ -28,6 +28,22 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from chain import SBC_ADDRESS, SBC_DECIMALS, ERC20_ABI, FAUCET_BASE, format_units, create_web3
 
 
+# The faucet's only supported token symbol (see radius-skills dripping-faucet).
+FAUCET_TOKEN = "SBC"
+
+
+def _faucet_error(data: dict) -> tuple[str, str]:
+    """Return (code, message) from a faucet error body.
+
+    The faucet returns {"error": {"code", "message", ...}}; older responses used
+    a plain string in "error" with a sibling "message".
+    """
+    err = data.get("error")
+    if isinstance(err, dict):
+        return err.get("code", ""), err.get("message", "")
+    return err or "", data.get("message", "")
+
+
 def _radius_home() -> Path:
     hermes_home = os.environ.get("HERMES_HOME", "/data/.hermes")
     return Path(os.environ.get("RADIUS_HOME", str(Path(hermes_home) / ".radius-cli")))
@@ -86,7 +102,7 @@ def _persist_address(address: str) -> None:
 
 
 def get_challenge(addr: str) -> str:
-    res = requests.get(f"{FAUCET_BASE}/challenge/{addr}", params={"token": "***"}, timeout=15)
+    res = requests.get(f"{FAUCET_BASE}/challenge/{addr}", params={"token": FAUCET_TOKEN}, timeout=15)
     res.raise_for_status()
     data = res.json()
     return data.get("message") or data.get("challenge", "")
@@ -104,34 +120,40 @@ def drip_with_signature(addr: str, private_key: str) -> dict:
     signature = sign_message(private_key, message)
     res = requests.post(
         f"{FAUCET_BASE}/drip",
-        json={"address": addr, "token": "***", "signature": signature},
+        json={"address": addr, "token": FAUCET_TOKEN, "signature": signature},
         timeout=15,
     )
     data = res.json()
     if not res.ok:
-        raise RuntimeError(data.get("error") or data.get("message") or json.dumps(data))
+        code, message = _faucet_error(data)
+        raise RuntimeError(f"{code}: {message}" if code else json.dumps(data))
     return data
 
 
 def drip(addr: str, private_key: str):
     res = requests.post(
         f"{FAUCET_BASE}/drip",
-        json={"address": addr, "token": "***"},
+        json={"address": addr, "token": FAUCET_TOKEN},
         timeout=15,
     )
     data = res.json()
     if res.ok:
         return data
 
-    err_code = data.get("error", "")
+    err_code, err_message = _faucet_error(data)
     if err_code == "signature_required" or res.status_code == 401:
         print("[radius] Faucet requires signed request, signing challenge...")
         return drip_with_signature(addr, private_key)
     if err_code == "rate_limited":
-        retry_ms = data.get("retry_after_ms") or (data.get("retry_after_seconds", 0) * 1000)
+        err = data.get("error") if isinstance(data.get("error"), dict) else {}
+        retry_ms = (
+            err.get("retry_after_ms")
+            or data.get("retry_after_ms")
+            or (data.get("retry_after_seconds", 0) * 1000)
+        )
         print(f"[radius] Faucet rate-limited. Retry after {int(retry_ms / 1000)}s.")
         return None
-    raise RuntimeError(data.get("error") or data.get("message") or json.dumps(data))
+    raise RuntimeError(f"{err_code}: {err_message}" if err_code else json.dumps(data))
 
 
 def get_sbc_balance(addr: str, private_key: str) -> int:
