@@ -9,6 +9,7 @@ This repository is a batteries-included Hermes template. Treat the bundled files
 - `plugins/gen-jwt` provides the `generate_a2a_token` tool used for A2A bearer tokens.
 - `plugins/agent-info` provides the `get_agent_info` tool used to retrieve an agent's public discovery metadata.
 - `plugins/radius-cast` now packages the `radius-cli` wallet integration and provides Radius wallet tools for address lookup, balances, transfers, and tx status.
+- `plugins/x402` provides `x402_request`, `x402_catalog`, `x402_ledger`, and `x402_wallet_status` for paying x402 APIs on Radius (SBC, Permit2) and Base (USDC, EIP-3009) with a persistent payment ledger.
 - `plugins/godaddy-ans` provides GoDaddy Agent Name Service registry tools such as `godaddy_ans_search`, lookup, resolution, registration, and validation, plus the narrow `godaddy_dns_set_records` domain DNS record writer.
 - `scripts/radius/*` contains the built-in Radius wallet scripts.
 - `scripts/godaddy/*` contains GoDaddy ANS helper scripts behind the plugin tools.
@@ -17,6 +18,7 @@ This repository is a batteries-included Hermes template. Treat the bundled files
 ## Expected behavior
 
 - Prefer the built-in Radius capabilities when the user asks about payments, wallets, SBC, RUSD, Radius, or crypto flows.
+- For x402 / HTTP 402 paid APIs, read `skills/x402-payments.md` and use the `x402` plugin tools. Do not call `radius-cli wallet x402` directly or write signing code. Use grug402.dev for demos.
 - For GoDaddy domain search, availability, and suggestions, use the GoDaddy MCP tools. For setting DNS records on a known GoDaddy-managed domain, use `godaddy_dns_set_records`.
 - For GoDaddy ANS / Agent Name Service registry search, lookup, resolution, registration, or validation, use the bundled `godaddy-ans` plugin tools. Do not fall back to terminal scripts, package installs, or environment-secret inspection for normal ANS work.
 - Default GoDaddy ANS API calls to production. Use OTE only when the operator explicitly asks for it or sets `GODADDY_ANS_ENV=ote`.

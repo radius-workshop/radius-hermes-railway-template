@@ -196,13 +196,14 @@ for key in \
   OPENROUTER_API_KEY OPENAI_API_KEY OPENAI_BASE_URL ANTHROPIC_API_KEY LLM_MODEL HERMES_INFERENCE_PROVIDER HERMES_PORTAL_BASE_URL NOUS_INFERENCE_BASE_URL HERMES_NOUS_MIN_KEY_TTL_SECONDS HERMES_DUMP_REQUESTS \
   TELEGRAM_BOT_TOKEN TELEGRAM_ALLOWED_USERS TELEGRAM_ALLOW_ALL_USERS TELEGRAM_HOME_CHANNEL TELEGRAM_HOME_CHANNEL_NAME \
   DISCORD_BOT_TOKEN DISCORD_ALLOWED_USERS DISCORD_ALLOW_ALL_USERS DISCORD_HOME_CHANNEL DISCORD_HOME_CHANNEL_NAME DISCORD_REQUIRE_MENTION DISCORD_FREE_RESPONSE_CHANNELS \
-  SLACK_BOT_TOKEN SLACK_APP_TOKEN SLACK_ALLOWED_USERS SLACK_ALLOW_ALL_USERS SLACK_HOME_CHANNEL SLACK_HOME_CHANNEL_NAME WHATSAPP_ENABLED WHATSAPP_ALLOWED_USERS \
+  SLACK_BOT_TOKEN SLACK_APP_TOKEN SLACK_ALLOWED_USERS SLACK_ALLOW_ALL_USERS SLACK_HOME_CHANNEL SLACK_HOME_CHANNEL_NAME SLACK_ALLOWED_CHANNELS SLACK_STRICT_MENTION SLACK_IGNORE_OTHER_USER_MENTIONS SLACK_ALLOW_BOTS WHATSAPP_ENABLED WHATSAPP_ALLOWED_USERS \
   GATEWAY_ALLOW_ALL_USERS \
   FIRECRAWL_API_KEY NOUS_API_KEY BROWSERBASE_API_KEY BROWSERBASE_PROJECT_ID BROWSERBASE_PROXIES BROWSERBASE_ADVANCED_STEALTH BROWSER_SESSION_TIMEOUT BROWSER_INACTIVITY_TIMEOUT FAL_KEY ELEVENLABS_API_KEY VOICE_TOOLS_OPENAI_KEY \
   TINKER_API_KEY WANDB_API_KEY RL_API_URL GITHUB_TOKEN BYTEROVER_API_KEY BYTEROVER_LOCAL LINEAR_API_KEY LINEAR_TEAM_ID LINEAR_PROJECT_ID \
   TERMINAL_BACKEND TERMINAL_DOCKER_IMAGE TERMINAL_SINGULARITY_IMAGE TERMINAL_MODAL_IMAGE TERMINAL_CWD TERMINAL_TIMEOUT TERMINAL_LIFETIME_SECONDS TERMINAL_CONTAINER_CPU TERMINAL_CONTAINER_MEMORY TERMINAL_CONTAINER_DISK TERMINAL_CONTAINER_PERSISTENT TERMINAL_SANDBOX_DIR TERMINAL_SSH_HOST TERMINAL_SSH_USER TERMINAL_SSH_PORT TERMINAL_SSH_KEY SUDO_PASSWORD \
   WEB_TOOLS_DEBUG VISION_TOOLS_DEBUG MOA_TOOLS_DEBUG IMAGE_TOOLS_DEBUG CONTEXT_COMPRESSION_ENABLED CONTEXT_COMPRESSION_THRESHOLD CONTEXT_COMPRESSION_MODEL HERMES_MAX_ITERATIONS HERMES_TOOL_PROGRESS HERMES_TOOL_PROGRESS_MODE \
   RADIUS_HOME RADIUS_WALLET_ADDRESS RADIUS_NETWORK RADIUS_RPC_URL RADIUS_SBC_ADDRESS RADIUS_CHAIN_ID RADIUS_EXPLORER_URL RADIUS_CLI_BIN RADIUS_AUTO_FUND \
+  X402_MAX_PER_CALL X402_ALLOW_MAINNET X402_DEMO_BASE_URL X402_LEDGER_PATH \
   ERC8004_NETWORK ERC8004_TESTNET_RPC_URL ERC8004_TESTNET_REGISTRY ERC8004_TESTNET_EXPLORER_URL ERC8004_TESTNET_CHAIN_ID ERC8004_MAINNET_RPC_URL ERC8004_MAINNET_REGISTRY ERC8004_MAINNET_EXPLORER_URL ERC8004_MAINNET_CHAIN_ID ERC8004_GAS_LIMIT ERC8004_MAX_AGENT_URI_BYTES \
   AGENT_NAME AGENT_DESCRIPTION AGENT_IMAGE AGENT_ACTIVE AGENT_X402_SUPPORT AGENT_SUPPORTED_TRUST AGENT_A2A_VERSION AGENT_ERC8004_ID AGENT_ERC8004_REGISTRY AGENT_ANS_NAME AGENT_ANS_AGENT_ID AGENT_ANS_HOST AGENT_ANS_STATUS AGENT_WALLET AGENT_EMAIL AGENT_ENS \
   WEBHOOK_PORT WEBHOOK_SECRET DEBUG_SKILLS \
@@ -486,6 +487,57 @@ if added_toolsets or added_plugins or removed_disabled_plugins:
 else:
     print("[bootstrap] Bundled plugins and toolsets already enabled.")
 PYEOF
+
+# === shared-workspace hardening: re-applied from env on every boot ===
+# HERMES_DISABLED_TOOLSETS   comma list -> agent.disabled_toolsets (e.g. terminal,file,code_execution); "none" clears it
+# HERMES_BACKGROUND_REVIEW   true|false -> auxiliary.background_review.enabled
+# HERMES_MEMORY_NOTIFICATIONS off|on|verbose -> display.memory_notifications
+if [[ -n "${HERMES_DISABLED_TOOLSETS+x}" || -n "${HERMES_BACKGROUND_REVIEW:-}" || -n "${HERMES_MEMORY_NOTIFICATIONS:-}" ]]; then
+  echo "[bootstrap] Applying shared-workspace settings to config.yaml..."
+  python3 - <<'PYEOF'
+import os
+from pathlib import Path
+
+import yaml
+
+cfg_file = Path(os.environ["HERMES_HOME"]) / "config.yaml"
+try:
+    with cfg_file.open() as f:
+        cfg = yaml.safe_load(f) or {}
+except Exception:
+    cfg = {}
+
+def section(name):
+    value = cfg.get(name)
+    if not isinstance(value, dict):
+        value = {}
+        cfg[name] = value
+    return value
+
+if "HERMES_DISABLED_TOOLSETS" in os.environ:
+    # "none" (or empty) clears the list, re-enabling everything a previous boot disabled.
+    disabled = [t.strip() for t in os.environ["HERMES_DISABLED_TOOLSETS"].split(",")
+                if t.strip() and t.strip().lower() != "none"]
+    section("agent")["disabled_toolsets"] = disabled
+    print(f"[bootstrap] agent.disabled_toolsets = {disabled}")
+
+review = os.environ.get("HERMES_BACKGROUND_REVIEW", "").strip().lower()
+if review:
+    aux = section("auxiliary")
+    br = aux.get("background_review") if isinstance(aux.get("background_review"), dict) else {}
+    br["enabled"] = review in {"1", "true", "yes", "on"}
+    aux["background_review"] = br
+    print(f"[bootstrap] auxiliary.background_review.enabled = {br['enabled']}")
+
+notifications = os.environ.get("HERMES_MEMORY_NOTIFICATIONS", "").strip().lower()
+if notifications:
+    section("display")["memory_notifications"] = notifications
+    print(f"[bootstrap] display.memory_notifications = {notifications}")
+
+with cfg_file.open("w") as f:
+    yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
+PYEOF
+fi
 
 # === vendored skills: persist Radius external directory and discover skill roots ===
 RADIUS_SKILLS_DIR="${RADIUS_SKILLS_DIR:-/data/.hermes/external-skills/radius-skills}"
