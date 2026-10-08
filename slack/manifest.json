@@ -1,0 +1,69 @@
+{
+  "_metadata": {
+    "major_version": 1,
+    "minor_version": 1
+  },
+  "display_information": {
+    "name": "Radius Agent",
+    "description": "Dogfood agent for x402 APIs and EVM wallet ops on Radius and Base, with an on-chain paper trail.",
+    "background_color": "#0b1f3a",
+    "long_description": "Radius Agent is a Hermes agent deployed on Railway for the Radius team to dogfood agentic commerce. Mention it in #initiative-agentic-commerce-platform or DM it to: call and pay x402 APIs (demo catalog at grug402.dev) on Radius Testnet (SBC, Permit2) and Base Sepolia (USDC, EIP-3009); check wallet balances and send SBC; look up transaction status; and pull a ledger of every payment attempt with explorer links. Mainnet payments are disabled by default and every call is capped per request."
+  },
+  "features": {
+    "app_home": {
+      "home_tab_enabled": false,
+      "messages_tab_enabled": true,
+      "messages_tab_read_only_enabled": false
+    },
+    "bot_user": {
+      "display_name": "radius-agent",
+      "always_online": true
+    },
+    "agent_view": {
+      "agent_description": "Pay x402 APIs and run wallet ops on Radius and Base."
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "assistant:write",
+        "channels:history",
+        "channels:read",
+        "chat:write",
+        "files:read",
+        "files:write",
+        "groups:history",
+        "groups:read",
+        "im:history",
+        "im:read",
+        "im:write",
+        "mpim:history",
+        "mpim:read",
+        "reactions:read",
+        "users:read"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "bot_events": [
+        "app_context_changed",
+        "app_home_opened",
+        "app_mention",
+        "message.channels",
+        "message.groups",
+        "message.im",
+        "message.mpim",
+        "reaction_added",
+        "reaction_removed"
+      ]
+    },
+    "interactivity": {
+      "is_enabled": true
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": true,
+    "token_rotation_enabled": false
+  }
+}

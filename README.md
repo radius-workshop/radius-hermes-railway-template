@@ -288,6 +288,41 @@ The bundled wallet tools are backed by `radius-cli` and use a local persistent k
 - The same local wallet is used for wallet actions, DID/JWT auth, homepage wallet summary, and ERC-8004 identity.
 - Para-backed wallet provider support is removed in this template revision.
 
+## x402 payments
+
+The bundled `x402` plugin lets the agent pay HTTP 402 / [x402](https://x402.org) APIs from its own wallet. It reads the network from the server's 402 challenge and picks the signer to match:
+
+| Network | Asset | Signing |
+|---|---|---|
+| Radius Testnet (default) | SBC | Permit2 via `radius-cli wallet x402` (EIP-2612 sponsored, one-time Permit2 approval if the facilitator asks) |
+| Base Sepolia | USDC | EIP-3009 `TransferWithAuthorization`, same wallet key, no ETH needed |
+| Radius Mainnet / Base | USDC | refused unless `X402_ALLOW_MAINNET=true` |
+
+Tools: `x402_catalog` (demo endpoints from [grug402.dev](https://grug402.dev)), `x402_request` (call + pay, supports `dry_run`), `x402_ledger` (paper trail), `x402_wallet_status` (balances per network).
+
+Every attempt, including refusals and failures, is appended to `${HERMES_HOME}/x402/ledger.jsonl` on the volume with the requester, memo, amount, network, and settlement tx. `X402_MAX_PER_CALL` (default `0.01`) is a hard per-call cap.
+
+To pay on Base Sepolia, fund the wallet address (`x402_wallet_status`) with test USDC from https://faucet.circle.com.
+
+Try: *"Show me three x402 demo APIs"*, *"Buy the weather on Radius and on Base Sepolia and compare"*, *"Show the x402 ledger"*.
+
+## Slack app from code (Slack CLI)
+
+`slack/manifest.json` is the Slack app definition (Socket Mode, agent view, the scopes and events Hermes needs). It was generated with `hermes slack manifest --agent-view`, with the generic slash commands removed so they don't collide with other apps in a shared workspace. Create or update the app with the [Slack CLI](https://docs.slack.dev/tools/slack-cli/):
+
+```bash
+brew install --cask slack-cli
+slack login
+cd slack && slack install        # creates the app from manifest.json and installs it
+```
+
+Then in https://api.slack.com/apps → your app:
+
+1. **Basic Information → App-Level Tokens**: generate one with `connections:write` → `SLACK_APP_TOKEN` (`xapp-…`).
+2. **OAuth & Permissions**: copy the Bot User OAuth Token → `SLACK_BOT_TOKEN` (`xoxb-…`).
+
+Set both on the Railway service, deploy, and `/invite @Radius Agent` in the channel. Re-run `slack install` after editing the manifest.
+
 ## ERC-8004 registry tools
 
 This template now includes a bundled `erc8004-registry` plugin plus a lightweight `registering-agent` skill.

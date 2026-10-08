@@ -1,6 +1,8 @@
 FROM python:3.11-slim AS builder
 
-ARG HERMES_GIT_REF=main
+# Pin to a Hermes release tag: upstream main can move to deps the 3.11 base image cannot install.
+# Override per service with a HERMES_GIT_REF build variable in Railway.
+ARG HERMES_GIT_REF=v2026.9.24
 
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \

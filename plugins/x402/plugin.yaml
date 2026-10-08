@@ -1,0 +1,10 @@
+name: x402
+version: "1.0.0"
+description: "Pay x402 (HTTP 402) APIs from the agent wallet on Radius and Base, with a persistent payment ledger"
+provides_tools:
+  - x402_catalog
+  - x402_request
+  - x402_ledger
+  - x402_wallet_status
+toolsets:
+  - x402

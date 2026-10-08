@@ -10,3 +10,7 @@ __pycache__/
 node_modules/
 dist/
 build/
+
+# Slack CLI per-workspace app bindings
+slack/.slack/apps*.json
+slack/.slack/cache/
