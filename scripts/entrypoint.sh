@@ -489,7 +489,7 @@ else:
 PYEOF
 
 # === shared-workspace hardening: re-applied from env on every boot ===
-# HERMES_DISABLED_TOOLSETS   comma list -> agent.disabled_toolsets (e.g. terminal,file,code_execution)
+# HERMES_DISABLED_TOOLSETS   comma list -> agent.disabled_toolsets (e.g. terminal,file,code_execution); "none" clears it
 # HERMES_BACKGROUND_REVIEW   true|false -> auxiliary.background_review.enabled
 # HERMES_MEMORY_NOTIFICATIONS off|on|verbose -> display.memory_notifications
 if [[ -n "${HERMES_DISABLED_TOOLSETS+x}" || -n "${HERMES_BACKGROUND_REVIEW:-}" || -n "${HERMES_MEMORY_NOTIFICATIONS:-}" ]]; then
@@ -515,7 +515,9 @@ def section(name):
     return value
 
 if "HERMES_DISABLED_TOOLSETS" in os.environ:
-    disabled = [t.strip() for t in os.environ["HERMES_DISABLED_TOOLSETS"].split(",") if t.strip()]
+    # "none" (or empty) clears the list, re-enabling everything a previous boot disabled.
+    disabled = [t.strip() for t in os.environ["HERMES_DISABLED_TOOLSETS"].split(",")
+                if t.strip() and t.strip().lower() != "none"]
     section("agent")["disabled_toolsets"] = disabled
     print(f"[bootstrap] agent.disabled_toolsets = {disabled}")
 
