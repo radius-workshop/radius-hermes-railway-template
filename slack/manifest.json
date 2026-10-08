@@ -41,6 +41,7 @@
         "mpim:history",
         "mpim:read",
         "reactions:read",
+        "reactions:write",
         "users:read"
       ]
     }

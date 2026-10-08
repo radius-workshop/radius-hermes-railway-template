@@ -488,6 +488,55 @@ else:
     print("[bootstrap] Bundled plugins and toolsets already enabled.")
 PYEOF
 
+# === shared-workspace hardening: re-applied from env on every boot ===
+# HERMES_DISABLED_TOOLSETS   comma list -> agent.disabled_toolsets (e.g. terminal,file,code_execution)
+# HERMES_BACKGROUND_REVIEW   true|false -> auxiliary.background_review.enabled
+# HERMES_MEMORY_NOTIFICATIONS off|on|verbose -> display.memory_notifications
+if [[ -n "${HERMES_DISABLED_TOOLSETS+x}" || -n "${HERMES_BACKGROUND_REVIEW:-}" || -n "${HERMES_MEMORY_NOTIFICATIONS:-}" ]]; then
+  echo "[bootstrap] Applying shared-workspace settings to config.yaml..."
+  python3 - <<'PYEOF'
+import os
+from pathlib import Path
+
+import yaml
+
+cfg_file = Path(os.environ["HERMES_HOME"]) / "config.yaml"
+try:
+    with cfg_file.open() as f:
+        cfg = yaml.safe_load(f) or {}
+except Exception:
+    cfg = {}
+
+def section(name):
+    value = cfg.get(name)
+    if not isinstance(value, dict):
+        value = {}
+        cfg[name] = value
+    return value
+
+if "HERMES_DISABLED_TOOLSETS" in os.environ:
+    disabled = [t.strip() for t in os.environ["HERMES_DISABLED_TOOLSETS"].split(",") if t.strip()]
+    section("agent")["disabled_toolsets"] = disabled
+    print(f"[bootstrap] agent.disabled_toolsets = {disabled}")
+
+review = os.environ.get("HERMES_BACKGROUND_REVIEW", "").strip().lower()
+if review:
+    aux = section("auxiliary")
+    br = aux.get("background_review") if isinstance(aux.get("background_review"), dict) else {}
+    br["enabled"] = review in {"1", "true", "yes", "on"}
+    aux["background_review"] = br
+    print(f"[bootstrap] auxiliary.background_review.enabled = {br['enabled']}")
+
+notifications = os.environ.get("HERMES_MEMORY_NOTIFICATIONS", "").strip().lower()
+if notifications:
+    section("display")["memory_notifications"] = notifications
+    print(f"[bootstrap] display.memory_notifications = {notifications}")
+
+with cfg_file.open("w") as f:
+    yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
+PYEOF
+fi
+
 # === vendored skills: persist Radius external directory and discover skill roots ===
 RADIUS_SKILLS_DIR="${RADIUS_SKILLS_DIR:-/data/.hermes/external-skills/radius-skills}"
 RADIUS_SKILLS_BOOTSTRAP_FROM_IMAGE="${RADIUS_SKILLS_BOOTSTRAP_FROM_IMAGE:-true}"

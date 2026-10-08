@@ -253,6 +253,18 @@ SLACK_ALLOW_BOTS=mentions                   # other bots can reach it only by @m
 
 `SLACK_ALLOWED_USERS` still applies on top of these. See the [Hermes Slack docs](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/slack) for the full list.
 
+### Opening the bot to a whole workspace
+
+The agent has shell and file tools and runs as root, and `/data/.hermes/.env` holds the wallet key and API keys. Before allowing everyone (`SLACK_ALLOW_ALL_USERS=true`), turn those tools off. The wallet, x402, A2A, and ERC-8004 tools are plugins and keep working:
+
+```
+HERMES_DISABLED_TOOLSETS=terminal,file,code_execution,delegation,cronjob
+HERMES_BACKGROUND_REVIEW=false        # no automatic memory writes about every user
+HERMES_MEMORY_NOTIFICATIONS=off       # no "💾 Memory updated" lines in channels
+```
+
+These are written into `config.yaml` on every boot, so Railway Variables stay the source of truth. Also give the service its own LLM API key with a spend limit.
+
 ### Provider selection
 
 If you set multiple provider keys, pin which one Hermes uses:
