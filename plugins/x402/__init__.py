@@ -658,6 +658,49 @@ def register(ctx):
         },
         handler=_wrap(x402_ledger),
     )
+    def x402_benchmark(params):
+        from .benchmark import x402_benchmark as run  # lazy: pulls in the x402 SDK
+
+        return run(params)
+
+    ctx.register_tool(
+        name="x402_benchmark",
+        toolset="x402",
+        schema={
+            "name": "x402_benchmark",
+            "description": (
+                "Benchmark real x402 payments across networks with per-call timing (challenge, sign, paid) "
+                "at one or more concurrency levels. Defaults to the same grug402 scenario on Radius Testnet "
+                "and Base Sepolia so only the rail differs. Quotes first and refuses if the estimated spend "
+                "exceeds `budget`. Every payment is written to the ledger; the full per-call report is saved as JSON. "
+                "Use this instead of looping x402_request for any latency or throughput comparison."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "networks": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "Networks to compare: radius-testnet, base-sepolia, radius-mainnet, base. Default radius-testnet + base-sepolia.",
+                    },
+                    "scenario": {"type": "string", "description": "grug402 scenario id used on every network (default weather-now)."},
+                    "urls": {
+                        "type": "object",
+                        "description": "Optional explicit URL per network key, e.g. {\"base\": \"https://...\"}; overrides scenario.",
+                    },
+                    "calls": {"type": "integer", "description": "Paid calls per network per concurrency level (default 10, max 100)."},
+                    "concurrency": {
+                        "type": "array", "items": {"type": "integer"},
+                        "description": "Concurrency levels to run, e.g. [1, 5, 10] (default [1, 5], max 25).",
+                    },
+                    "budget": {"type": "string", "description": "Hard cap on total estimated spend in stablecoin units across networks (default 0.05)."},
+                    "warmup": {"type": "boolean", "description": "Run one untimed paid call per network first (default true)."},
+                    "requested_by": {"type": "string", "description": "Who asked for it (e.g. Slack user); stored in the ledger."},
+                },
+                "required": [],
+            },
+        },
+        handler=_wrap(x402_benchmark),
+    )
     ctx.register_tool(
         name="x402_wallet_status",
         toolset="x402",

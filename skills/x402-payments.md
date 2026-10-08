@@ -23,6 +23,7 @@ This agent can pay for HTTP APIs that answer `402 Payment Required` with an x402
 | `x402_request({ url, method, body, headers, network, max_amount, memo, requested_by, dry_run })` | Call an endpoint, pay the 402 if needed, return the body and settlement tx. |
 | `x402_ledger({ limit, outcome })` | Read the persistent payment ledger with paid totals. |
 | `x402_wallet_status()` | Wallet address and payment-asset balances per network, plus funding hints. |
+| `x402_benchmark({ networks, scenario, urls, calls, concurrency, budget, warmup, requested_by })` | Timed, concurrent payment benchmark across networks. Use for any latency, throughput, or "Radius vs Base" comparison. |
 
 Do not shell out to `radius-cli wallet x402` or write signing code; `x402_request` already routes Radius payments through radius-cli (Permit2) and signs Base payments as EIP-3009.
 
@@ -63,6 +64,29 @@ Follow the Slack formatting rules in `HERMES.md`. A single paid call looks like 
 • For a quote (`dry_run`), use 🧾 and say nothing was charged. For `refused`, use ⛔ and name the guardrail. For `payment_failed`/`error`, use ⚠️ with the plain-language cause and fix.
 • For a multi-network comparison, use one line per network: "**Base Sepolia** · 0.0001 USDC · ✅ · [tx 0x…](url)".
 • Leave out payTo, asset contract, atomic amounts, CAIP ids, and the raw challenge unless the user asks for "details" or "debug".
+
+## Benchmarks
+
+Always use `x402_benchmark` for speed or scale comparisons. Never loop `x402_request` and read ledger timestamps: those intervals are mostly your own thinking time between tool calls.
+
+• Default: the same grug402 scenario on Radius Testnet and Base Sepolia, so only the rail differs. Start with `calls: 10, concurrency: [1, 5]`, then go up if asked.
+• Before running, state the plan in one line (networks, calls × levels, estimated spend). Testnet-only runs under the default budget need no confirmation. Ask first if any network is mainnet or the budget is above 0.05.
+• For mainnet, pass `urls` per network. Say clearly when the sellers differ, because then the comparison is not apples to apples.
+• If the tool refuses for budget or balance, relay the reason and the fix. Don't retry around it.
+
+Report format:
+
+```
+⚡ **Radius Testnet vs Base Sepolia** · `weather-now` · 10 calls × c1/c5
+• **Radius Testnet** · c1 p50 0.94s / p95 1.05s · c5 p50 2.1s · 1.35 paid/s · 10/10 ✅
+• **Base Sepolia** · c1 p50 …s / p95 …s · c5 p50 …s · … paid/s · 10/10 ✅
+• **Spend:** 0.001 SBC + 0.001 USDC · sample [tx 0x…](url)
+Takeaway: <one sentence on what differs, citing paid_ms p50 at c1 and how it changes under concurrency>
+```
+
+• `paid_ms` is the headline (verify + settle + response). Mention `sign_ms` only if it is large.
+• Include the caveats from the tool's `notes` only when someone draws a strong conclusion: one wallet, different facilitators, and end-to-end time rather than block time.
+• Mention that the full per-call JSON was saved (`report_path`) and the payments are in the ledger.
 
 ## Guardrails
 

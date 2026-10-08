@@ -6,5 +6,6 @@ provides_tools:
   - x402_request
   - x402_ledger
   - x402_wallet_status
+  - x402_benchmark
 toolsets:
   - x402

@@ -28,6 +28,7 @@ RUN pip install --no-cache-dir \
   "httpx>=0.25.0" \
   "a2a-sdk>=0.3.0" \
   "web3>=6.0.0" \
+  "x402[evm,extensions]==2.25.0" \
   "requests>=2.28.0"
 
 
