@@ -38,10 +38,8 @@ class A2ACompatTests(unittest.TestCase):
                 self.assertTrue(payload["message"])
 
     def test_a2a_root_error_wrapper_is_unwrapped_when_present(self) -> None:
-        try:
-            from a2a.types import A2AError
-        except Exception:
-            self.skipTest("a2a-sdk is not installed")
+        # The pinned SDK is required in CI; API drift must fail this check.
+        from a2a.types import A2AError
 
         wrapped = A2AError(root=a2a_compat.JSONParseError(message="Parse error"))
 

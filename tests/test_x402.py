@@ -178,7 +178,7 @@ class PaymentBoundaryTests(unittest.TestCase):
 
     def test_cli_040_arguments_are_bounded_without_approval_or_file_reads(self):
         with patch.object(x, '_run_radius_cli', return_value={}) as run:
-            x._pay_radius_cli('GET', self.params['url'], {}, None, x.Decimal('0.001'))
+            x._pay_radius_cli('GET', self.params['url'], {}, None, x.Decimal('0.001'), offer())
         args = run.call_args.args[0]
         self.assertEqual(args[args.index('wallet')+1], 'pay')
         self.assertEqual(args[args.index('--protocol')+1], 'x402')
@@ -186,6 +186,7 @@ class PaymentBoundaryTests(unittest.TestCase):
         self.assertEqual(args[args.index('--threshold')+1], '0.001')
         self.assertNotIn('--approve-permit2', args)
         self.assertNotIn('-y', args)
+        self.assertEqual(run.call_args.kwargs['expected_offer'], offer())
 
     @unittest.skipUnless(NODE, 'Node runtime required for CLI fetch guard test')
     def test_node_guard_blocks_redirects_changed_urls_and_private_dns(self):
@@ -223,6 +224,7 @@ https.request = (url, options, callback) => {
 syncBuiltinESMExports();
 globalThis.fetch = () => { throw new Error('native fetch must never resolve the hostname again'); };
 process.env.HERMES_X402_TARGET = 'https://seller.example/paid';
+process.env.HERMES_X402_EXPECTED_OFFER = JSON.stringify({scheme:'exact', network:'eip155:72344'});
 (async () => {
   await import(process.argv[1]);
   const response = await fetch('https://seller.example/paid');
@@ -234,6 +236,80 @@ process.env.HERMES_X402_TARGET = 'https://seller.example/paid';
   await assert.rejects(fetch('https://seller.example/paid'));
   assert.equal(calls.length, 1);
 })().catch(e => { console.error(e); process.exitCode = 1; });
+"""
+        proc = subprocess.run([NODE, '-e', script, guard], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_inspected_offer_is_passed_to_guard_before_cli_launch(self):
+        result = Mock(stdout='{"status":200}', returncode=0)
+        with patch.dict(os.environ, {'RADIUS_CLI_BIN': '/installed/radius-cli'}), \
+                patch.object(x.subprocess, 'run', return_value=result) as run:
+            x._run_radius_cli(['--json'], target_url=self.params['url'], expected_offer=offer())
+        self.assertEqual(json.loads(run.call_args.kwargs['env']['HERMES_X402_EXPECTED_OFFER']), offer())
+        self.assertIn('fetch-guard.mjs', run.call_args.kwargs['env']['NODE_OPTIONS'])
+        with patch.dict(os.environ, {'RADIUS_CLI_BIN': '/installed/radius-cli'}), \
+                patch.object(x.subprocess, 'run') as run:
+            with self.assertRaises(x.X402Error):
+                x._run_radius_cli(['--json'], target_url=self.params['url'])
+            run.assert_not_called()
+
+    @unittest.skipUnless(NODE, 'Node runtime required for challenge binding test')
+    def test_repeated_quote_cannot_swap_recipient_before_signing(self):
+        guard = (ROOT / 'plugins/x402/fetch-guard.mjs').as_uri()
+        script = r"""
+const assert = require('node:assert/strict');
+const dns = require('node:dns/promises');
+const https = require('node:https');
+const { EventEmitter } = require('node:events');
+const { PassThrough } = require('node:stream');
+const { syncBuiltinESMExports } = require('node:module');
+dns.lookup = async () => [{address:'8.8.8.8', family:4}];
+const expected = {scheme:'exact', network:'eip155:72344', asset:'0x'+'a'.repeat(40),
+  amount:'100', payTo:'0x'+'1'.repeat(40), maxTimeoutSeconds:60, extra:{assetTransferMethod:'permit2'}};
+const swapped = {...expected, payTo:'0x'+'2'.repeat(40)};
+let offers = [swapped];
+let headerChallenge = false;
+let calls = 0;
+let signed = 0;
+https.request = (_url, _options, callback) => {
+  calls++;
+  const req = new EventEmitter();
+  req.end = () => {
+    const challenge = {x402Version:2, accepts:offers, resource:{url:'https://seller.example/paid'}, extensions:{unchanged:true}};
+    const body = JSON.stringify(challenge);
+    const res = new PassThrough();
+    Object.assign(res, {statusCode:402, statusMessage:'Payment Required', headers:headerChallenge
+      ? {'payment-required':Buffer.from(body).toString('base64')} : {}});
+    callback(res); res.end(body);
+  };
+  return req;
+};
+syncBuiltinESMExports();
+process.env.HERMES_X402_TARGET = 'https://seller.example/paid';
+process.env.HERMES_X402_EXPECTED_OFFER = JSON.stringify(expected);
+async function cliFlow() {
+  await fetch('https://seller.example/paid'); // CLI cannot reach its signer until this succeeds.
+  signed++;
+  await fetch('https://seller.example/paid', {headers:{'payment-signature':'signed'}});
+}
+(async () => {
+  await import(process.argv[1]);
+  for (const asHeader of [false, true]) {
+    headerChallenge = asHeader;
+    const before = calls;
+    await assert.rejects(cliFlow(), /offer changed/);
+    assert.equal(signed, 0);
+    assert.equal(calls, before + 1); // No signed payment retry or RPC request.
+  }
+  offers = [swapped, {...expected, asset:expected.asset.toUpperCase().replace('0X','0x')}];
+  const response = await fetch('https://seller.example/paid');
+  const bound = await response.json();
+  assert.equal(bound.accepts.length, 1);
+  assert.equal(bound.accepts[0].payTo, expected.payTo);
+  assert.equal(bound.resource.url, 'https://seller.example/paid');
+  assert.equal(bound.extensions.unchanged, true);
+  assert.deepEqual(JSON.parse(Buffer.from(response.headers.get('payment-required'), 'base64')), bound);
+})().catch(error => {console.error(error); process.exitCode = 1;});
 """
         proc = subprocess.run([NODE, '-e', script, guard], capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stderr)

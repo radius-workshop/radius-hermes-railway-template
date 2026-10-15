@@ -15,14 +15,23 @@ def register(ctx):
         ),
         "parameters": {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "audience": {
+                    "type": "string",
+                    "description": "Optional recipient bare DID; binds the token to that agent. Omit for older peers.",
+                },
+            },
             "required": [],
         },
     }
 
     def handle(params, **kwargs):
+        cmd = [sys.executable, "/app/scripts/agent_server/gen_jwt.py"]
+        audience = (params or {}).get("audience")
+        if audience:
+            cmd.extend(["--audience", str(audience)])
         result = subprocess.run(
-            [sys.executable, "/app/scripts/agent_server/gen_jwt.py"],
+            cmd,
             capture_output=True,
             text=True,
         )

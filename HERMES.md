@@ -49,9 +49,9 @@ This repository is a batteries-included Hermes template. Assume these bundled re
 - `plugins/*` are installed to `${HERMES_HOME}/plugins/` on every boot.
 - `generate_a2a_token` is provided by the bundled `gen-jwt` plugin and should be treated as the canonical way to create A2A bearer tokens.
 - `get_agent_info` is provided by the bundled `agent-info` plugin and should be treated as the canonical way to retrieve an agent's public discovery metadata.
-- `kya_validate_claims` is provided by the bundled `kya-spec` plugin and should be treated as the canonical way to verify a KYA/PAY/KYA-PAY JWT received from another agent — it fetches the issuer JWKS, verifies the ES256 signature, enforces claim shape and audience/environment binding, and tracks `jti` for replay protection. Optional trusted-issuer allowlist via `TRUSTED_KYA_ISSUERS` env var.
+- `kya_validate_claims` is provided by the bundled `kya-spec` plugin and should be treated as the canonical way to verify a KYA/PAY/KYA-PAY JWT received from another agent — it fetches the issuer JWKS, verifies the ES256 signature, enforces claim shape and audience/environment binding, and tracks `jti` for replay protection. Configure the required trusted-issuer allowlist via `TRUSTED_KYA_ISSUERS` before fetching issuer keys.
 - `generate_kya_token` is provided by the bundled `kya-mint` plugin and is the canonical way for this agent to mint its own KYA / PAY / KYA-PAY JWT to prove identity to a peer. The token is signed with this agent's persistent ES256 / P-256 keypair under `${HERMES_HOME}/.radius/kya/key.pem`; the public half is published at `GET /.well-known/jwks.json`. Default `iss` is the agent's `PUBLIC_URL`, `sub` is the agent's DID, and `aid.creation_ip` falls back to `AGENT_PUBLIC_IP` or the resolved A record of the public host.
-- The A2A endpoint at `POST /a2a` supports configurable auth mode via `A2A_AUTH_MODE` (`did_only` | `did_and_kya` | `did_or_kya` | `kya_only`, default `did_only`). The KYA lane is configured by `KYA_INBOUND_POLICY` (`off` | `opportunistic` | `required`, default `off`), reads the token from the `skyfire-pay-id` HTTP header (configurable via `KYA_INBOUND_HEADER`), and enforces `aud == BASE_URL` (or `KYA_EXPECTED_AUDIENCE` if set). Use `did_or_kya` to allow either DID-JWT or KYA; use `kya_only` to allow KYA without DID trust pre-registration.
+- The A2A endpoint at `POST /a2a` supports configurable auth mode via `A2A_AUTH_MODE` (`did_only` | `did_and_kya` | `did_or_kya` | `kya_only`, default `did_only`). The KYA lane is configured by `KYA_INBOUND_POLICY` (`off` | `opportunistic` | `required`, default `off`), reads the token from the `skyfire-pay-id` HTTP header (configurable via `KYA_INBOUND_HEADER`), and enforces `aud == BASE_URL` (or `KYA_EXPECTED_AUDIENCE` if set). Set `A2A_AUTH_MODE=did_and_kya` to require both DID and KYA authentication. `did_or_kya` evaluates the KYA lane according to `KYA_INBOUND_POLICY`; `kya_only` requires KYA without DID authentication. Every KYA authentication mode requires `TRUSTED_KYA_ISSUERS`.
 - `radius_wallet_address`, `radius_balance`, `radius_send_sbc`, and `radius_tx_status` are provided by the bundled `radius-cli` plugin and should be treated as the canonical way to perform Radius wallet actions.
 - `x402_request`, `x402_catalog`, `x402_ledger`, and `x402_wallet_status` are provided by the bundled `x402` plugin and are the canonical way to pay approved HTTP 402 / x402 APIs on Radius Testnet only and report the payment paper trail. Read `skills/x402-payments.md` first. Use https://grug402.dev for x402 demos.
 - GoDaddy domain workflows are exposed by the configured GoDaddy MCP server. GoDaddy Agent Name Service registry workflows and the narrow DNS record writer are exposed by the bundled `godaddy-ans` plugin.
@@ -148,7 +148,11 @@ The `generate_a2a_token` tool wraps this script. Its source for reference:
 
 A valid JWT **must** include an `iss` claim containing the caller's `did:web` DID. Missing `iss` → `403 JWT missing iss claim`. The `gen_jwt.py` script sets this automatically from `PUBLIC_URL` / `RAILWAY_PUBLIC_DOMAIN`.
 
+Outbound tokens from `generate_a2a_token()` cannot authorize requests back to this agent. Use `POST /token` with the operator's configured exchange key for local access. Optionally call `generate_a2a_token(audience="did:web:recipient.example")` to bind an outbound token to its recipient; omit `audience` for older peers.
+
 ### TRUSTED_DIDS configuration
+
+Unset or empty `TRUSTED_DIDS` denies all external callers. Every accepted JWT must expire. When upgrading, configure peer DIDs explicitly and exchange fresh local tokens through `/token`.
 
 For two Hermes agents to call each other, each must list the other's DID:
 

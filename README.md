@@ -1,5 +1,7 @@
 # Hermes Agent Railway Template
 
+[Release v0.1.0](https://github.com/radius-workshop/radius-hermes-railway-template/releases/tag/v0.1.0) · [Release process](RELEASE.md)
+
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/hermes-railway-template?referralCode=uTN7AS&utm_medium=integration&utm_source=template&utm_campaign=generic)
 
 Deploy [Hermes Agent](https://github.com/NousResearch/hermes-agent) to Railway as a worker service with persistent state.
@@ -43,7 +45,7 @@ The tests run the real boot discovery and config registration against isolated f
 - Built-in outbound A2A helper via `send_a2a_message` with sender-side correlation logging
 - Built-in KYA spec verification tool via `kya_validate_claims` (fetches issuer JWKS, verifies ES256 signatures, enforces claim shape, audience/environment binding, and jti replay protection)
 - Built-in KYA spec minting tool via `generate_kya_token` (signs KYA / PAY / KYA-PAY JWTs with a persistent P-256 keypair; public half published at `/.well-known/jwks.json`)
-- Optional KYA signed-claim verification (requires `TRUSTED_KYA_ISSUERS`) at `POST /a2a` via the `KYA_INBOUND_POLICY` env var (`off` | `opportunistic` | `required`)
+- Optional KYA signed-claim verification (requires `TRUSTED_KYA_ISSUERS`) at `POST /a2a` via `A2A_AUTH_MODE` (`did_and_kya`, `did_or_kya`, or `kya_only`)
 - Railway-friendly observability: structured JSON logs from the agent server plus forwarded Hermes harness log files
 
 ## How it works
@@ -141,9 +143,9 @@ The bundled public Radius-facing skills include the template-owned skills plus a
 - *"Check this KYA token but only accept it if the issuer is in our trusted allowlist."*
 - *"Validate this KYA token with replay protection disabled — I just want to inspect the claims."*
 - *"Mint a KYA token for audience https://peer.example so I can prove identity to that agent."*
-- *"Generate a kya-pay token paying 0.50 USD to https://swaps.radius.xyz with stp=coin."*
+- *"Generate a signed kya-pay claim for an intended 0.50 USD payment to https://swaps.radius.xyz with stp=coin; do not submit or settle funds."*
 - *"What URL should other agents use to fetch our JWKS?"* (Answer: `${PUBLIC_URL}/.well-known/jwks.json`)
-- *"Turn on KYA-required mode for inbound A2A requests."* (Set `KYA_INBOUND_POLICY=required` in Railway.)
+- *"Turn on KYA-required mode for inbound A2A requests."* (Set `A2A_AUTH_MODE=did_and_kya` and `TRUSTED_KYA_ISSUERS=https://issuer.example` in Railway, alongside trusted peer DIDs. Use `kya_only` only when trusted KYA issuers should authorize requests without DID authentication.)
 
 ### ERC-8004 registration workflows
 
@@ -589,6 +591,8 @@ That file contains:
 - A2A modes, variables, and delegated webhook setup
 - observability notes
 - local mock-data workflow for fast homepage/UI iteration
+
+Inbound A2A requests require an expiring JWT from a DID listed in `TRUSTED_DIDS`, or a local token obtained through `POST /token`. An unset or empty `TRUSTED_DIDS` denies external callers. On upgrade, configure each peer DID explicitly and exchange fresh local tokens; outbound tokens from `generate_a2a_token()` cannot authorize requests back to this agent.
 
 At the repo level, the main thing to know is that this template exposes a first-class A2A surface with Radius-backed identity and wallet state. Other agents can discover it via `agent-card.json`, verify it via `did.json`, inspect capabilities via `agent-skills/index.json`, and interact with it over `POST /a2a`.
 

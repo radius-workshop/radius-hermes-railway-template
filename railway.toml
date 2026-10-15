@@ -2,6 +2,7 @@
 builder = "dockerfile"
 
 [deploy]
+healthcheckPath = "/livez"
 restartPolicyType = "on_failure"
 requiredMountPath = "/data"
 

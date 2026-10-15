@@ -1,6 +1,13 @@
-fastapi>=0.104.0
-uvicorn[standard]>=0.24.0
-pyjwt[crypto]>=2.8.0
-cryptography>=41.0.0
-httpx>=0.25.0
-a2a-sdk>=0.3.0
+# Direct dependencies tested on Python 3.11 in CI and installed in the image.
+fastapi==0.143.2
+uvicorn[standard]==0.54.0
+pyjwt[crypto]==2.13.0
+cryptography==50.0.0
+httpx==0.28.1
+a2a-sdk==0.3.24
+PyYAML==6.0.3
+requests==2.33.0
+ruamel.yaml==0.18.17
+# Match the pinned Hermes runtime and its HTTP parser compatibility bound.
+pydantic==2.13.4
+httptools==0.8.0

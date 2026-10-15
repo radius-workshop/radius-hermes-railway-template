@@ -3,7 +3,7 @@ services:
     build:
       context: .
       args:
-        HERMES_GIT_REF: main
+        HERMES_GIT_REF: ${HERMES_GIT_REF:-v2026.9.24}
     env_file: .env
     environment:
       PORT: "3000"

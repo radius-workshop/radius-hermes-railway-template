@@ -1,4 +1,4 @@
-FROM python:3.11-slim AS builder
+FROM python:3.11-slim-trixie AS builder
 
 ARG HERMES_GIT_REF=v2026.9.24
 
@@ -9,32 +9,38 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt
-RUN git clone --depth 1 --branch "${HERMES_GIT_REF}" --recurse-submodules https://github.com/NousResearch/hermes-agent.git
+RUN git init /opt/hermes-agent \
+  && cd /opt/hermes-agent \
+  && git remote add origin https://github.com/NousResearch/hermes-agent.git \
+  && git fetch --depth 1 origin "${HERMES_GIT_REF}" \
+  && git checkout --detach FETCH_HEAD \
+  && git submodule update --init --recursive --depth 1
 
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
-RUN pip install --no-cache-dir -e "/opt/hermes-agent[messaging,cron,cli,pty]"
-
-# Python dependencies for agent_server and plugins. Wallet, chain and faucet
-# work goes through radius-cli, so no web3 stack is needed here.
-RUN pip install --no-cache-dir \
-  "fastapi>=0.104.0" \
-  "uvicorn[standard]>=0.24.0" \
-  "pyjwt[crypto]>=2.8.0" \
-  "cryptography>=41.0.0" \
-  "httpx>=0.25.0" \
-  "a2a-sdk>=0.3.0" \
-  "requests>=2.28.0" \
-  "ruamel.yaml>=0.18,<0.19"
+# Resolve Hermes and the server together so neither can silently replace an
+# exact upstream dependency pin with an incompatible version.
+COPY scripts/agent_server/requirements.txt /tmp/agent-server-requirements.txt
+COPY scripts/requirements-messaging.txt /tmp/messaging-requirements.txt
+# Upstream's messaging extra requests discord.py[voice], whose PyNaCl<1.6
+# constraint is unsafe and requires uv-only overrides. This pip-based image
+# installs the same chat adapters without optional Discord voice dependencies.
+RUN pip install --no-cache-dir -e "/opt/hermes-agent[cron,pty]" \
+  -r /tmp/agent-server-requirements.txt \
+  -r /tmp/messaging-requirements.txt \
+  && pip check
 
 
-FROM python:3.11-slim
+FROM python:3.11-slim-trixie
 
 # radius-cli (npm, from radiustechsystems/tools) is the wallet: keystore,
 # balances, transfers, receipts, signing. Pin it so boots are reproducible.
 ARG RADIUS_CLI_VERSION=0.4.0
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.source="https://github.com/radius-workshop/radius-hermes-railway-template" \
+      org.opencontainers.image.revision="${VCS_REF}"
 
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -45,6 +51,7 @@ RUN apt-get update \
     tini \
     nodejs \
     npm \
+  && node -e 'if (Number(process.versions.node.split(".")[0]) < 20) throw new Error("radius-cli requires Node.js >=20")' \
   && npm install -g "radius-cli@${RADIUS_CLI_VERSION}" \
   && rm -rf /var/lib/apt/lists/*
 
@@ -65,6 +72,7 @@ COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /opt/hermes-agent /opt/hermes-agent
 
 WORKDIR /app
+COPY VERSION /app/VERSION
 COPY scripts/entrypoint.sh /app/scripts/entrypoint.sh
 RUN sed -i 's/\r$//' /app/scripts/entrypoint.sh && chmod +x /app/scripts/entrypoint.sh
 
@@ -90,6 +98,12 @@ COPY README.md /app/README.md
 
 COPY skills /app/skills
 COPY plugins /app/plugins
+
+# Preserve the actual build inputs so operators can inspect a deployed image.
+COPY scripts/build_info.py /app/scripts/build_info.py
+COPY scripts/smoke_image.py /app/scripts/smoke_image.py
+RUN python /app/scripts/build_info.py --revision "${VCS_REF}" \
+  --radius-cli-version "${RADIUS_CLI_VERSION}" > /app/build-info.json
 
 ENTRYPOINT ["tini", "--"]
 CMD ["/app/scripts/entrypoint.sh"]

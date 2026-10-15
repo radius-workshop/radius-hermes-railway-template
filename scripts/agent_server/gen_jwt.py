@@ -10,18 +10,19 @@ Derives a did:web DID from PUBLIC_URL or RAILWAY_PUBLIC_DOMAIN.
 Output (JSON on stdout):
   { did, token }
 """
+import argparse
 import asyncio
 import json
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from auth import setup_auth, get_did, issue_token
+from auth import setup_auth, get_did, issue_outbound_token
 from radius_cli import export_private_key
 from url_utils import get_base_url
 
 
-async def main() -> None:
+async def main(audience: str | None = None) -> None:
     raw_key = os.environ.get("RADIUS_PRIVATE_KEY", "")
     if not raw_key:
         # The terminal environment may not inherit RADIUS_PRIVATE_KEY even though
@@ -36,9 +37,12 @@ async def main() -> None:
 
     await setup_auth(get_base_url())
     did = get_did()
-    token = await issue_token("hermes")
+    token = await issue_outbound_token(audience=audience)
     print(json.dumps({"did": did, "token": token}))
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--audience", help="Recipient bare DID (optional for legacy peers)")
+    args = parser.parse_args()
+    asyncio.run(main(audience=args.audience))

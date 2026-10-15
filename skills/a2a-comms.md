@@ -95,7 +95,7 @@ Content-Type: application/json
 
 **Authentication** — callers either:
 1. Exchange an API key for a short-lived JWT at `POST {BASE_URL}/token` (requires `X-Api-Key` header matching `JWT_API_KEY` or `JWT_EXCHANGE_KEY`)
-2. Present a self-signed DID JWT if the agent's `TRUSTED_DIDS` is open or includes their DID
+2. Present a self-signed DID JWT if the agent's `TRUSTED_DIDS` includes their DID
 
 The `BASE_URL` is derived from `PUBLIC_URL` or `RAILWAY_PUBLIC_DOMAIN`. Share this URL with any agent operator who wants to call this agent.
 
@@ -120,7 +120,7 @@ There are two ways to get a Bearer token depending on what you have available:
 | Situation | Method |
 |---|---|
 | You have an API key for the remote agent | Exchange it at `/token` (below) |
-| No API key, but remote allows any valid DID JWT | Self-sign with `RADIUS_PRIVATE_KEY` (below) |
+| No API key, but remote trusts this agent's DID | Use `generate_a2a_token()` (below) |
 
 ### Option A — API key exchange
 
@@ -145,7 +145,7 @@ Tokens are valid for 24 hours.
 
 ### Option B — self-signed DID JWT using `RADIUS_PRIVATE_KEY`
 
-If the remote agent's `TRUSTED_DIDS` includes your DID, call the `generate_a2a_token` tool:
+An unset or empty `TRUSTED_DIDS` denies external callers. If the remote agent's `TRUSTED_DIDS` includes your DID, call the `generate_a2a_token` tool. Its optional `audience` parameter accepts the recipient's bare DID; omit it for older peers. Outbound tokens cannot authorize requests back to this agent; local requests use `/token` instead:
 
 ```
 generate_a2a_token()

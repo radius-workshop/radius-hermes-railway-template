@@ -59,7 +59,7 @@ from erc8004_registry import (
 
 from a2a_bridge import A2ABridge
 from a2a_sessions import A2ASessionStore
-from auth import get_did, get_did_document, issue_token, jwt_auth_dep, setup_auth
+from auth import get_did, get_did_document, issue_outbound_token, issue_token, jwt_auth_dep, setup_auth
 import kya_verify
 from hermes_client import HermesClient, HermesUnavailableError, HermesUpstreamError
 from logging_utils import (
@@ -73,6 +73,7 @@ from logging_utils import (
 from radius_cli import radius_home, wallet_balance
 from security_headers import apply_browser_security_headers, wallet_explorer_link
 from url_utils import get_base_url
+from version import VERSION
 
 configure_logging()
 logger = logging.getLogger("agent-server")
@@ -491,7 +492,7 @@ async def _send_managed_a2a_turn(session: dict[str, Any], text: str) -> dict[str
         token = await _exchange_api_key_for_token(remote_agent, api_key)
         auth_mode = "token_exchange"
     else:
-        token = await issue_token("hermes")
+        token = await issue_outbound_token()
         auth_mode = "self_signed_jwt"
 
     rpc_id = str(uuid.uuid4())
@@ -1784,7 +1785,7 @@ def _build_agent_card_payload() -> dict:
             "AGENT_DESCRIPTION",
             f"Name: {agent_name}",
         ),
-        "version": "1.1.0",
+        "version": VERSION,
         "provider": {
             "name": agent_name,
             "url": BASE_URL,
@@ -5880,10 +5881,17 @@ async def token_exchange(request: Request):
     return JSONResponse({"token": token})
 
 
+@app.get("/livez")
+async def livez():
+    """Process liveness for Railway; no credentials or external calls required."""
+    return {"status": "ok", "version": VERSION}
+
+
 @app.get("/health")
 async def health(auth: dict = Depends(jwt_auth_dep)):
     return {
         "status": "ok",
+        "version": VERSION,
         "uptime": int(time.time() - _start_time),
         "a2a_mode": A2A_MODE,
         "direct_ready": _direct_available(),
