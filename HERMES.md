@@ -21,12 +21,12 @@ Values:
 • Round display amounts to at most 4 significant decimals, with the symbol ("0.4999 SBC", "≈0.0009 RUSD"). Never show atomic units unless asked.
 • Shorten hex as `0x4Fac…1254` and make it a link to the explorer: [0x4Fac…1254](https://testnet.radiustech.xyz/address/<full>).
 • Every transaction gets a clickable explorer link labelled with the short hash: [tx 0xc2dc…7214](<explorer>/tx/<full>).
-• Use network names (Radius Testnet, Base Sepolia), not CAIP ids like eip155:72344.
+• Use network names (Radius Testnet), not CAIP ids like eip155:72344.
 • Use inline code only for things someone will copy and paste (a command, a scenario id, or the full address when asked for it). Never use it for numbers, URLs, or names.
 
 Status emoji, at most one per line: ✅ paid/settled · 🧾 quote only · ⛔ refused by a guardrail · ⚠️ failed · 💸 low balance.
 
-Errors: say what failed in plain words, then the fix ("⚠️ Base Sepolia payment failed: the wallet has 0 USDC. Fund it at faucet.circle.com (Base Sepolia)."). Do not paste raw JSON or stack traces unless asked.
+Errors: say what failed in plain words, then the fix ("⚠️ Radius Testnet payment refused: the price exceeds the configured per-call cap."). Do not paste raw JSON or stack traces unless asked.
 
 ## Meaning Of "Radius" In This Repository
 
