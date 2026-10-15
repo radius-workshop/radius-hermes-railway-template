@@ -82,6 +82,17 @@ class A2AAuthModesTests(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaises(HTTPException):
                         await self.main.a2a_auth_dep(request)
 
+    def test_or_mode_valid_did_is_not_rejected_again_by_handler(self):
+        from fastapi.testclient import TestClient
+        with patch.dict(os.environ, {"A2A_AUTH_MODE": "did_or_kya"}), \
+                patch.object(self.main, "jwt_auth_dep", AsyncMock(return_value={"issuer": "did:web:peer.example"})), \
+                patch.object(self.main.kya_verify, "evaluate_inbound", return_value={
+                    "action": "reject", "reason": "untrusted_issuer", "report": None}):
+            response = TestClient(self.main.app).post("/a2a", headers={"skyfire-pay-id": "bad"}, json={
+                "jsonrpc": "2.0", "id": "test", "method": "tasks/get", "params": {"id": "absent", "message": {"role": "user", "messageId": "test", "parts": [{"kind": "text", "text": "test"}]}}})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["error"]["code"], -32601, response.text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5576,13 +5576,10 @@ async def handle_a2a(request: Request, auth: dict = Depends(a2a_auth_dep)):
     if kya_decision.get("reason"):
         kya_log_payload["kya_reason"] = kya_decision["reason"]
 
+    # Authorization is decided once by a2a_auth_dep. In did_or_kya mode,
+    # a valid DID may authorize a request whose optional KYA token is invalid.
     if kya_decision["action"] == "reject":
-        log_event(logger, logging.WARNING, "A2A KYA gate rejected request", **kya_log_payload)
-        return _rpc_error_response(
-            rpc_id,
-            InvalidRequestError(message="KYA verification required"),
-            status_code=401,
-        )
+        log_event(logger, logging.WARNING, "A2A KYA lane rejected; DID authorized request", **kya_log_payload)
     if kya_decision["action"] == "warn":
         log_event(logger, logging.WARNING, "A2A KYA gate accepted with errors", **kya_log_payload)
     elif kya_decision["action"] == "accept":
