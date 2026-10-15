@@ -19,13 +19,18 @@ def commit(path: str) -> str:
     ).strip()
 
 
+actual_cli_version = subprocess.check_output(["radius-cli", "--version"], text=True).strip()
+if actual_cli_version != args.radius_cli_version:
+    raise SystemExit("Installed Radius CLI version differs from the requested build version")
+
 print(json.dumps({
     "version": (Path(__file__).resolve().parents[1] / "VERSION").read_text().strip(),
     "revision": args.revision,
     "hermes_commit": commit("/opt/hermes-agent"),
     "linear_skill_commit": commit("/app/scripts/linear-skill"),
     "radius_skills_commit": commit("/app/vendor/radius-skills"),
-    "radius_cli_version": args.radius_cli_version,
+    "radius_cli_version": actual_cli_version,
+    "node_version": subprocess.check_output(["node", "--version"], text=True).strip(),
     "python_packages": {
         package.metadata["Name"]: package.version for package in distributions()
     },
