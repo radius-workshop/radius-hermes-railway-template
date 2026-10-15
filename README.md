@@ -1,5 +1,7 @@
 # Hermes Agent Railway Template
 
+[Release v0.1.0](https://github.com/radius-workshop/radius-hermes-railway-template/releases/tag/v0.1.0) · [Release process](RELEASE.md)
+
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/hermes-railway-template?referralCode=uTN7AS&utm_medium=integration&utm_source=template&utm_campaign=generic)
 
 Deploy [Hermes Agent](https://github.com/NousResearch/hermes-agent) to Railway as a worker service with persistent state.
