@@ -511,6 +511,8 @@ That file contains:
 - observability notes
 - local mock-data workflow for fast homepage/UI iteration
 
+Inbound A2A requests require an expiring JWT from a DID listed in `TRUSTED_DIDS`, or a local token obtained through `POST /token`. An unset or empty `TRUSTED_DIDS` denies external callers. On upgrade, configure each peer DID explicitly and exchange fresh local tokens; outbound tokens from `generate_a2a_token()` cannot authorize requests back to this agent.
+
 At the repo level, the main thing to know is that this template exposes a first-class A2A surface with Radius-backed identity and wallet state. Other agents can discover it via `agent-card.json`, verify it via `did.json`, inspect capabilities via `agent-skills/index.json`, and interact with it over `POST /a2a`.
 
 The bundled `agent-info` plugin is the easiest way to aggregate a full public discovery bundle for any compatible agent:

@@ -199,14 +199,22 @@ def _read_varint(data: bytes) -> tuple:
 
 # ——— JWT operations ———
 
-def _create_jwt(sub: str, issuer: str, private_key, expires_in: int = 86400) -> str:
+def _create_jwt(
+    sub: str, issuer: str, private_key, expires_in: int = 86400,
+    *, audience: Optional[str] = None, token_use: Optional[str] = None,
+) -> str:
     import jwt
     # iss must be the bare DID — strip any fragment (e.g. #controller) that
     # may have leaked in from the verificationMethod id.
     bare_issuer = issuer.split("#")[0]
     now = int(time.time())
+    payload = {"sub": sub, "iss": bare_issuer, "iat": now, "exp": now + expires_in}
+    if audience:
+        payload["aud"] = audience
+    if token_use:
+        payload["token_use"] = token_use
     return jwt.encode(
-        {"sub": sub, "iss": bare_issuer, "iat": now, "exp": now + expires_in},
+        payload,
         private_key,
         algorithm="ES256K",
         headers={"kid": f"{bare_issuer}#controller"},
@@ -222,10 +230,19 @@ async def _verify_jwt(token: str) -> dict:
         raise ValueError(f"Malformed JWT: {e}")
 
     issuer = unverified.get("iss")
-    if not issuer:
-        raise ValueError("JWT missing iss claim")
+    if not isinstance(issuer, str) or not issuer:
+        raise ValueError("JWT missing or invalid iss claim")
     # Normalize: strip DID fragment if present (e.g. "did:web:host#controller" → "did:web:host")
     issuer = issuer.split("#")[0]
+
+    # Authorize the claimed identity before any DID resolution or network I/O.
+    # A signature proves control of a DID, not permission to run this agent.
+    allowed = {_did} | {
+        d.strip().split("#", 1)[0]
+        for d in os.environ.get("TRUSTED_DIDS", "").split(",") if d.strip()
+    }
+    if issuer not in allowed:
+        raise ValueError("DID not trusted")
 
     header = pyjwt.get_unverified_header(token)
     kid = header.get("kid")
@@ -234,14 +251,29 @@ async def _verify_jwt(token: str) -> dict:
     if issuer == _did and _did_document is not None:
         pub_key = _extract_pub_key(_did_document, kid)
     else:
-        pub_key = await resolve_did_to_public_key(issuer)
+        try:
+            pub_key = await resolve_did_to_public_key(issuer)
+        except Exception as exc:
+            raise ValueError("DID resolution failed") from exc
 
     try:
-        verified = pyjwt.decode(token, pub_key, algorithms=["ES256K"])
+        # Legacy peer tokens without aud remain compatible, but when supplied
+        # the audience must be this agent's DID. All tokens must expire.
+        verified = pyjwt.decode(
+            token, pub_key, algorithms=["ES256K"], audience=_did,
+            options={"require": ["iss", "exp"], "verify_aud": "aud" in unverified},
+        )
     except pyjwt.ExpiredSignatureError:
         raise ValueError("JWT has expired")
     except Exception as e:
         raise ValueError(f"JWT verification failed: {e}")
+
+    # Outbound tokens are exposed to peers. Never let a peer replay one back
+    # as our own identity, including tokens minted before this distinction.
+    if issuer == _did and (
+        verified.get("token_use") != "local" or verified.get("aud") != _did
+    ):
+        raise ValueError("Self-issued token is not valid for local access")
 
     return {"issuer": issuer, "payload": verified}
 
@@ -293,10 +325,35 @@ def get_did_document() -> Optional[dict]:
 
 
 async def issue_token(sub: str, expires_in: int = 86400) -> str:
-    """Issue a signed JWT for the given subject."""
+    """Issue a signed local-access JWT for the token exchange endpoint."""
     if _private_key is None:
         raise RuntimeError("[auth] Not initialized — call setup_auth() first")
-    return _create_jwt(sub, _did, _private_key, expires_in)
+    return _create_jwt(
+        sub, _did, _private_key, expires_in, audience=_did, token_use="local",
+    )
+
+
+async def issue_outbound_token(
+    sub: str = "hermes", expires_in: int = 86400, *, audience: Optional[str] = None,
+) -> str:
+    """Issue a peer-facing JWT that cannot authorize requests back to this agent.
+
+    Audience is optional for compatibility with older A2A servers. When set,
+    use the recipient's bare did:web or did:key identity.
+    """
+    if _private_key is None:
+        raise RuntimeError("[auth] Not initialized — call setup_auth() first")
+    if audience is not None and (
+        not isinstance(audience, str)
+        or not audience.startswith(("did:web:", "did:key:"))
+        or "#" in audience
+        or any(char.isspace() for char in audience)
+    ):
+        raise ValueError("Audience must be the recipient's bare DID")
+    return _create_jwt(
+        sub, _did, _private_key, expires_in,
+        audience=audience, token_use="a2a_outbound",
+    )
 
 
 # ——— FastAPI dependency ———
@@ -329,21 +386,5 @@ async def jwt_auth_dep(request: Request) -> dict:
             auth_error=str(e),
         )
         raise HTTPException(status_code=403, detail="Forbidden")
-
-    issuer = result["issuer"]
-    trusted_env = os.environ.get("TRUSTED_DIDS", "")
-    if trusted_env:
-        allowed = {_did} | {d.strip() for d in trusted_env.split(",") if d.strip()}
-        if issuer not in allowed:
-            log_event(
-                logger,
-                logging.ERROR,
-                "Issuer DID not trusted",
-                event="auth.jwt_rejected",
-                auth_error="issuer_not_trusted",
-                issuer_did=issuer,
-                trusted_did_count=len(allowed),
-            )
-            raise HTTPException(status_code=403, detail="Forbidden")
 
     return result

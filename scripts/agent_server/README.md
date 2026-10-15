@@ -72,10 +72,14 @@ That DID shows up in:
 
 All non-discovery endpoints require authentication. The gate accepts:
 
-- any cryptographically valid DID JWT
-- self-issued tokens minted by `POST /token`
+- expiring DID JWTs from peers explicitly listed in `TRUSTED_DIDS`
+- local tokens minted by `POST /token`
 
-To restrict access, set `TRUSTED_DIDS` to a comma-separated allowlist. When unset, any valid DID JWT is accepted.
+Unset or empty `TRUSTED_DIDS` denies all external DIDs. Discovery remains public. Issuer authorization happens before remote DID resolution.
+
+When upgrading, set `TRUSTED_DIDS=did:web:peer.example.com` for every peer that needs access, and obtain fresh local tokens through `POST /token`. Old self-issued tokens and outbound tokens cannot authorize local requests. Peer tokens must include `exp`; older expiring peer tokens without `aud` remain compatible.
+
+`generate_a2a_token()` produces outbound tokens for other agents. The optional `audience` parameter takes the recipient's bare DID and restricts that token to the recipient; omit it for older servers that do not support audience validation. These outbound tokens cannot be replayed back to the issuing agent. Use `/token` for local `/health`, `/files`, and `/a2a` requests.
 
 ### Issuing a token
 
@@ -152,7 +156,7 @@ platforms:
 | `WEBHOOK_ENABLED` | Enables the Hermes webhook server |
 | `WEBHOOK_PORT` | Hermes webhook server port. Defaults to `8644` |
 | `JWT_API_KEY` | Enables `POST /token` |
-| `TRUSTED_DIDS` | Comma-separated DID allowlist |
+| `TRUSTED_DIDS` | Comma-separated peer DID allowlist; empty denies external callers |
 | `A2A_PEER_URL` | Pre-configured peer agent URL |
 | `A2A_PEER_API_KEY` | Peer agent API key for its `/token` endpoint |
 

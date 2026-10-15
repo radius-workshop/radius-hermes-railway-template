@@ -59,7 +59,7 @@ from erc8004_registry import (
 
 from a2a_bridge import A2ABridge
 from a2a_sessions import A2ASessionStore
-from auth import get_did, get_did_document, issue_token, jwt_auth_dep, setup_auth
+from auth import get_did, get_did_document, issue_outbound_token, issue_token, jwt_auth_dep, setup_auth
 from hermes_client import HermesClient, HermesUnavailableError, HermesUpstreamError
 from logging_utils import (
     clear_request_context,
@@ -490,7 +490,7 @@ async def _send_managed_a2a_turn(session: dict[str, Any], text: str) -> dict[str
         token = await _exchange_api_key_for_token(remote_agent, api_key)
         auth_mode = "token_exchange"
     else:
-        token = await issue_token("hermes")
+        token = await issue_outbound_token()
         auth_mode = "self_signed_jwt"
 
     rpc_id = str(uuid.uuid4())

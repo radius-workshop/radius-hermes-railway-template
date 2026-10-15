@@ -120,7 +120,11 @@ The `generate_a2a_token` tool wraps this script. Its source for reference:
 
 A valid JWT **must** include an `iss` claim containing the caller's `did:web` DID. Missing `iss` → `403 JWT missing iss claim`. The `gen_jwt.py` script sets this automatically from `PUBLIC_URL` / `RAILWAY_PUBLIC_DOMAIN`.
 
+Outbound tokens from `generate_a2a_token()` cannot authorize requests back to this agent. Use `POST /token` with the operator's configured exchange key for local access. Optionally call `generate_a2a_token(audience="did:web:recipient.example")` to bind an outbound token to its recipient; omit `audience` for older peers.
+
 ### TRUSTED_DIDS configuration
+
+Unset or empty `TRUSTED_DIDS` denies all external callers. Every accepted JWT must expire. When upgrading, configure peer DIDs explicitly and exchange fresh local tokens through `/token`.
 
 For two Hermes agents to call each other, each must list the other's DID:
 
