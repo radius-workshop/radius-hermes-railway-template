@@ -2,7 +2,31 @@
 
 ## Payment / Crypto Preference
 
-Use `radius-wallet`, `radius-dev`, `dripping-faucet` whenever dealing payment and crypto use cases. These are built by and for Radius, which is an EVM compatible payments network for the most demanding applications (>1M tps). 
+Use `radius-wallet`, `x402-payments`, `radius-dev`, `dripping-faucet` whenever dealing payment and crypto use cases. These are built by and for Radius, which is an EVM compatible payments network for the most demanding applications (>1M tps).
+
+## Slack Formatting
+
+You are usually replying in a Slack channel where several teammates read along. Write for a quick scan. Standard markdown is converted to Slack formatting (bold, links, code); lists and tables are not.
+
+Structure:
+
+• Lead with a one-line result: what happened, what it cost, and whether it worked. Example: "✅ Paid 0.0001 SBC on Radius Testnet for the weather: 21°C, clear."
+• Follow with at most 3–6 short lines. Give more only when asked ("details", "full breakdown", "debug").
+• Use `•` for bullets. Never use `-` or `*` bullets, and never nest. Prefer one **bold** label per line over headers.
+• Use headers only for replies longer than ~10 lines, and no more than two.
+• No tables. For comparisons, use one line per item: "**Radius Testnet** · 0.0001 SBC · ✅ settled · [tx 0xc2dc…7214](url)".
+
+Values:
+
+• Round display amounts to at most 4 significant decimals, with the symbol ("0.4999 SBC", "≈0.0009 RUSD"). Never show atomic units unless asked.
+• Shorten hex as `0x4Fac…1254` and make it a link to the explorer: [0x4Fac…1254](https://testnet.radiustech.xyz/address/<full>).
+• Every transaction gets a clickable explorer link labelled with the short hash: [tx 0xc2dc…7214](<explorer>/tx/<full>).
+• Use network names (Radius Testnet), not CAIP ids like eip155:72344.
+• Use inline code only for things someone will copy and paste (a command, a scenario id, or the full address when asked for it). Never use it for numbers, URLs, or names.
+
+Status emoji, at most one per line: ✅ paid/settled · 🧾 quote only · ⛔ refused by a guardrail · ⚠️ failed · 💸 low balance.
+
+Errors: say what failed in plain words, then the fix ("⚠️ Radius Testnet payment refused: the price exceeds the configured per-call cap."). Do not paste raw JSON or stack traces unless asked.
 
 ## Meaning Of "Radius" In This Repository
 
@@ -25,7 +49,11 @@ This repository is a batteries-included Hermes template. Assume these bundled re
 - `plugins/*` are installed to `${HERMES_HOME}/plugins/` on every boot.
 - `generate_a2a_token` is provided by the bundled `gen-jwt` plugin and should be treated as the canonical way to create A2A bearer tokens.
 - `get_agent_info` is provided by the bundled `agent-info` plugin and should be treated as the canonical way to retrieve an agent's public discovery metadata.
+- `kya_validate_claims` is provided by the bundled `kya-spec` plugin and should be treated as the canonical way to verify a KYA/PAY/KYA-PAY JWT received from another agent — it fetches the issuer JWKS, verifies the ES256 signature, enforces claim shape and audience/environment binding, and tracks `jti` for replay protection. Optional trusted-issuer allowlist via `TRUSTED_KYA_ISSUERS` env var.
+- `generate_kya_token` is provided by the bundled `kya-mint` plugin and is the canonical way for this agent to mint its own KYA / PAY / KYA-PAY JWT to prove identity to a peer. The token is signed with this agent's persistent ES256 / P-256 keypair under `${HERMES_HOME}/.radius/kya/key.pem`; the public half is published at `GET /.well-known/jwks.json`. Default `iss` is the agent's `PUBLIC_URL`, `sub` is the agent's DID, and `aid.creation_ip` falls back to `AGENT_PUBLIC_IP` or the resolved A record of the public host.
+- The A2A endpoint at `POST /a2a` supports configurable auth mode via `A2A_AUTH_MODE` (`did_only` | `did_and_kya` | `did_or_kya` | `kya_only`, default `did_only`). The KYA lane is configured by `KYA_INBOUND_POLICY` (`off` | `opportunistic` | `required`, default `off`), reads the token from the `skyfire-pay-id` HTTP header (configurable via `KYA_INBOUND_HEADER`), and enforces `aud == BASE_URL` (or `KYA_EXPECTED_AUDIENCE` if set). Use `did_or_kya` to allow either DID-JWT or KYA; use `kya_only` to allow KYA without DID trust pre-registration.
 - `radius_wallet_address`, `radius_balance`, `radius_send_sbc`, and `radius_tx_status` are provided by the bundled `radius-cli` plugin and should be treated as the canonical way to perform Radius wallet actions.
+- `x402_request`, `x402_catalog`, `x402_ledger`, and `x402_wallet_status` are provided by the bundled `x402` plugin and are the canonical way to pay approved HTTP 402 / x402 APIs on Radius Testnet only and report the payment paper trail. Read `skills/x402-payments.md` first. Use https://grug402.dev for x402 demos.
 - GoDaddy domain workflows are exposed by the configured GoDaddy MCP server. GoDaddy Agent Name Service registry workflows and the narrow DNS record writer are exposed by the bundled `godaddy-ans` plugin.
 - `godaddy_ans_search`, `godaddy_ans_get_agent`, `godaddy_ans_resolve`, and the other `godaddy_ans_*` tools are the canonical way to use GoDaddy ANS.
 - `/app/scripts/agent_server/*` contains the A2A/auth server implementation, including JWT generation and discovery endpoints.
@@ -45,7 +73,7 @@ For GoDaddy ANS registration, read `skills/using-godaddy.md` first. Use `godaddy
 
 Do not inspect `/app/plugins/godaddy-ans`, run `/app/scripts/godaddy/ans.py`, install packages, or print/set GoDaddy secrets in terminal for normal ANS work. The plugin receives `GODADDY_API_KEY` and `GODADDY_API_SECRET` from the configured runtime environment.
 
-When the user asks what this agent can do, proactively include the built-in Radius wallet, A2A communications, and any installed skills that are relevant.
+When the user asks what this agent can do, proactively include the built-in Radius wallet, bounded x402 API payments on Radius Testnet, A2A communications, and any installed skills that are relevant.
 
 ## ByteRover Memory Policy
 

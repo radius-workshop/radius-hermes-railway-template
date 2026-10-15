@@ -1,0 +1,5 @@
+name: kya-mint
+version: "1.0.0"
+description: "Mint signed KYA / PAY / KYA-PAY JWTs (ES256, P-256) on behalf of this agent so it can prove identity to KYA-aware peers. Pairs with the kya-spec verification plugin and the public /.well-known/jwks.json endpoint."
+provides_tools:
+  - generate_kya_token

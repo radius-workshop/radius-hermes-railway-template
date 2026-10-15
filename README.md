@@ -6,7 +6,29 @@ Deploy [Hermes Agent](https://github.com/NousResearch/hermes-agent) to Railway a
 
 This template is worker-only: setup and configuration are done through Railway Variables, then the container bootstraps Hermes automatically on first run.
 
-## What you get
+## Radius skills + tools bootstrap
+
+Agents created from this template automatically bootstrap the Radius skills repo snapshot into persistent external skills storage at startup:
+
+- `/app/vendor/radius-skills` is cloned into the image from `https://github.com/radiustechsystems/skills.git`
+- on first boot, `scripts/entrypoint.sh` copies that snapshot to `RADIUS_SKILLS_DIR` (default `/data/.hermes/external-skills/radius-skills`)
+- Hermes `skills.external_dirs` is populated with the discovered Radius skill roots
+- the Radius `radius-cast` Hermes plugin remains enabled so the agent has deterministic Radius wallet tools
+
+This means new Railway-template agents should see both the portable skills and the tool/plugin surface:
+
+- skills: `radius-dev`, `x402`, `dripping-faucet`, `radius-agent-ops`
+- tools: `radius_wallet_address`, `radius_balance`, `radius_send_sbc`, `radius_tx_status`
+
+Local verification:
+
+```bash
+python3 -m unittest discover -s tests -p test_radius_skills_bootstrap.py -v
+```
+
+The tests run the real boot discovery and config registration against isolated fixtures and check bundled CLI tool registration. They require no external checkout, network, wallet or credentials.
+
+## What You Get
 
 - Hermes gateway running as a Railway worker
 - First-boot bootstrap from environment variables
@@ -19,6 +41,9 @@ This template is worker-only: setup and configuration are done through Railway V
 - Built-in discovery aggregation tool via `get_agent_info`
 - Built-in deterministic ERC-8004 registry tools for reading and writing Radius agent registrations
 - Built-in outbound A2A helper via `send_a2a_message` with sender-side correlation logging
+- Built-in KYA spec verification tool via `kya_validate_claims` (fetches issuer JWKS, verifies ES256 signatures, enforces claim shape, audience/environment binding, and jti replay protection)
+- Built-in KYA spec minting tool via `generate_kya_token` (signs KYA / PAY / KYA-PAY JWTs with a persistent P-256 keypair; public half published at `/.well-known/jwks.json`)
+- Optional KYA signed-claim verification (requires `TRUSTED_KYA_ISSUERS`) at `POST /a2a` via the `KYA_INBOUND_POLICY` env var (`off` | `opportunistic` | `required`)
 - Railway-friendly observability: structured JSON logs from the agent server plus forwarded Hermes harness log files
 
 ## How it works
@@ -108,6 +133,17 @@ The bundled public Radius-facing skills include the template-owned skills plus a
 - *"Send a task to https://<other-agent>/a2a asking it to introduce itself."*
 - *"Use the outbound A2A tool to ask the peer agent what skills it has."*
 - *"Continue the existing A2A conversation with the peer agent and ask for a status update."*
+
+### KYA / KYAPay spec workflows
+
+- *"Verify this `kya+jwt` token from another agent against expected audience `swaps.radius.xyz`."*
+- *"Validate this KYA-PAY JWT and tell me whether the signature checks against the issuer JWKS."*
+- *"Check this KYA token but only accept it if the issuer is in our trusted allowlist."*
+- *"Validate this KYA token with replay protection disabled — I just want to inspect the claims."*
+- *"Mint a KYA token for audience https://peer.example so I can prove identity to that agent."*
+- *"Generate a kya-pay token paying 0.50 USD to https://swaps.radius.xyz with stp=coin."*
+- *"What URL should other agents use to fetch our JWKS?"* (Answer: `${PUBLIC_URL}/.well-known/jwks.json`)
+- *"Turn on KYA-required mode for inbound A2A requests."* (Set `KYA_INBOUND_POLICY=required` in Railway.)
 
 ### ERC-8004 registration workflows
 
@@ -253,6 +289,18 @@ SLACK_ALLOW_BOTS=mentions                   # other bots can reach it only by @m
 
 `SLACK_ALLOWED_USERS` still applies on top of these. See the [Hermes Slack docs](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/slack) for the full list.
 
+### Opening the bot to a whole workspace
+
+The agent has shell and file tools and runs as root, and `/data/.hermes/.env` holds the wallet key and API keys. Before allowing everyone (`SLACK_ALLOW_ALL_USERS=true`), turn those tools off. The wallet, x402, A2A, and ERC-8004 tools are plugins and keep working:
+
+```
+HERMES_DISABLED_TOOLSETS=terminal,file,code_execution,delegation,cronjob
+HERMES_BACKGROUND_REVIEW=false        # no automatic memory writes about every user
+HERMES_MEMORY_NOTIFICATIONS=off       # no "💾 Memory updated" lines in channels
+```
+
+These are written into `config.yaml` on every boot, so Railway Variables stay the source of truth. Also give the service its own LLM API key with a spend limit.
+
 ### Provider selection
 
 If you set multiple provider keys, pin which one Hermes uses:
@@ -282,11 +330,42 @@ This template includes a built-in Radius Testnet wallet. On first boot, the entr
 
 The agent can then check balances, send SBC tokens, and show explorer links — all via natural language in chat.
 
-The bundled wallet tools are backed by `radius-cli` and use a local persistent keystore under `${RADIUS_HOME:-/data/.hermes/.radius-cli}`.
+Use the built-in wallet tools (`radius_wallet_address`, `radius_balance`, `radius_send_sbc`, `radius_tx_status`) for wallet actions. These tools are backed by `radius-cli` and use a local persistent keystore under `${RADIUS_HOME:-/data/.hermes/.radius-cli}`.
 
 - Wallet creation happens automatically on first boot via `radius-cli wallet address`.
 - The same local wallet is used for wallet actions, DID/JWT auth, homepage wallet summary, and ERC-8004 identity.
 - Para-backed wallet provider support is removed in this template revision.
+
+## x402 payments
+
+The bundled `x402` plugin supports bounded Radius Testnet SBC payments through the installed `radius-cli` 0.4.0 `wallet pay` command. Base and mainnet paid execution are deferred. No private key is exported by this plugin.
+
+Before using it, configure exact trusted seller hostnames in `X402_ALLOWED_HOSTS` (for example `grug402.dev`) and optionally lower `X402_MAX_PER_CALL` (default `0.01` SBC). An empty host list disables all requests, including catalog lookup and quotes. Requests require HTTPS on port 443 and public DNS addresses. Both discovery requests and the payment subprocess connect to a checked public IP while retaining hostname TLS verification; redirects cannot change the destination. Seller responses remain untrusted.
+
+Use `x402_catalog` to inspect demo metadata, then `x402_request` with `dry_run: true` to quote an endpoint. Obtain operator approval for the destination and amount before paying. `max_amount` can only lower the configured per-call cap. The CLI validates its own challenge and uses a threshold no greater than the quoted price. The plugin never authorizes an unlimited Permit2 approval; an approval requirement must be handled separately by the operator.
+
+`x402_ledger` reads persistent attempts from `${HERMES_HOME}/x402/ledger.jsonl`. A durable intent is written before network activity and before signing; unavailable storage blocks payment. Final write errors are returned explicitly. Protected content and URL query strings are excluded from the ledger. Requester labels are caller-supplied annotations, not authenticated attribution. This local ledger is not tamper-proof.
+
+A successful HTTP response describes delivery. `settlement_reported` requires a matching CLI payment report and transaction hash; on-chain reconciliation remains unverified. `payment_unknown` or a pending ledger entry may represent a charge: inspect transaction status before retrying. `x402_benchmark` runs at most 20 sequential requests through the same controls, reserves a fixed per-call share of its maximum 0.05 SBC run budget, and stops on unknown outcomes. There is no cumulative wallet spending limit. Use a dedicated testnet wallet and restrict who can invoke payment tools; opening a workspace bot also opens its enabled wallet tools.
+
+Try: *"Show me three Radius Testnet x402 demo APIs"*, *"Quote this approved endpoint without paying"*, *"Show the x402 ledger"*.
+
+## Slack app from code (Slack CLI)
+
+`slack/manifest.json` is the Slack app definition (Socket Mode, agent view, the scopes and events Hermes needs). It was generated with `hermes slack manifest --agent-view`, with the generic slash commands removed so they don't collide with other apps in a shared workspace. Create or update the app with the [Slack CLI](https://docs.slack.dev/tools/slack-cli/):
+
+```bash
+brew install --cask slack-cli
+slack login
+cd slack && slack install        # creates the app from manifest.json and installs it
+```
+
+Then in https://api.slack.com/apps → your app:
+
+1. **Basic Information → App-Level Tokens**: generate one with `connections:write` → `SLACK_APP_TOKEN` (`xapp-…`).
+2. **OAuth & Permissions**: copy the Bot User OAuth Token → `SLACK_BOT_TOKEN` (`xoxb-…`).
+
+Set both on the Railway service, deploy, and `/invite @Radius Agent` in the channel. Re-run `slack install` after editing the manifest.
 
 ## ERC-8004 registry tools
 
@@ -537,7 +616,7 @@ Any `.md` file you place in the `skills/` directory of this repo will be copied 
 2. Write instructions in plain Markdown — what the agent should know, how to behave, what commands to run.
 3. Redeploy. The skill will be installed on next boot.
 
-The `radius-wallet.md` skill is already included and tells the agent to prefer the bundled Radius wallet tools, with script fallback where needed.
+The `radius-wallet.md` skill is already included and tells the agent to use the bundled Radius wallet tools. Direct CLI commands are reserved for explicit operator debugging; legacy wallet scripts have been removed.
 
 The `using-godaddy.md` skill is also included. It tells Hermes to route GoDaddy domain availability and suggestion requests to the configured GoDaddy MCP server, to use `godaddy_dns_set_records` for setting DNS records on a known GoDaddy-managed domain, and to route Agent Name Service registry requests to the local `godaddy-ans` plugin tools. GoDaddy ANS defaults to production; set `GODADDY_ANS_ENV=ote` only when OTE is explicitly required. For example, ANS registry searches should call `godaddy_ans_search` directly instead of inspecting plugin files, running Python scripts, installing packages, or reading GoDaddy API secrets in a terminal. ANS registration uses `godaddy_ans_prepare_registration` to inspect the Swagger-aligned payload and CSRs, then `godaddy_ans_register` to submit once the agent host, endpoint URLs, and domain-validation prerequisites are correct.
 
