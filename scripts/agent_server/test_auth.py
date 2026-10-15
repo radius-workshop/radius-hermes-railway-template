@@ -135,8 +135,9 @@ class AuthTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_issuer_types_are_rejected(self):
         for issuer in (None, 123, [self.peer_did]):
-            token = jwt.encode({"iss": issuer, "exp": int(auth.time.time()) + 300},
-                               self.peer_key, algorithm="ES256K")
+            # Use JWS directly: recent PyJWT encoders reject malformed claims.
+            payload = json.dumps({"iss": issuer, "exp": int(auth.time.time()) + 300}).encode()
+            token = jwt.api_jws.encode(payload, self.peer_key, algorithm="ES256K")
             with self.subTest(issuer=issuer), self.assertRaises(HTTPException):
                 await self.authenticate(token)
 
