@@ -11,7 +11,6 @@ This repository is a batteries-included Hermes template. Treat the bundled files
 - `plugins/radius-cast` now packages the `radius-cli` wallet integration and provides Radius wallet tools for address lookup, balances, transfers, and tx status.
 - `plugins/x402` provides `x402_request`, `x402_catalog`, `x402_ledger`, and `x402_wallet_status` for paying x402 APIs on Radius (SBC, Permit2) and Base (USDC, EIP-3009) with a persistent payment ledger.
 - `plugins/godaddy-ans` provides GoDaddy Agent Name Service registry tools such as `godaddy_ans_search`, lookup, resolution, registration, and validation, plus the narrow `godaddy_dns_set_records` domain DNS record writer.
-- `scripts/radius/*` contains the built-in Radius wallet scripts.
 - `scripts/godaddy/*` contains GoDaddy ANS helper scripts behind the plugin tools.
 - `scripts/agent_server/*` contains the HTTP agent server, A2A bridge, auth, DID, and discovery implementation.
 

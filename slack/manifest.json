@@ -5,9 +5,9 @@
   },
   "display_information": {
     "name": "Radius Agent",
-    "description": "Dogfood agent for x402 APIs and EVM wallet ops on Radius and Base, with an on-chain paper trail.",
+    "description": "Radius Testnet wallet and bounded x402 API tools.",
     "background_color": "#0b1f3a",
-    "long_description": "Radius Agent is a Hermes agent deployed on Railway for the Radius team to dogfood agentic commerce. Mention it in #initiative-agentic-commerce-platform or DM it to: call and pay x402 APIs (demo catalog at grug402.dev) on Radius Testnet (SBC, Permit2) and Base Sepolia (USDC, EIP-3009); check wallet balances and send SBC; look up transaction status; and pull a ledger of every payment attempt with explorer links. Mainnet payments are disabled by default and every call is capped per request."
+    "long_description": "Hermes on Railway with Radius Testnet wallet tools, approved-host x402 API payments and a persistent attempt ledger. Mainnet and Base payment execution are disabled in this release. Settlement reports require separate chain reconciliation. Restrict tool access to trusted operators."
   },
   "features": {
     "app_home": {
@@ -20,7 +20,7 @@
       "always_online": true
     },
     "agent_view": {
-      "agent_description": "Pay x402 APIs and run wallet ops on Radius and Base."
+      "agent_description": "Radius Testnet wallet and approved-host x402 API tools."
     }
   },
   "oauth_config": {

@@ -302,21 +302,17 @@ The bundled wallet tools are backed by `radius-cli` and use a local persistent k
 
 ## x402 payments
 
-The bundled `x402` plugin lets the agent pay HTTP 402 / [x402](https://x402.org) APIs from its own wallet. It reads the network from the server's 402 challenge and picks the signer to match:
+The bundled `x402` plugin supports bounded Radius Testnet SBC payments through the installed `radius-cli` 0.4.0 `wallet pay` command. Base and mainnet paid execution are deferred. No private key is exported by this plugin.
 
-| Network | Asset | Signing |
-|---|---|---|
-| Radius Testnet (default) | SBC | Permit2 via `radius-cli wallet x402` (EIP-2612 sponsored, one-time Permit2 approval if the facilitator asks) |
-| Base Sepolia | USDC | EIP-3009 `TransferWithAuthorization`, same wallet key, no ETH needed |
-| Radius Mainnet / Base | USDC | refused unless `X402_ALLOW_MAINNET=true` |
+Before using it, configure exact trusted seller hostnames in `X402_ALLOWED_HOSTS` (for example `grug402.dev`) and optionally lower `X402_MAX_PER_CALL` (default `0.01` SBC). An empty host list disables all requests, including catalog lookup and quotes. Requests require HTTPS on port 443 and public DNS addresses. Operators must control the approved hosts and their DNS; this is not a sandbox against a malicious approved seller or DNS rebinding.
 
-Tools: `x402_catalog` (demo endpoints from [grug402.dev](https://grug402.dev)), `x402_request` (call + pay, supports `dry_run`), `x402_ledger` (paper trail), `x402_wallet_status` (balances per network).
+Use `x402_catalog` to inspect demo metadata, then `x402_request` with `dry_run: true` to quote an endpoint. Obtain operator approval for the destination and amount before paying. `max_amount` can only lower the configured per-call cap. The CLI validates its own challenge and uses a threshold no greater than the quoted price. The plugin never authorizes an unlimited Permit2 approval; an approval requirement must be handled separately by the operator.
 
-Every attempt, including refusals and failures, is appended to `${HERMES_HOME}/x402/ledger.jsonl` on the volume with the requester, memo, amount, network, and settlement tx. `X402_MAX_PER_CALL` (default `0.01`) is a hard per-call cap.
+`x402_ledger` reads persistent attempts from `${HERMES_HOME}/x402/ledger.jsonl`. A durable intent is written before network activity and before signing; unavailable storage blocks payment. Final write errors are returned explicitly. Protected content and URL query strings are excluded from the ledger. Requester labels are caller-supplied annotations, not authenticated attribution. This local ledger is not tamper-proof.
 
-To pay on Base Sepolia, fund the wallet address (`x402_wallet_status`) with test USDC from https://faucet.circle.com.
+A successful HTTP response describes delivery. `settlement_reported` requires a matching CLI payment report and transaction hash; on-chain reconciliation remains unverified. `payment_unknown` or a pending ledger entry may represent a charge: inspect transaction status before retrying. `x402_benchmark` runs at most 20 sequential requests through the same controls, reserves a fixed per-call share of its maximum 0.05 SBC run budget, and stops on unknown outcomes. There is no cumulative wallet spending limit. Use a dedicated testnet wallet and restrict who can invoke payment tools; opening a workspace bot also opens its enabled wallet tools.
 
-Try: *"Show me three x402 demo APIs"*, *"Buy the weather on Radius and on Base Sepolia and compare"*, *"Show the x402 ledger"*.
+Try: *"Show me three Radius Testnet x402 demo APIs"*, *"Quote this approved endpoint without paying"*, *"Show the x402 ledger"*.
 
 ## Slack app from code (Slack CLI)
 
@@ -417,12 +413,13 @@ Safe update workflow: dry-run the intended specialized tool, inspect the diff, s
 | `RADIUS_HOME` | Optional radius-cli home directory. Default: `/data/.hermes/.radius-cli`. |
 | `RADIUS_WALLET_ADDRESS` | Optional explicit wallet address override. Normally auto-derived from radius-cli keystore. |
 | `RADIUS_NETWORK` | Wallet network. Default: `testnet`. |
-| `RADIUS_RPC_URL` | Optional RPC override. Default testnet RPC is `https://rpc.testnet.radiustech.xyz`. |
-| `RADIUS_SBC_ADDRESS` | Optional SBC token address override. |
-| `RADIUS_CHAIN_ID` | Optional chain ID override. Default testnet chain id `72344`. |
-| `RADIUS_EXPLORER_URL` | Optional explorer override. Default `https://testnet.radiustech.xyz`. |
+| `RADIUS_RPC_URL` | Optional RPC override, read by radius-cli. Default: the RPC for `RADIUS_NETWORK`. |
+| `RADIUS_SBC_ADDRESS` | Optional SBC token address override, read by radius-cli. |
+| `RADIUS_CHAIN_ID` | Optional chain ID shown in `radius_tx_status` output. Default: from `RADIUS_NETWORK` (`72344` testnet, `723487` mainnet). |
+| `RADIUS_EXPLORER_URL` | Optional explorer used for tx links. Default: from `RADIUS_NETWORK`. |
 | `RADIUS_CLI_BIN` | Optional radius-cli binary path override. |
 | `RADIUS_AUTO_FUND` | Set to `false` to skip faucet on boot. Default: enabled. |
+| `RADIUS_FAUCET_URL` | Optional faucet API base for the first-boot drip. Default: `https://testnet.radiustech.xyz/api/v1/faucet`. |
 
 The radius-cli keystore is stored under `${RADIUS_HOME}` with restricted permissions and persists across redeploys via the Railway volume.
 
@@ -437,7 +434,7 @@ Once deployed, you can ask the agent:
 - *"What is my wallet address?"*
 - *"Check my Radius wallet balance now."*
 
-The preferred interface is the bundled `radius-cli` plugin tools. The underlying wallet bootstrap/faucet helper scripts live under `/app/scripts/radius/`.
+The preferred interface is the bundled `radius-cli` plugin tools. Boot-time wallet setup and the first-boot faucet drip are done in `scripts/entrypoint.sh` with `radius-cli` (`wallet address`, `wallet export`, `wallet sign`); the image pins radius-cli with the `RADIUS_CLI_VERSION` build arg.
 
 Wallet tool behavior:
 
@@ -686,7 +683,7 @@ hermes pairing list
 2. Writes non-empty env vars to `${HERMES_HOME}/.env`.
 3. Clears empty integer-typed variables from the process environment (prevents `ValueError` in Hermes).
 4. Creates `${HERMES_HOME}/config.yaml` if it doesn't exist.
-5. Initializes Radius wallet if not already done (generates key, calls faucet).
+5. Initializes Radius wallet via radius-cli if not already done (creates the keystore, exports the key for JWT/ERC-8004, signs and requests a faucet drip).
 6. Copies all local `skills/*.md` files to `${HERMES_HOME}/skills/` (overwrites on each boot).
 7. Ensures the managed Radius external directory exists on persistent storage (`RADIUS_SKILLS_DIR`), bootstraps it from `/app/vendor/radius-skills` when empty (optional), scans all upstream skill directories, writes a discovery manifest, registers the derived parent roots as Hermes `skills.external_dirs`, and optionally warns or fails if `EXPECTED_VENDORED_SKILLS` are missing.
 8. Copies bundled plugins from `plugins/*` to `${HERMES_HOME}/plugins/`.
@@ -715,10 +712,12 @@ Make sure you're on a deployment with the updated entrypoint. The template now f
 Verify the Railway volume is mounted at `/data` in your service settings. Without the volume, state is lost on every deploy.
 
 **Radius wallet not initialized**
-Check deploy logs for `[radius]` lines. If wallet initialization appears to have failed, SSH in and run:
+Check deploy logs for `[radius]` and `[bootstrap]` lines. Setup retries on the next boot until it succeeds. To check the wallet by hand, SSH in and run:
 ```bash
-python3 /app/scripts/radius/wallet_init.py
+radius-cli wallet address
+radius-cli wallet balance
 ```
+To re-run first-boot setup (including the faucet drip), delete `${RADIUS_HOME}/initialized` and redeploy.
 
 **Skill not updating after edits**
 Skills now overwrite on every boot. Redeploy after editing any file in `skills/`.

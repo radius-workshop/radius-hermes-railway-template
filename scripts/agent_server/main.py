@@ -69,6 +69,7 @@ from logging_utils import (
     set_request_context,
     update_request_context,
 )
+from radius_cli import radius_home, wallet_balance
 from security_headers import apply_browser_security_headers, wallet_explorer_link
 from url_utils import get_base_url
 
@@ -311,8 +312,8 @@ def _is_observable_path(path: str) -> bool:
 
 
 def _radius_address_file() -> Path:
-    hermes_home = os.environ.get("HERMES_HOME", "/data/.hermes")
-    return Path(hermes_home) / ".radius" / "address"
+    # Written by entrypoint.sh after `radius-cli wallet address`.
+    return radius_home() / "address"
 
 
 def _wallet_address() -> Optional[str]:
@@ -343,16 +344,7 @@ def _build_wallet_summary() -> dict:
         }
 
     try:
-        result = subprocess.run(
-            [sys.executable, "/app/scripts/radius/balance.py", address],
-            capture_output=True,
-            text=True,
-            timeout=20,
-        )
-        if result.returncode != 0:
-            error = (result.stderr or result.stdout or "balance_failed").strip()
-            raise RuntimeError(error)
-        data = json.loads(result.stdout)
+        data = wallet_balance(address)
         return {
             "address": data.get("address") or address,
             "sbc": data.get("sbc"),
