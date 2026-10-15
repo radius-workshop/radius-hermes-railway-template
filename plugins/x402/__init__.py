@@ -8,6 +8,9 @@ from __future__ import annotations
 import base64
 import fcntl
 import ipaddress
+import http.client
+import ssl
+import zlib
 import json
 import os
 import re
@@ -98,19 +101,54 @@ def _safe_url(url: str) -> str:
 
 def _send(method: str, url: str, headers: dict, body: str | None) -> requests.Response:
     _validate_url(url)
-    # Ignore ambient proxies and netrc credentials. Never replay credentials via redirects.
-    with requests.Session() as session:
-        session.trust_env = False
-        with session.request(method, url, headers=headers, data=body, timeout=HTTP_TIMEOUT,
-                             allow_redirects=False, stream=True) as response:
-            content = bytearray()
-            for chunk in response.iter_content(65536):
-                content.extend(chunk)
-                if len(content) > MAX_RESPONSE:
-                    raise X402Error("response exceeds 1 MiB limit")
-            response._content = bytes(content)
-            response._content_consumed = True
-            return response
+    parsed = urlsplit(url)
+    # Revalidate and pin the actual connection address. The earlier allowlist
+    # check alone cannot prevent DNS from changing before an HTTP library connects.
+    addresses = socket.getaddrinfo(parsed.hostname, 443, type=socket.SOCK_STREAM)
+    if not addresses or any(not ipaddress.ip_address(item[4][0]).is_global for item in addresses):
+        raise X402Error("destination must resolve only to public addresses")
+    address = addresses[0][4][0]
+
+    class PinnedHTTPSConnection(http.client.HTTPSConnection):
+        def connect(self):
+            raw = socket.create_connection((address, 443), timeout=self.timeout)
+            try:
+                self.sock = self._context.wrap_socket(raw, server_hostname=self.host)
+            except Exception:
+                raw.close()
+                raise
+
+    connection = PinnedHTTPSConnection(parsed.hostname, timeout=HTTP_TIMEOUT, context=ssl.create_default_context())
+    try:
+        path = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+        # Direct sockets ignore ambient proxies and netrc. http.client does not
+        # follow redirects, so credentials and bodies stay on this exact URL.
+        request_headers = {**headers, "Host": parsed.netloc, "Accept-Encoding": "identity"}
+        connection.request(method, path, body=body.encode() if body is not None else None, headers=request_headers)
+        incoming = connection.getresponse()
+        raw = incoming.read(MAX_RESPONSE + 1)
+        if len(raw) > MAX_RESPONSE:
+            raise X402Error("response exceeds 1 MiB limit")
+        encoding = (incoming.getheader("Content-Encoding") or "").lower()
+        if encoding in {"gzip", "deflate"}:
+            decoder = zlib.decompressobj(16 + zlib.MAX_WBITS if encoding == "gzip" else zlib.MAX_WBITS)
+            raw = decoder.decompress(raw, MAX_RESPONSE + 1)
+            if len(raw) > MAX_RESPONSE or decoder.unconsumed_tail:
+                raise X402Error("response exceeds 1 MiB limit")
+            if not decoder.eof:
+                raise X402Error("invalid compressed response")
+        elif encoding not in {"", "identity"}:
+            raise X402Error("unsupported response encoding")
+        response = requests.Response()
+        response.status_code = incoming.status
+        response.headers = requests.structures.CaseInsensitiveDict(incoming.getheaders())
+        response.encoding = requests.utils.get_encoding_from_headers(response.headers)
+        response.url = url
+        response._content = raw
+        response._content_consumed = True
+        return response
+    finally:
+        connection.close()
 
 
 def _decode_b64json(value) -> dict | None:
@@ -178,6 +216,7 @@ def _run_radius_cli(args: list[str], target_url: str | None = None) -> dict:
         env.pop(key, None)
     env.pop("NODE_OPTIONS", None)
     env.pop("NODE_EXTRA_CA_CERTS", None)
+    env.pop("NODE_TLS_REJECT_UNAUTHORIZED", None)
     if target_url:
         guard = str(Path(__file__).resolve().with_name("fetch-guard.mjs"))
         if any(c.isspace() for c in guard):
@@ -270,7 +309,9 @@ def x402_request(params: dict) -> dict:
                 payment = result.get("payment") or {}
                 settlement = _decode_b64json((result.get("headers") or {}).get("payment-response"))
                 tx = payment.get("txHash", "")
-                reported = (payment.get("paid") is True and payment.get("network") == NETWORK
+                reported = (payment.get("paid") is True and result.get("cli_exit_code") == 0
+                            and (settlement is None or settlement.get("success") is True)
+                            and payment.get("network") == NETWORK
                             and payment.get("protocol") == "x402" and payment.get("scheme") == "exact"
                             and str(payment.get("asset", "")).lower() == ASSET.lower()
                             and payment.get("amountWei") == offer["amount"]

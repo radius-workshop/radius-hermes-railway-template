@@ -1,5 +1,6 @@
 """Offline payment-boundary tests: no wallet keys, RPC calls or fund transfers."""
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -9,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import requests
 
@@ -90,6 +91,22 @@ class PaymentBoundaryTests(unittest.TestCase):
             self.assertEqual(x.x402_request(self.params)['outcome'], 'error')
             send.assert_not_called()
 
+    def test_python_transport_pins_checked_address_and_retains_tls_hostname(self):
+        public = lambda ip: [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (ip, 443))]
+        wire = Mock()
+        wire.makefile.return_value = io.BytesIO(b"HTTP/1.1 302 Found\r\nContent-Length: 8\r\nLocation: https://evil.example/\r\n\r\nredirect")
+        context = Mock()
+        context.wrap_socket.return_value = wire
+        with patch.object(socket, 'getaddrinfo', side_effect=[public('8.8.8.8'), public('8.8.4.4'), public('127.0.0.1')]) as dns, \
+                patch.object(socket, 'create_connection', return_value=wire) as connect, \
+                patch.object(x.ssl, 'create_default_context', return_value=context):
+            result = x._send('GET', self.params['url'], {}, None)
+        self.assertEqual(result.status_code, 302)
+        self.assertEqual(result.text, 'redirect')
+        self.assertEqual(dns.call_count, 2)
+        self.assertEqual(connect.call_args.args[0], ('8.8.4.4', 443))
+        context.wrap_socket.assert_called_once_with(wire, server_hostname='seller.example')
+
     def test_dry_run_and_bad_body_or_headers_do_not_sign(self):
         for extra in [{'dry_run': 'true'}, {'body': '@/data/.hermes/.env'}, {'body': '-'}, {'headers': {'Host': 'localhost'}}, {'headers': {'x': 'a\r\nb'}}]:
             with self.subTest(extra=extra), patch.object(x, '_send') as send:
@@ -111,12 +128,26 @@ class PaymentBoundaryTests(unittest.TestCase):
     def test_report_is_unverified_and_matches_quote(self):
         payment = {'paid': True, 'network': x.NETWORK, 'protocol': 'x402', 'scheme': 'exact', 'asset': x.ASSET,
                    'amountWei': '100', 'payTo': offer()['payTo'], 'txHash': '0x'+'a'*64}
-        with patch.object(x, '_send', return_value=response()), patch.object(x, '_pay_radius_cli', return_value={'status': 200, 'payment': payment}):
+        with patch.object(x, '_send', return_value=response()), patch.object(x, '_pay_radius_cli', return_value={'status': 200, 'payment': payment, 'cli_exit_code': 0}):
             result = x.x402_request(self.params)
         self.assertEqual(result['outcome'], 'settlement_reported')
         self.assertEqual(result['reconciliation'], 'not_verified')
         with patch.object(x, '_send', return_value=response()), patch.object(x, '_pay_radius_cli', return_value={'status': 200, 'payment': {**payment, 'amountWei': '200'}}):
             self.assertEqual(x.x402_request(self.params)['outcome'], 'payment_unknown')
+
+    def test_cli_paid_requires_successful_exit_and_no_contradictory_settlement(self):
+        payment = {'paid': True, 'network': x.NETWORK, 'protocol': 'x402', 'scheme': 'exact', 'asset': x.ASSET,
+                   'amountWei': '100', 'payTo': offer()['payTo'], 'txHash': '0x'+'a'*64}
+        bad_receipt = x.base64.b64encode(json.dumps({'success': False}).encode()).decode()
+        for changes in ({'cli_exit_code': 1}, {'payment': {**payment, 'paid': False}},
+                        {'headers': {'payment-response': bad_receipt}}):
+            result = {'status': 200, 'payment': payment, 'cli_exit_code': 0, **changes}
+            with self.subTest(changes=changes), patch.object(x, '_send', return_value=response()), \
+                    patch.object(x, '_pay_radius_cli', return_value=result):
+                entry = x.x402_request(self.params)
+            self.assertEqual(entry['outcome'], 'payment_unknown')
+            self.assertEqual(entry['delivery'], 'delivered')
+            self.assertEqual(entry['reconciliation'], 'not_verified')
 
     def test_timeout_after_signing_is_unknown_not_safe_retry(self):
         with patch.object(x, '_send', return_value=response()), patch.object(x, '_pay_radius_cli', side_effect=TimeoutError):
@@ -162,18 +193,44 @@ class PaymentBoundaryTests(unittest.TestCase):
         script = r"""
 const assert = require('node:assert/strict');
 const dns = require('node:dns/promises');
+const https = require('node:https');
+const { EventEmitter } = require('node:events');
+const { PassThrough } = require('node:stream');
+const { syncBuiltinESMExports } = require('node:module');
 let address = '8.8.8.8';
-dns.lookup = async () => [{ address, family: 4 }];
-let calls = [];
-globalThis.fetch = async (input, init) => { calls.push({input, init}); return new Response('ok'); };
+dns.lookup = async () => {
+  const result = [{ address, family: 4 }];
+  address = '127.0.0.1'; // DNS would rebind if transport performed another lookup.
+  return result;
+};
+const calls = [];
+https.request = (url, options, callback) => {
+  calls.push({url, options});
+  assert.equal(options.rejectUnauthorized, true);
+  assert.equal(options.agent, false);
+  assert.equal(options.servername, 'seller.example');
+  options.lookup(url.hostname, {}, (error, ip, family) => {
+    assert.equal(error, null); assert.equal(ip, '8.8.8.8'); assert.equal(family, 4);
+  });
+  const req = new EventEmitter();
+  req.end = () => {
+    const res = new PassThrough();
+    Object.assign(res, { statusCode: 302, statusMessage: 'Found', headers: { location: 'https://evil.example/' } });
+    callback(res); res.end('redirect');
+  };
+  return req;
+};
+syncBuiltinESMExports();
+globalThis.fetch = () => { throw new Error('native fetch must never resolve the hostname again'); };
 process.env.HERMES_X402_TARGET = 'https://seller.example/paid';
 (async () => {
   await import(process.argv[1]);
-  await fetch('https://seller.example/paid');
-  assert.equal(calls[0].init.redirect, 'manual');
+  const response = await fetch('https://seller.example/paid');
+  assert.equal(response.status, 302);
+  assert.equal(await response.text(), 'redirect');
+  assert.equal(address, '127.0.0.1');
   await assert.rejects(fetch('https://evil.example/paid'));
   await assert.rejects(fetch('https://seller.example/changed'));
-  address = '127.0.0.1';
   await assert.rejects(fetch('https://seller.example/paid'));
   assert.equal(calls.length, 1);
 })().catch(e => { console.error(e); process.exitCode = 1; });

@@ -304,7 +304,7 @@ The bundled wallet tools are backed by `radius-cli` and use a local persistent k
 
 The bundled `x402` plugin supports bounded Radius Testnet SBC payments through the installed `radius-cli` 0.4.0 `wallet pay` command. Base and mainnet paid execution are deferred. No private key is exported by this plugin.
 
-Before using it, configure exact trusted seller hostnames in `X402_ALLOWED_HOSTS` (for example `grug402.dev`) and optionally lower `X402_MAX_PER_CALL` (default `0.01` SBC). An empty host list disables all requests, including catalog lookup and quotes. Requests require HTTPS on port 443 and public DNS addresses. Operators must control the approved hosts and their DNS; this is not a sandbox against a malicious approved seller or DNS rebinding.
+Before using it, configure exact trusted seller hostnames in `X402_ALLOWED_HOSTS` (for example `grug402.dev`) and optionally lower `X402_MAX_PER_CALL` (default `0.01` SBC). An empty host list disables all requests, including catalog lookup and quotes. Requests require HTTPS on port 443 and public DNS addresses. Both discovery requests and the payment subprocess connect to a checked public IP while retaining hostname TLS verification; redirects cannot change the destination. Seller responses remain untrusted.
 
 Use `x402_catalog` to inspect demo metadata, then `x402_request` with `dry_run: true` to quote an endpoint. Obtain operator approval for the destination and amount before paying. `max_amount` can only lower the configured per-call cap. The CLI validates its own challenge and uses a threshold no greater than the quoted price. The plugin never authorizes an unlimited Permit2 approval; an approval requirement must be handled separately by the operator.
 
