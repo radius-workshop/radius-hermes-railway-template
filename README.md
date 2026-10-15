@@ -282,7 +282,7 @@ This template includes a built-in Radius Testnet wallet. On first boot, the entr
 
 The agent can then check balances, send SBC tokens, and show explorer links — all via natural language in chat.
 
-The bundled wallet tools are backed by `radius-cli` and use a local persistent keystore under `${RADIUS_HOME:-/data/.hermes/.radius-cli}`.
+Use the built-in wallet tools (`radius_wallet_address`, `radius_balance`, `radius_send_sbc`, `radius_tx_status`) for wallet actions. These tools are backed by `radius-cli` and use a local persistent keystore under `${RADIUS_HOME:-/data/.hermes/.radius-cli}`.
 
 - Wallet creation happens automatically on first boot via `radius-cli wallet address`.
 - The same local wallet is used for wallet actions, DID/JWT auth, homepage wallet summary, and ERC-8004 identity.
@@ -539,7 +539,7 @@ Any `.md` file you place in the `skills/` directory of this repo will be copied 
 2. Write instructions in plain Markdown — what the agent should know, how to behave, what commands to run.
 3. Redeploy. The skill will be installed on next boot.
 
-The `radius-wallet.md` skill is already included and tells the agent to prefer the bundled Radius wallet tools, with script fallback where needed.
+The `radius-wallet.md` skill is already included and tells the agent to use the bundled Radius wallet tools. Direct CLI commands are reserved for explicit operator debugging; legacy wallet scripts have been removed.
 
 The `using-godaddy.md` skill is also included. It tells Hermes to route GoDaddy domain availability and suggestion requests to the configured GoDaddy MCP server, to use `godaddy_dns_set_records` for setting DNS records on a known GoDaddy-managed domain, and to route Agent Name Service registry requests to the local `godaddy-ans` plugin tools. GoDaddy ANS defaults to production; set `GODADDY_ANS_ENV=ote` only when OTE is explicitly required. For example, ANS registry searches should call `godaddy_ans_search` directly instead of inspecting plugin files, running Python scripts, installing packages, or reading GoDaddy API secrets in a terminal. ANS registration uses `godaddy_ans_prepare_registration` to inspect the Swagger-aligned payload and CSRs, then `godaddy_ans_register` to submit once the agent host, endpoint URLs, and domain-validation prerequisites are correct.
 
