@@ -72,6 +72,7 @@ from logging_utils import (
 from radius_cli import radius_home, wallet_balance
 from security_headers import apply_browser_security_headers, wallet_explorer_link
 from url_utils import get_base_url
+from version import VERSION
 
 configure_logging()
 logger = logging.getLogger("agent-server")
@@ -1752,7 +1753,7 @@ def _build_agent_card_payload() -> dict:
             "AGENT_DESCRIPTION",
             f"Name: {agent_name}",
         ),
-        "version": "1.1.0",
+        "version": VERSION,
         "provider": {
             "name": agent_name,
             "url": BASE_URL,
@@ -5718,10 +5719,17 @@ async def token_exchange(request: Request):
     return JSONResponse({"token": token})
 
 
+@app.get("/livez")
+async def livez():
+    """Process liveness for Railway; no credentials or external calls required."""
+    return {"status": "ok", "version": VERSION}
+
+
 @app.get("/health")
 async def health(auth: dict = Depends(jwt_auth_dep)):
     return {
         "status": "ok",
+        "version": VERSION,
         "uptime": int(time.time() - _start_time),
         "a2a_mode": A2A_MODE,
         "direct_ready": _direct_available(),
