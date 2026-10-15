@@ -26,7 +26,8 @@ RUN pip install --no-cache-dir \
   "cryptography>=41.0.0" \
   "httpx>=0.25.0" \
   "a2a-sdk>=0.3.0" \
-  "requests>=2.28.0"
+  "requests>=2.28.0" \
+  "ruamel.yaml>=0.18,<0.19"
 
 
 FROM python:3.11-slim
