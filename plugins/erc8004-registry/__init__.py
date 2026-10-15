@@ -10,9 +10,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from erc8004_registry import (
     DEFAULT_NETWORK,
     MissingSelfRegistrationFields,
+    add_ans_pointer,
     get_registration,
     get_registry_stats,
     list_registrations,
+    patch_agent_registration,
     register_agent_defaults,
     register_agent,
     self_registration_missing_fields_error,
@@ -58,6 +60,12 @@ def register(ctx):
         except Exception as err:
             return f"Error: {err}"
 
+    def _gas_limit(params, default: int = 2_000_000) -> int:
+        value = params.get("gas_limit")
+        if value is None:
+            value = os.environ.get("ERC8004_GAS_LIMIT")
+        return int(value or default)
+
     def erc8004_get_registration(params, **kwargs):
         params = params or {}
         agent_id = params.get("agent_id")
@@ -99,7 +107,7 @@ def register(ctx):
             lambda: register_agent(
                 registration,
                 network=params.get("network", DEFAULT_NETWORK),
-                gas_limit=int(params.get("gas_limit", 2_000_000)),
+                gas_limit=_gas_limit(params),
             )
         )
 
@@ -150,7 +158,7 @@ def register(ctx):
                 ),
                 oasf_skills=params.get("oasf_skills"),
                 oasf_domains=params.get("oasf_domains"),
-                gas_limit=int(params.get("gas_limit", 2_000_000)),
+                gas_limit=_gas_limit(params),
             )
         )
 
@@ -166,8 +174,48 @@ def register(ctx):
             lambda: update_agent_uri(
                 int(agent_id),
                 registration,
+                replace_full_registration=_as_bool(
+                    params.get("replace_full_registration"), False
+                ),
                 network=params.get("network", DEFAULT_NETWORK),
-                gas_limit=int(params.get("gas_limit", 2_000_000)),
+                gas_limit=_gas_limit(params),
+            )
+        )
+
+    def erc8004_patch_agent_registration(params, **kwargs):
+        params = params or {}
+        agent_id = params.get("agent_id")
+        if agent_id is None:
+            return "Error: missing required parameter 'agent_id'."
+        return _json_result(
+            lambda: patch_agent_registration(
+                int(agent_id),
+                params.get("patch") or {},
+                network=params.get("network", DEFAULT_NETWORK),
+                dry_run=_as_bool(params.get("dry_run"), True),
+                gas_limit=_gas_limit(params),
+            )
+        )
+
+    def erc8004_add_ans_pointer(params, **kwargs):
+        params = params or {}
+        agent_id = params.get("agent_id")
+        if agent_id is None:
+            return "Error: missing required parameter 'agent_id'."
+        return _json_result(
+            lambda: add_ans_pointer(
+                int(agent_id),
+                ans_name=str(params.get("ans_name", "")).strip(),
+                ans_agent_id=str(params.get("ans_agent_id", "")).strip(),
+                agent_host=str(params.get("agent_host", "")).strip(),
+                status=str(params.get("status", "")).strip(),
+                a2a_url=str(params.get("a2a_url", "")).strip(),
+                web_url=str(params.get("web_url", "")).strip(),
+                agent_card_url=str(params.get("agent_card_url", "")).strip(),
+                did=str(params.get("did", "")).strip(),
+                network=params.get("network", DEFAULT_NETWORK),
+                dry_run=_as_bool(params.get("dry_run"), True),
+                gas_limit=_gas_limit(params),
             )
         )
 
@@ -377,7 +425,7 @@ def register(ctx):
         toolset="erc8004-registry",
         schema={
             "name": "erc8004_update_agent_uri",
-            "description": "Normalize, encode, and update an existing ERC-8004 agent URI on the configured Radius registry.",
+            "description": "Full replacement write for an existing ERC-8004 agent URI. Requires a complete registration object; use erc8004_patch_agent_registration or erc8004_add_ans_pointer for partial metadata updates.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -388,7 +436,11 @@ def register(ctx):
                     },
                     "registration": {
                         "type": "object",
-                        "description": "Registration JSON object to normalize and encode as a data URI.",
+                        "description": "Complete registration JSON object to normalize and encode as a data URI.",
+                    },
+                    "replace_full_registration": {
+                        "type": "boolean",
+                        "description": "Optional explicit acknowledgement that this is a full replacement operation.",
                     },
                     "gas_limit": {
                         "type": "integer",
@@ -399,4 +451,107 @@ def register(ctx):
             },
         },
         handler=erc8004_update_agent_uri,
+    )
+
+    ctx.register_tool(
+        name="erc8004_patch_agent_registration",
+        toolset="erc8004-registry",
+        schema={
+            "name": "erc8004_patch_agent_registration",
+            "description": "Fetch, merge, validate, and optionally submit a partial ERC-8004 registration metadata update. Defaults to dry_run=true and preserves existing services unless explicitly changed.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "network": network_property,
+                    "agent_id": {
+                        "type": "integer",
+                        "description": "ERC-721 token id to patch.",
+                    },
+                    "patch": {
+                        "type": "object",
+                        "description": "Patch object with services_add, services_update, aliases_add, externalRegistrations_add or external_registrations_add, and fields.",
+                        "properties": {
+                            "services_add": {
+                                "type": "array",
+                                "items": {"type": "object"},
+                            },
+                            "services_update": {
+                                "type": "array",
+                                "items": {"type": "object"},
+                            },
+                            "aliases_add": {
+                                "type": "array",
+                                "items": {"type": "object"},
+                            },
+                            "externalRegistrations_add": {
+                                "type": "array",
+                                "items": {"type": "object"},
+                            },
+                            "external_registrations_add": {
+                                "type": "array",
+                                "items": {"type": "object"},
+                            },
+                            "fields": {"type": "object"},
+                        },
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "When true, return old/new metadata, diff, and encoded data URI without submitting a transaction. Defaults to true.",
+                    },
+                    "gas_limit": {
+                        "type": "integer",
+                        "description": "Optional transaction gas limit for dry_run=false. Defaults to 2000000.",
+                    },
+                },
+                "required": ["agent_id"],
+            },
+        },
+        handler=erc8004_patch_agent_registration,
+    )
+
+    ctx.register_tool(
+        name="erc8004_add_ans_pointer",
+        toolset="erc8004-registry",
+        schema={
+            "name": "erc8004_add_ans_pointer",
+            "description": "Purpose-built helper that adds canonical web/A2A/DID aliases plus a GoDaddy ANS pointer to an existing ERC-8004 registration. Defaults to dry_run=true.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "network": network_property,
+                    "agent_id": {
+                        "type": "integer",
+                        "description": "ERC-721 token id to patch.",
+                    },
+                    "ans_name": {"type": "string"},
+                    "ans_agent_id": {"type": "string"},
+                    "agent_host": {"type": "string"},
+                    "status": {"type": "string"},
+                    "a2a_url": {"type": "string"},
+                    "web_url": {"type": "string"},
+                    "agent_card_url": {"type": "string"},
+                    "did": {"type": "string"},
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "When true, return old/new metadata, diff, and encoded data URI without submitting a transaction. Defaults to true.",
+                    },
+                    "gas_limit": {
+                        "type": "integer",
+                        "description": "Optional transaction gas limit for dry_run=false. Defaults to 2000000.",
+                    },
+                },
+                "required": [
+                    "agent_id",
+                    "ans_name",
+                    "ans_agent_id",
+                    "agent_host",
+                    "status",
+                    "a2a_url",
+                    "web_url",
+                    "agent_card_url",
+                    "did",
+                ],
+            },
+        },
+        handler=erc8004_add_ans_pointer,
     )

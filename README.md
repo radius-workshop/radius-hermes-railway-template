@@ -12,10 +12,10 @@ This template is worker-only: setup and configuration are done through Railway V
 - First-boot bootstrap from environment variables
 - Persistent Hermes state on a Railway volume at `/data`
 - Telegram, Discord, or Slack support (at least one required)
-- Built-in Radius Testnet wallet (auto-generated on first boot, auto-funded via faucet)
+- Built-in Radius Testnet wallet (instantiated via radius-cli on first boot, auto-funded via faucet)
 - Agent discovery layer served at `/.well-known/*` — ERC 8004 registration, Cloudflare agent skills discovery, and A2A agent card
 - Agent-to-agent (A2A) communication with two execution modes: direct (inline `message/send` + `message/stream`) and delegated (webhook-backed async submission)
-- Persistent cryptographic identity derived from the wallet key — the same `RADIUS_PRIVATE_KEY` signs both transactions and JWTs
+- Persistent cryptographic identity derived from the radius-cli wallet keystore; exported key material is used for JWT and on-chain signing paths
 - Built-in discovery aggregation tool via `get_agent_info`
 - Built-in deterministic ERC-8004 registry tools for reading and writing Radius agent registrations
 - Built-in outbound A2A helper via `send_a2a_message` with sender-side correlation logging
@@ -39,6 +39,8 @@ railway link
 
 # 3. Set required env vars (at minimum: a provider + a platform)
 railway variables --set ANTHROPIC_API_KEY=sk-ant-...
+railway variables --set HERMES_INFERENCE_PROVIDER=anthropic
+railway variables --set LLM_MODEL=<anthropic-model-id>   # the default model is an OpenRouter/OpenAI ID
 railway variables --set TELEGRAM_BOT_TOKEN=123456:ABC...
 
 # 4. Run the pre-deploy check, then deploy
@@ -150,7 +152,8 @@ Template defaults (already included in `railway.toml`):
 - `HERMES_HOME=/data/.hermes`
 - `HOME=/data`
 - `MESSAGING_CWD=/data/workspace`
-- `LLM_MODEL=openai/gpt-5.4-nano`
+
+If `LLM_MODEL` is not set, `scripts/entrypoint.sh` writes `openai/gpt-5.4-nano` as the model in `config.yaml`.
 
 ## Important: how to set variables in Railway
 
@@ -237,6 +240,19 @@ SLACK_ALLOWED_USERS=U01234ABCDE,U09876WXYZ
 
 To find your Telegram user ID, message [@userinfobot](https://t.me/userinfobot).
 
+### Slack in a shared channel
+
+When the bot sits in a channel with other people (and other bots), these upstream Hermes Slack variables keep it scoped. They are read by the Hermes gateway from the Railway environment:
+
+```
+SLACK_ALLOWED_CHANNELS=C0123456789          # only respond in these channel IDs (DMs are exempt)
+SLACK_STRICT_MENTION=true                   # every channel message needs a fresh @mention
+SLACK_IGNORE_OTHER_USER_MENTIONS=true       # skip messages that open by @mentioning someone else
+SLACK_ALLOW_BOTS=mentions                   # other bots can reach it only by @mentioning it
+```
+
+`SLACK_ALLOWED_USERS` still applies on top of these. See the [Hermes Slack docs](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/slack) for the full list.
+
 ### Provider selection
 
 If you set multiple provider keys, pin which one Hermes uses:
@@ -259,19 +275,18 @@ Use any model ID supported by your provider. OpenRouter model IDs look like `ope
 
 This template includes a built-in Radius Testnet wallet. On first boot, the entrypoint:
 
-1. Generates a private key (or uses `RADIUS_PRIVATE_KEY` if you set one).
-2. Persists the key and address under `/data/.hermes/.radius/`.
-3. Requests SBC testnet tokens from the Radius faucet.
-4. Installs a wallet skill so Hermes knows how to use it.
+1. Instantiates a local radius-cli keystore (or reuses an existing one) under `${RADIUS_HOME:-/data/.hermes/.radius-cli}`.
+2. Caches the wallet address for runtime metadata and homepage display.
+3. Exports key material for JWT + ERC-8004 signing compatibility.
+4. Requests SBC testnet tokens from the Radius faucet (unless `RADIUS_AUTO_FUND=false`).
 
 The agent can then check balances, send SBC tokens, and show explorer links — all via natural language in chat.
 
-The bundled wallet tools now support two wallet providers for wallet actions:
+The bundled wallet tools are backed by `radius-cli` and use a local persistent keystore under `${RADIUS_HOME:-/data/.hermes/.radius-cli}`.
 
-- `local` — the default for every new session, backed by the persisted `RADIUS_PRIVATE_KEY`
-- `para` — an optional Para-backed operator wallet for session-scoped wallet actions
-
-This provider choice only affects wallet actions. The agent's public wallet identity, DID/JWT auth, homepage wallet summary, and ERC-8004 identity remain pinned to the local wallet.
+- Wallet creation happens automatically on first boot via `radius-cli wallet address`.
+- The same local wallet is used for wallet actions, DID/JWT auth, homepage wallet summary, and ERC-8004 identity.
+- Para-backed wallet provider support is removed in this template revision.
 
 ## ERC-8004 registry tools
 
@@ -284,7 +299,9 @@ Use this interface for ERC-8004 work instead of temporary scripts. The plugin ex
 - inspecting registry stats
 - registering the current agent from defaults
 - registering a new agent
-- updating an existing agent URI
+- updating an existing agent URI with a complete replacement registration
+- patching an existing registration while preserving current metadata
+- adding canonical web/A2A/DID aliases plus a GoDaddy ANS pointer
 
 The plugin ships with checked-in Radius network constants for `testnet` and `mainnet`. `testnet` is enabled now and uses the deployed registry at `0x5cd923Ce1244d5498Bf3f9E0F3a374C2567F1A31` on chain `72344`.
 
@@ -303,7 +320,8 @@ The canonical registration shape used by both the plugin and `/.well-known/agent
     },
     {
       "name": "A2A",
-      "endpoint": "https://agent.example/.well-known/agent-card.json",
+      "endpoint": "https://agent.example/a2a",
+      "metadata": "https://agent.example/.well-known/agent-card.json",
       "version": "0.3.0"
     },
     {
@@ -312,9 +330,11 @@ The canonical registration shape used by both the plugin and `/.well-known/agent
       "version": "v1"
     }
   ],
+  "aliases": [],
   "x402Support": false,
   "active": true,
   "registrations": [],
+  "externalRegistrations": [],
   "supportedTrust": ["reputation"]
 }
 ```
@@ -323,37 +343,42 @@ The plugin normalizes this JSON and encodes it as a `data:application/json;base6
 
 For the common case, use `erc8004_register_self` instead of hand-constructing a full `registration` object. It derives `web`, `A2A`, and `DID` service entries from the current agent runtime, but it expects operator-owned metadata like `name`, `description`, `image`, and `supportedTrust` to be supplied either as tool params or env vars. Read tools also return both the raw `token_uri` and `normalized_token_uri` so quoted contract responses are easier to debug.
 
+For partial metadata updates, use `erc8004_patch_agent_registration` with `dry_run=true` first. It fetches the current registration, merges `services_add`, `services_update`, `aliases_add`, `externalRegistrations_add`, and `fields`, deduplicates entries, validates the full result, and returns a data URI plus structural diff without submitting a transaction. Use `erc8004_add_ans_pointer` for the common GoDaddy ANS flow; it adds web/A2A/DID aliases, an `ANS` service, and an `externalRegistrations[]` entry.
+
+Safe update workflow: dry-run the intended specialized tool, inspect the diff, submit that same tool once, then verify with on-chain readback and tx status. For GoDaddy ANS/domain updates, use `erc8004_add_ans_pointer`; do not use generic patch or full replacement tools as probes after the ANS dry-run already shows the intended diff. Keep `erc8004_update_agent_uri` for deliberate full replacement writes only, with `replace_full_registration=true`.
+
+### ERC-8004 variables
+
+| Variable | Description |
+|---|---|
+| `ERC8004_NETWORK` | Defaults to `testnet`. |
+| `ERC8004_TESTNET_RPC_URL` | Defaults to `https://rpc.testnet.radiustech.xyz`. |
+| `ERC8004_TESTNET_REGISTRY` | Defaults to `0x5cd923Ce1244d5498Bf3f9E0F3a374C2567F1A31`. |
+| `ERC8004_TESTNET_EXPLORER_URL` | Defaults to `https://testnet.radiustech.xyz`. |
+| `ERC8004_GAS_LIMIT` | Defaults to `2000000`. |
+| `AGENT_ERC8004_ID` | Optional on-chain token ID for public metadata. |
+| `AGENT_ERC8004_REGISTRY` | Optional registry ref override for public metadata. |
+| `AGENT_ANS_NAME` | Optional ANS pointer, e.g. `ans://v1.0.0.agent0.72344.xyz`. |
+| `AGENT_ANS_AGENT_ID` | Optional GoDaddy ANS UUID. |
+| `AGENT_ANS_HOST` | Optional host, e.g. `agent0.72344.xyz`. |
+| `AGENT_ANS_STATUS` | Optional ANS lifecycle status. |
+
 ### Radius variables (all optional)
 
 | Variable | Description |
 |---|---|
-| `RADIUS_PRIVATE_KEY` | BYO private key (`0x...`). Auto-generated if not set. |
-| `RADIUS_WALLET_ADDRESS` | Derived from key automatically. |
+| `RADIUS_HOME` | Optional radius-cli home directory. Default: `/data/.hermes/.radius-cli`. |
+| `RADIUS_WALLET_ADDRESS` | Optional explicit wallet address override. Normally auto-derived from radius-cli keystore. |
+| `RADIUS_NETWORK` | Wallet network. Default: `testnet`. |
+| `RADIUS_RPC_URL` | Optional RPC override, read by radius-cli. Default: the RPC for `RADIUS_NETWORK`. |
+| `RADIUS_SBC_ADDRESS` | Optional SBC token address override, read by radius-cli. |
+| `RADIUS_CHAIN_ID` | Optional chain ID shown in `radius_tx_status` output. Default: from `RADIUS_NETWORK` (`72344` testnet, `723487` mainnet). |
+| `RADIUS_EXPLORER_URL` | Optional explorer used for tx links. Default: from `RADIUS_NETWORK`. |
+| `RADIUS_CLI_BIN` | Optional radius-cli binary path override. |
 | `RADIUS_AUTO_FUND` | Set to `false` to skip faucet on boot. Default: enabled. |
-| `PARA_API_KEY` | Optional Para server secret key for the alternate `para` wallet provider. |
-| `PARA_SECRET_API_KEY` | Optional alias for `PARA_API_KEY`. |
-| `PARA_ENVIRONMENT` | Optional Para environment. `beta` by default, or `prod` / `production`. |
-| `PARA_REST_BASE_URL` | Optional explicit Para REST base URL override. |
-| `PARA_WALLET_ID` | Optional Para wallet ID to pin the operator wallet if the project has multiple EVM wallets. |
+| `RADIUS_FAUCET_URL` | Optional faucet API base for the first-boot drip. Default: `https://testnet.radiustech.xyz/api/v1/faucet`. |
 
-The wallet key is stored at `/data/.hermes/.radius/key` with permissions `600`. It persists across redeploys via the Railway volume.
-
-### Para wallet setup notes
-
-If you want to use the optional `para` wallet provider in this project, a Secret API key alone is not enough. The Para project also needs an existing operator-owned EVM wallet.
-
-Recommended setup:
-
-1. Set `PARA_API_KEY` or `PARA_SECRET_API_KEY` to your Para Secret API key.
-2. Create an EVM wallet in the Para project before trying to switch the session wallet provider to `para`.
-3. Use `scheme: "DKLS"` for this project's EVM wallet.
-4. If the Para project has multiple EVM wallets, also set `PARA_WALLET_ID` so the agent uses the intended operator wallet.
-
-Notes:
-
-- This project treats Para as a wallet provider for wallet actions only. It does not replace the agent's canonical local identity wallet.
-- `ED25519` is not the right choice for this EVM wallet flow.
-- If no EVM wallet exists in the Para project, the agent will hard-error when a session tries to switch to `para`.
+The radius-cli keystore is stored under `${RADIUS_HOME}` with restricted permissions and persists across redeploys via the Railway volume.
 
 ### Wallet commands (via chat)
 
@@ -363,19 +388,15 @@ Once deployed, you can ask the agent:
 - *"Check my balance"*
 - *"Send 10 SBC to 0x..."*
 - *"Get testnet tokens"*
-- *"Use Para wallet for this session"*
-- *"Switch back to local wallet"*
-- *"What is my local wallet address?"*
-- *"What is my Para wallet address?"*
+- *"What is my wallet address?"*
+- *"Check my Radius wallet balance now."*
 
-The preferred interface is the bundled `radius-cast` plugin tools. The underlying wallet bootstrap and fallback scripts live under `/app/scripts/radius/`.
+The preferred interface is the bundled `radius-cli` plugin tools. Boot-time wallet setup and the first-boot faucet drip are done in `scripts/entrypoint.sh` with `radius-cli` (`wallet address`, `wallet export`, `wallet sign`); the image pins radius-cli with the `RADIUS_CLI_VERSION` build arg.
 
-The wallet tool behavior is:
+Wallet tool behavior:
 
-- Every new session defaults to `local`.
-- If the user explicitly switches the session to `para`, wallet actions default to the Para wallet for the rest of that session.
-- Users can still override per request by explicitly asking for the `local` or `para` wallet.
-- If `para` is requested but not configured, the agent returns a hard error instead of silently falling back.
+- Uses one persistent local radius-cli keystore.
+- No Para provider path in this template revision.
 
 ## Linear integration
 
@@ -469,7 +490,7 @@ References:
 
 ## Agent server
 
-The FastAPI agent server lives in [scripts/agent_server](/Users/eriks/dev/radius/hermes-railway-template/scripts/agent_server) and owns:
+The FastAPI agent server lives in [scripts/agent_server](scripts/agent_server) and owns:
 
 - the public discovery endpoints under `/.well-known/*`
 - `did:web` identity and JWT auth
@@ -480,7 +501,7 @@ The FastAPI agent server lives in [scripts/agent_server](/Users/eriks/dev/radius
 
 The implementation details now live in the local agent-server README:
 
-- [scripts/agent_server/README.md](/Users/eriks/dev/radius/hermes-railway-template/scripts/agent_server/README.md)
+- [scripts/agent_server/README.md](scripts/agent_server/README.md)
 
 That file contains:
 
@@ -517,6 +538,8 @@ Any `.md` file you place in the `skills/` directory of this repo will be copied 
 3. Redeploy. The skill will be installed on next boot.
 
 The `radius-wallet.md` skill is already included and tells the agent to prefer the bundled Radius wallet tools, with script fallback where needed.
+
+The `using-godaddy.md` skill is also included. It tells Hermes to route GoDaddy domain availability and suggestion requests to the configured GoDaddy MCP server, to use `godaddy_dns_set_records` for setting DNS records on a known GoDaddy-managed domain, and to route Agent Name Service registry requests to the local `godaddy-ans` plugin tools. GoDaddy ANS defaults to production; set `GODADDY_ANS_ENV=ote` only when OTE is explicitly required. For example, ANS registry searches should call `godaddy_ans_search` directly instead of inspecting plugin files, running Python scripts, installing packages, or reading GoDaddy API secrets in a terminal. ANS registration uses `godaddy_ans_prepare_registration` to inspect the Swagger-aligned payload and CSRs, then `godaddy_ans_register` to submit once the agent host, endpoint URLs, and domain-validation prerequisites are correct.
 
 Radius-maintained marketplace skills are seeded from `https://github.com/radiustechsystems/skills` at image build time, then managed at runtime as one persistent Hermes external directory (`RADIUS_SKILLS_DIR`, default `/data/.hermes/external-skills/radius-skills`). On boot, the template scans that directory for every `SKILL.md`, derives `skills.external_dirs`, and exposes those skills to Hermes as read-only external skills without copying them into `${HERMES_HOME}/skills/`.
 
@@ -573,12 +596,15 @@ At runtime, gateway sessions start in `MESSAGING_CWD` (`/data/workspace` by defa
 
 ### System prompt
 
-Set `HERMES_SYSTEM_PROMPT` in Railway Variables to give the agent a persistent identity and behavior context:
+Upstream Hermes does not read a `HERMES_SYSTEM_PROMPT` variable. To give the agent a persistent identity and behavior context, edit `HERMES.md` in your fork (it is force-copied into the workspace on every boot), or add per-channel prompts under `slack.channel_prompts` in `${HERMES_HOME}/config.yaml`:
 
-```
-You are a helpful assistant with a built-in Radius Testnet wallet. You can check
-balances, send SBC tokens, and help users interact with the Radius blockchain.
-Always confirm with the user before sending tokens.
+```yaml
+slack:
+  channel_prompts:
+    "C0123456789": |
+      You are a helpful assistant with a built-in Radius Testnet wallet. You can check
+      balances, send SBC tokens, and help users interact with the Radius blockchain.
+      Always confirm with the user before sending tokens.
 ```
 
 ## Simple usage guide
@@ -614,11 +640,11 @@ hermes pairing list
 2. Writes non-empty env vars to `${HERMES_HOME}/.env`.
 3. Clears empty integer-typed variables from the process environment (prevents `ValueError` in Hermes).
 4. Creates `${HERMES_HOME}/config.yaml` if it doesn't exist.
-5. Initializes Radius wallet if not already done (generates key, calls faucet).
+5. Initializes Radius wallet via radius-cli if not already done (creates the keystore, exports the key for JWT/ERC-8004, signs and requests a faucet drip).
 6. Copies all local `skills/*.md` files to `${HERMES_HOME}/skills/` (overwrites on each boot).
 7. Ensures the managed Radius external directory exists on persistent storage (`RADIUS_SKILLS_DIR`), bootstraps it from `/app/vendor/radius-skills` when empty (optional), scans all upstream skill directories, writes a discovery manifest, registers the derived parent roots as Hermes `skills.external_dirs`, and optionally warns or fails if `EXPECTED_VENDORED_SKILLS` are missing.
 8. Copies bundled plugins from `plugins/*` to `${HERMES_HOME}/plugins/`.
-9. Enables the bundled `gen-jwt`, `a2a-send`, and `radius-cast` plugin toolsets so A2A auth, outbound A2A calls, and Radius wallet tools are available immediately.
+9. Enables every bundled plugin in both `toolsets` and `plugins.enabled`, and removes bundled plugins from any stale `plugins.disabled` entry so persisted Railway config cannot hide newly bundled tools.
 10. Links `HERMES.md`, `.hermes.md`, `AGENTS.md`, `README.md`, `skills/`, `plugins/`, and `scripts/` into `${MESSAGING_CWD}` so gateway sessions see the bundled project context immediately. The three context files are force-overwritten on each boot.
 11. Copies published skills to `${HERMES_HOME}/well-known-skills/` for skill discovery endpoints.
 12. Starts the FastAPI agent server in background (binds `PORT`).
@@ -643,10 +669,12 @@ Make sure you're on a deployment with the updated entrypoint. The template now f
 Verify the Railway volume is mounted at `/data` in your service settings. Without the volume, state is lost on every deploy.
 
 **Radius wallet not initialized**
-Check deploy logs for `[radius]` lines. If wallet initialization appears to have failed, SSH in and run:
+Check deploy logs for `[radius]` and `[bootstrap]` lines. Setup retries on the next boot until it succeeds. To check the wallet by hand, SSH in and run:
 ```bash
-python3 /app/scripts/radius/wallet_init.py
+radius-cli wallet address
+radius-cli wallet balance
 ```
+To re-run first-boot setup (including the faucet drip), delete `${RADIUS_HOME}/initialized` and redeploy.
 
 **Skill not updating after edits**
 Skills now overwrite on every boot. Redeploy after editing any file in `skills/`.
@@ -673,3 +701,7 @@ docker run --rm \
   -v "$(pwd)/.tmpdata:/data" \
   hermes-railway-template
 ```
+
+---
+
+> ⚠️ **Demo code — not production-ready.** Provided as-is, without warranty, and may contain known, unpatched vulnerabilities (including in dependencies). If you reuse it, run your own security and supply-chain scans and patch before deploying.

@@ -178,7 +178,7 @@ Set:
 
 The repo includes a sample mock file:
 
-- [mock-agent-skills.index.json](/Users/eriks/dev/radius/hermes-railway-template/scripts/agent_server/mock-agent-skills.index.json)
+- [mock-agent-skills.index.json](mock-agent-skills.index.json)
 
 ### Run locally with mock data
 
@@ -227,7 +227,7 @@ python3 -m uvicorn scripts.agent_server.main:app --reload --port 3000
 
 ## Requirements and local startup
 
-Python dependencies are declared in [requirements.txt](/Users/eriks/dev/radius/hermes-railway-template/scripts/agent_server/requirements.txt):
+Python dependencies are declared in [requirements.txt](requirements.txt):
 
 - `fastapi`
 - `uvicorn[standard]`
@@ -444,9 +444,9 @@ Check:
 
 ## Related files
 
-- [main.py](/Users/eriks/dev/radius/hermes-railway-template/scripts/agent_server/main.py)
-- [auth.py](/Users/eriks/dev/radius/hermes-railway-template/scripts/agent_server/auth.py)
-- [a2a_bridge.py](/Users/eriks/dev/radius/hermes-railway-template/scripts/agent_server/a2a_bridge.py)
-- [a2a_sessions.py](/Users/eriks/dev/radius/hermes-railway-template/scripts/agent_server/a2a_sessions.py)
-- [hermes_client.py](/Users/eriks/dev/radius/hermes-railway-template/scripts/agent_server/hermes_client.py)
-- [mock-agent-skills.index.json](/Users/eriks/dev/radius/hermes-railway-template/scripts/agent_server/mock-agent-skills.index.json)
+- [main.py](main.py)
+- [auth.py](auth.py)
+- [a2a_bridge.py](a2a_bridge.py)
+- [a2a_sessions.py](a2a_sessions.py)
+- [hermes_client.py](hermes_client.py)
+- [mock-agent-skills.index.json](mock-agent-skills.index.json)

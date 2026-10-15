@@ -25,11 +25,25 @@ This repository is a batteries-included Hermes template. Assume these bundled re
 - `plugins/*` are installed to `${HERMES_HOME}/plugins/` on every boot.
 - `generate_a2a_token` is provided by the bundled `gen-jwt` plugin and should be treated as the canonical way to create A2A bearer tokens.
 - `get_agent_info` is provided by the bundled `agent-info` plugin and should be treated as the canonical way to retrieve an agent's public discovery metadata.
-- `radius_wallet_address`, `radius_balance`, `radius_send_sbc`, and `radius_tx_status` are provided by the bundled `radius-cast` plugin and should be treated as the canonical way to perform Radius wallet actions.
-- `/app/scripts/radius/*` contains the built-in Radius wallet scripts.
+- `radius_wallet_address`, `radius_balance`, `radius_send_sbc`, and `radius_tx_status` are provided by the bundled `radius-cli` plugin and should be treated as the canonical way to perform Radius wallet actions.
+- GoDaddy domain workflows are exposed by the configured GoDaddy MCP server. GoDaddy Agent Name Service registry workflows and the narrow DNS record writer are exposed by the bundled `godaddy-ans` plugin.
+- `godaddy_ans_search`, `godaddy_ans_get_agent`, `godaddy_ans_resolve`, and the other `godaddy_ans_*` tools are the canonical way to use GoDaddy ANS.
 - `/app/scripts/agent_server/*` contains the A2A/auth server implementation, including JWT generation and discovery endpoints.
+- `/app/scripts/godaddy/*` contains the GoDaddy ANS helper implementation behind the plugin tools.
 
-For Radius wallet actions, prefer the `radius-cast` plugin tools. Treat `/app/scripts/radius/*` as implementation details for debugging or explicit legacy-script workflows, not the default interface. Do not silently switch from the plugin tools to the Python scripts unless `RADIUS_ALLOW_SCRIPT_FALLBACK=true` is set by the operator.
+For Radius wallet actions, prefer the `radius-cli` plugin tools. The wallet itself is `radius-cli` (keystore under `RADIUS_HOME`); there are no separate Python wallet scripts.
+
+For GoDaddy work, keep the two surfaces separate:
+
+- Domain search, domain availability, and domain suggestions: use the GoDaddy MCP tools.
+- DNS record writes for a known GoDaddy-managed domain: use `godaddy_dns_set_records`, which replaces all records for one type/name pair.
+- ANS / Agent Name Service registration, search, lookup, resolution, and verification: use the `godaddy-ans` plugin tools, especially `godaddy_ans_search` for registry searches.
+
+Default GoDaddy ANS API calls to production. Use OTE only when the operator explicitly asks for it or sets `GODADDY_ANS_ENV=ote`.
+
+For GoDaddy ANS registration, read `skills/using-godaddy.md` first. Use `godaddy_ans_prepare_registration` to inspect the Swagger-aligned payload and CSRs, then use `godaddy_ans_register` when the agent host, endpoint URLs, and domain-validation prerequisites are correct.
+
+Do not inspect `/app/plugins/godaddy-ans`, run `/app/scripts/godaddy/ans.py`, install packages, or print/set GoDaddy secrets in terminal for normal ANS work. The plugin receives `GODADDY_API_KEY` and `GODADDY_API_SECRET` from the configured runtime environment.
 
 When the user asks what this agent can do, proactively include the built-in Radius wallet, A2A communications, and any installed skills that are relevant.
 

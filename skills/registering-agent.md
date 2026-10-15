@@ -20,6 +20,8 @@ Available tools:
 - `erc8004_register_self`
 - `erc8004_register_agent`
 - `erc8004_update_agent_uri`
+- `erc8004_patch_agent_registration`
+- `erc8004_add_ans_pointer`
 
 ## Network model
 
@@ -47,7 +49,8 @@ The canonical registration shape in this repo is:
     },
     {
       "name": "A2A",
-      "endpoint": "https://agent.example/.well-known/agent-card.json",
+      "endpoint": "https://agent.example/a2a",
+      "metadata": "https://agent.example/.well-known/agent-card.json",
       "version": "0.3.0"
     },
     {
@@ -56,9 +59,11 @@ The canonical registration shape in this repo is:
       "version": "v1"
     }
   ],
+  "aliases": [],
   "x402Support": false,
   "active": true,
   "registrations": [],
+  "externalRegistrations": [],
   "supportedTrust": ["reputation"]
 }
 ```
@@ -71,6 +76,11 @@ The plugin normalizes field order and encodes the registration as `data:applicat
 2. For `erc8004_register_self`, collect missing operator-owned profile fields such as `name`, `description`, `image`, and `supportedTrust` before calling the tool. Do not invent them.
 3. The self-registration flow derives the current agent's `web`, `A2A`, and `DID` service entries automatically. Add MCP, OASF, ENS, email, or explicit cross-registry references only when the user provides them.
 4. For reads, use the plugin tools directly and return both `token_uri` and `normalized_token_uri` plus the decoded registration when available.
-5. For advanced writes, collect or construct a structured registration object and pass it to `erc8004_register_agent`. Do not ask the plugin to infer arbitrary prose.
-6. Keep the public `/.well-known/agent-registration.json` and the on-chain registration aligned. In this repo they must be treated as two views of the same canonical model, not separate documents.
-7. If the user asks to see all registered agents, use `erc8004_list_registrations` instead of assuming a hardcoded count.
+5. For partial updates to an existing registration, dry-run first.
+6. Use `erc8004_add_ans_pointer` for GoDaddy ANS aliases and pointers.
+7. If an `erc8004_add_ans_pointer` dry-run produces the intended domain, web, A2A, DID, ANS service, aliases, and `externalRegistrations` diff, call that same tool with `dry_run=false`; do not probe with `erc8004_patch_agent_registration` or `erc8004_update_agent_uri`.
+8. Never call `erc8004_patch_agent_registration` with placeholder `{}` objects in `services_add`, `services_update`, `aliases_add`, or external registration arrays. Use empty arrays for sections with no changes.
+9. Do not call `erc8004_update_agent_uri` as a schema probe. It is a full-replacement write path only and requires `replace_full_registration=true`.
+10. Keep the public `/.well-known/agent-registration.json` and the on-chain registration aligned. In this repo they must be treated as two views of the same canonical model, not separate documents.
+11. If the user asks to see all registered agents, use `erc8004_list_registrations` instead of assuming a hardcoded count.
+12. Standard write flow: one dry run, inspect diff, one submit, then verify with `erc8004_get_registration` and `radius_tx_status`.

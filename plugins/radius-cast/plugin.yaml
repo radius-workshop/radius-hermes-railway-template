@@ -1,8 +1,12 @@
-name: radius-cast
-version: "1.0.0"
-description: "Radius wallet tools with session-scoped local or Para wallet providers, backed by Foundry cast and Para REST signing"
+name: radius-cli
+version: "2.0.0"
+description: "Radius wallet tools backed by radius-cli local keystore"
 provides_tools:
   - radius_wallet_address
   - radius_balance
   - radius_send_sbc
   - radius_tx_status
+toolsets:
+  - radius-cli
+  - radius-wallet
+  - radius-cast

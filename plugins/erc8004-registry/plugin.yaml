@@ -8,3 +8,5 @@ provides_tools:
   - erc8004_register_self
   - erc8004_register_agent
   - erc8004_update_agent_uri
+  - erc8004_patch_agent_registration
+  - erc8004_add_ans_pointer

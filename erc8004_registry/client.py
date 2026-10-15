@@ -11,11 +11,19 @@ from .codec import (
     sanitize_agent_uri,
 )
 from .constants import NetworkConfig, get_network_config
+from .patching import (
+    build_ans_pointer_patch,
+    dry_run_patch_result,
+    full_registration_required_error,
+    merge_registration_patch,
+    missing_full_registration_fields,
+)
 from .self_registration import build_self_registration
 
 
 DEFAULT_REGISTER_GAS = 2_000_000
 DEFAULT_UPDATE_GAS = 2_000_000
+DEFAULT_MAX_AGENT_URI_BYTES = 128_000
 
 
 def _repo_root() -> Path:
@@ -124,6 +132,35 @@ def _parse_int(output: str) -> int:
     return int(first_token)
 
 
+def _max_agent_uri_bytes() -> int:
+    configured = os.environ.get("ERC8004_MAX_AGENT_URI_BYTES", "").strip()
+    if not configured:
+        return DEFAULT_MAX_AGENT_URI_BYTES
+    value = int(configured)
+    if value <= 0:
+        raise ValueError("ERC8004_MAX_AGENT_URI_BYTES must be a positive integer")
+    return value
+
+
+def _effective_gas_limit(value: int | None, default: int) -> int:
+    configured = value or os.environ.get("ERC8004_GAS_LIMIT") or default
+    gas_limit = int(configured)
+    if gas_limit <= 0:
+        raise ValueError("ERC8004_GAS_LIMIT must be a positive integer")
+    return gas_limit
+
+
+def _check_agent_uri_size(agent_uri: str) -> None:
+    size = len(agent_uri.encode("utf-8"))
+    maximum = _max_agent_uri_bytes()
+    if size > maximum:
+        raise ValueError(
+            f"Encoded agent URI is {size} bytes, exceeding the configured "
+            f"limit of {maximum} bytes. Reduce registration metadata size or "
+            "raise ERC8004_MAX_AGENT_URI_BYTES intentionally before submitting."
+        )
+
+
 def _call(config: NetworkConfig, signature: str, *args: str) -> str:
     return _run_cast(
         [
@@ -224,15 +261,20 @@ def list_registrations(
     end = min(total_supply, start + count)
     items = []
     for agent_id in range(start, end):
-        token_uri = _call(config, "tokenURI(uint256)(string)", str(agent_id))
-        normalized_uri = sanitize_agent_uri(token_uri)
-        item = {
-            "agent_id": agent_id,
-            "token_uri": token_uri,
-            "normalized_token_uri": normalized_uri,
-        }
-        if include_decoded:
-            item["registration"] = decode_agent_uri(normalized_uri)
+        item = {"agent_id": agent_id}
+        try:
+            token_uri = _call(config, "tokenURI(uint256)(string)", str(agent_id))
+            normalized_uri = sanitize_agent_uri(token_uri)
+            item.update(
+                {
+                    "token_uri": token_uri,
+                    "normalized_token_uri": normalized_uri,
+                }
+            )
+            if include_decoded:
+                item["registration"] = decode_agent_uri(normalized_uri)
+        except Exception as err:
+            item["error"] = str(err)
         items.append(item)
     return {
         "network": config.name,
@@ -250,7 +292,7 @@ def register_agent(
     registration: dict,
     *,
     network: str | None = None,
-    gas_limit: int = DEFAULT_REGISTER_GAS,
+    gas_limit: int | None = None,
 ) -> dict:
     config = get_network_config(network)
     before_supply = _parse_int(_call(config, "totalSupply()(uint256)"))
@@ -260,11 +302,12 @@ def register_agent(
         network=config,
     )
     agent_uri = encode_agent_uri(normalized)
+    _check_agent_uri_size(agent_uri)
     tx_hash = _send(
         config,
         "register(string)",
         [agent_uri],
-        gas_limit=int(gas_limit or DEFAULT_REGISTER_GAS),
+        gas_limit=_effective_gas_limit(gas_limit, DEFAULT_REGISTER_GAS),
     )
     receipt = _receipt(tx_hash, config)
     after_supply = _parse_int(_call(config, "totalSupply()(uint256)"))
@@ -305,7 +348,7 @@ def register_agent_defaults(
     oasf_version: str | None = None,
     oasf_skills: list[str] | None = None,
     oasf_domains: list[str] | None = None,
-    gas_limit: int = DEFAULT_REGISTER_GAS,
+    gas_limit: int | None = None,
 ) -> dict:
     config = get_network_config(network)
     registration = build_self_registration(
@@ -342,21 +385,32 @@ def update_agent_uri(
     agent_id: int,
     registration: dict,
     *,
+    replace_full_registration: bool = False,
     network: str | None = None,
-    gas_limit: int = DEFAULT_UPDATE_GAS,
+    gas_limit: int | None = None,
 ) -> dict:
     config = get_network_config(network)
+    if not replace_full_registration:
+        raise ValueError(
+            "erc8004_update_agent_uri is a full-replacement write path. "
+            "Set replace_full_registration=true with a complete registration object, "
+            "or use erc8004_patch_agent_registration or erc8004_add_ans_pointer for partial updates."
+        )
+    missing = missing_full_registration_fields(registration)
+    if missing:
+        raise ValueError(full_registration_required_error(missing))
     wallet = _resolve_wallet_address()
     normalized = normalize_registration(
         registration,
         network=config,
     )
     agent_uri = encode_agent_uri(normalized)
+    _check_agent_uri_size(agent_uri)
     tx_hash = _send(
         config,
         "setAgentURI(uint256,string)",
         [str(agent_id), agent_uri],
-        gas_limit=int(gas_limit or DEFAULT_UPDATE_GAS),
+        gas_limit=_effective_gas_limit(gas_limit, DEFAULT_UPDATE_GAS),
     )
     receipt = _receipt(tx_hash, config)
     return {
@@ -372,3 +426,90 @@ def update_agent_uri(
         "token_uri": agent_uri,
         "registration": normalized,
     }
+
+
+def patch_agent_registration(
+    agent_id: int,
+    patch: dict,
+    *,
+    network: str | None = None,
+    dry_run: bool = True,
+    gas_limit: int | None = None,
+) -> dict:
+    config = get_network_config(network)
+    current = get_registration(agent_id, config.name)
+    old_registration = normalize_registration(
+        current["registration"],
+        network=config,
+    )
+    new_registration, diff = merge_registration_patch(
+        old_registration,
+        patch,
+        network=config,
+    )
+    if dry_run:
+        return dry_run_patch_result(
+            network_name=config.name,
+            agent_id=agent_id,
+            old_registration=old_registration,
+            new_registration=new_registration,
+            diff=diff,
+        )
+
+    update_result = update_agent_uri(
+        agent_id,
+        new_registration,
+        replace_full_registration=True,
+        network=config.name,
+        gas_limit=gas_limit,
+    )
+    post_update = get_registration(agent_id, config.name)
+    return {
+        "dryRun": False,
+        "network": config.name,
+        "chain_id": config.chain_id,
+        "identity_registry": config.identity_registry_ref,
+        "contract_address": config.identity_registry,
+        "agentId": int(agent_id),
+        "txHash": update_result["tx_hash"],
+        "tx_hash": update_result["tx_hash"],
+        "explorerUrl": update_result["explorer_url"],
+        "explorer_url": update_result["explorer_url"],
+        "receipt": update_result["receipt"],
+        "newRegistration": new_registration,
+        "postUpdateReadback": post_update,
+    }
+
+
+def add_ans_pointer(
+    agent_id: int,
+    *,
+    ans_name: str,
+    ans_agent_id: str,
+    agent_host: str,
+    status: str,
+    a2a_url: str,
+    web_url: str,
+    agent_card_url: str,
+    did: str,
+    network: str | None = None,
+    dry_run: bool = True,
+    gas_limit: int | None = None,
+) -> dict:
+    patch = build_ans_pointer_patch(
+        ans_name=ans_name,
+        ans_agent_id=ans_agent_id,
+        agent_host=agent_host,
+        status=status,
+        a2a_url=a2a_url,
+        web_url=web_url,
+        agent_card_url=agent_card_url,
+        did=did,
+    )
+    return patch_agent_registration(
+        agent_id,
+        patch,
+        network=network,
+        dry_run=dry_run,
+        gas_limit=gas_limit,
+    )
