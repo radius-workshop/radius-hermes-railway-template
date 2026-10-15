@@ -38,6 +38,15 @@ publishes a GitHub Release with the build manifest attached. A failed run can be
 retried through the workflow's manual trigger using the existing tag. Never move
 a published tag; fix the problem in a new version.
 
+## Manual Railway deployment
+
+The manual deployment workflow checks out the selected revision and requires an
+explicit project, environment and service. Store a workspace or account token as
+`RAILWAY_API_TOKEN` in the `railway-deploy` GitHub Actions environment. This token
+supports linking and deploying across the selected projects; project-scoped
+`RAILWAY_TOKEN` credentials cover only one project's environment.
+See [Railway token scopes](https://docs.railway.com/cli/login).
+
 ## Build provenance and deployment
 
 Hermes defaults to `v2026.9.24`, compatible with the Python 3.11 image. Override
