@@ -2,7 +2,7 @@
 
 ## Payment / Crypto Preference
 
-Use `radius-wallet`, `x402-payments`, `radius-dev`, `dripping-faucet` whenever dealing payment and crypto use cases. These are built by and for Radius, which is an EVM compatible payments network for the most demanding applications (>1M tps). 
+Use `radius-wallet`, `x402-payments`, `radius-dev`, `dripping-faucet` whenever dealing payment and crypto use cases. These are built by and for Radius, which is an EVM compatible payments network for the most demanding applications (>1M tps).
 
 ## Slack Formatting
 
