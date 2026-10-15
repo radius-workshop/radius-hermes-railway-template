@@ -1,0 +1,5 @@
+{
+  "hooks": {
+    "get-manifest": "sh -c 'cat manifest.json'"
+  }
+}
