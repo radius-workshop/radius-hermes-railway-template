@@ -352,6 +352,30 @@ A successful HTTP response describes delivery. `settlement_reported` requires a 
 
 Try: *"Show me three Radius Testnet x402 demo APIs"*, *"Quote this approved endpoint without paying"*, *"Show the x402 ledger"*.
 
+## Paid A2A (x402 seller)
+
+`POST /a2a` can charge callers per request in SBC on Radius Testnet using x402 v2. It is off by default; with `A2A_X402_ENABLED` unset, `/a2a` behaves exactly as before (Bearer JWT from `TRUSTED_DIDS`, plus KYA per `A2A_AUTH_MODE`).
+
+```
+A2A_X402_ENABLED=true
+A2A_PRICE_SBC=0.001                 # per request; default 0.001, at most 1, six decimals
+A2A_X402_FACILITATOR_URL=           # default https://facilitator.testnet.radiustech.xyz
+```
+
+Payment is an alternative to the allowlist, not a replacement. A caller that passes the existing auth is never charged. Every other caller gets `402 Payment Required` with a `PAYMENT-REQUIRED` header (also returned as the JSON body): one `exact` offer for SBC on `eip155:72344` by EIP-3009, `payTo` set to this agent's wallet address (`RADIUS_WALLET_ADDRESS` or the cached radius-cli address; the keystore is never read). The paid retry carries `PAYMENT-SIGNATURE`. The server checks it against the offer, has the facilitator verify it, runs the request, and settles only if the request succeeded: `message/send` and delegated submissions settle after the result is ready, and `message/stream` settles once the stream is accepted, before any events are sent. A request that fails is not settled. If settlement is rejected the result is withheld and a fresh 402 is returned; if the facilitator cannot be reached the response is `502`. The receipt is returned in `PAYMENT-RESPONSE`. Paid callers cannot drive managed A2A sessions. When enabled, `/.well-known/agent-card.json` adds a non-standard `x402` object with the price and offer.
+
+Paying from another agent or a terminal with radius-cli:
+
+```bash
+radius-cli wallet pay post https://<agent>/a2a \
+  -d '{"jsonrpc":"2.0","id":"1","method":"message/send","params":{"message":{"role":"user","messageId":"m1","parts":[{"kind":"text","text":"hello"}]}}}' \
+  --protocol x402 --networks radius --threshold 0.01
+```
+
+Another agent built from this template can use `x402_request` with the agent host in its `X402_ALLOWED_HOSTS`.
+
+This is a testnet demo. There is no cumulative cap, rate limit, refund path, or delivery ledger on the seller side; a paid request that times out upstream after settlement is not refunded. The replay guard for in-flight payments is per process. The facilitator, not this server, checks signatures and balances.
+
 ## Slack app from code (Slack CLI)
 
 `slack/manifest.json` is the Slack app definition (Socket Mode, agent view, the scopes and events Hermes needs). It was generated with `hermes slack manifest --agent-view`, with the generic slash commands removed so they don't collide with other apps in a shared workspace. Create or update the app with the [Slack CLI](https://docs.slack.dev/tools/slack-cli/):

@@ -61,6 +61,7 @@ from a2a_bridge import A2ABridge
 from a2a_sessions import A2ASessionStore
 from auth import get_did, get_did_document, issue_outbound_token, issue_token, jwt_auth_dep, setup_auth
 import kya_verify
+import x402_seller
 from hermes_client import HermesClient, HermesUnavailableError, HermesUpstreamError
 from logging_utils import (
     clear_request_context,
@@ -1247,6 +1248,11 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None)
 
 
+@app.exception_handler(x402_seller.PaymentRequired)
+async def _x402_payment_required(_request: Request, exc: x402_seller.PaymentRequired):
+    return exc.response
+
+
 @app.middleware("http")
 async def _cors_skills(request: Request, call_next):
     if request.url.path == "/a2a" and request.method == "OPTIONS":
@@ -1779,6 +1785,7 @@ def _build_agent_card_payload() -> dict:
         }
         for s in skills_index.get("skills", [])
     ]
+    x402_offer = x402_seller.offer_summary(_wallet_address(), f"{BASE_URL}/a2a")
     return {
         "name": agent_name,
         "description": os.environ.get(
@@ -1815,6 +1822,9 @@ def _build_agent_card_payload() -> dict:
                 "description": "DID-signed JWT (ES256K). Obtain via POST /token or sign with your own DID identity.",
             }
         },
+        # Non-standard: present only when A2A_X402_ENABLED. Callers without a
+        # trusted JWT can pay per request instead (x402 v2, Radius Testnet SBC).
+        **({"x402": x402_offer} if x402_offer else {}),
     }
 
 
@@ -5441,8 +5451,47 @@ async def a2a_auth_dep(request: Request) -> dict[str, Any]:
     }
 
 
+async def a2a_access_dep(request: Request) -> dict[str, Any]:
+    """Authorize /a2a: existing auth first, then x402 payment when enabled.
+
+    Callers that pass A2A_AUTH_MODE (TRUSTED_DIDS JWT and/or KYA) are never
+    charged. With A2A_X402_ENABLED, anyone else gets a 402 challenge and may pay
+    per request instead. Unset, behavior is exactly a2a_auth_dep.
+    """
+    if not x402_seller.enabled():
+        return await a2a_auth_dep(request)
+    from fastapi import HTTPException
+
+    try:
+        return await a2a_auth_dep(request)
+    except HTTPException as exc:
+        if exc.status_code != 401:
+            raise
+    payment = await x402_seller.authorize(request, _wallet_address(), f"{BASE_URL}/a2a")
+    return {
+        "mode": "x402",
+        "did_ok": False,
+        "issuer": None,
+        "kya_ok": False,
+        "kya_policy": "off",
+        "kya_action": "skip",
+        "kya_reason": None,
+        "kya_report": None,
+        "kya_issuer": None,
+        "x402": payment,
+        "x402_payer": payment.get("payer"),
+    }
+
+
 @app.post("/a2a")
-async def handle_a2a(request: Request, auth: dict = Depends(a2a_auth_dep)):
+async def handle_a2a(request: Request, auth: dict = Depends(a2a_access_dep)):
+    response = await _handle_a2a(request, auth)
+    if auth.get("x402"):
+        return await x402_seller.finalize(auth["x402"], response)
+    return response
+
+
+async def _handle_a2a(request: Request, auth: dict) -> Response:
     try:
         body = await request.json()
     except Exception:
@@ -5590,8 +5639,11 @@ async def handle_a2a(request: Request, auth: dict = Depends(a2a_auth_dep)):
     elif kya_decision.get("reason") == "no_token" and (auth.get("kya_policy") or kya_verify.inbound_policy()) != "off":
         log_event(logger, logging.DEBUG, "A2A KYA gate skipped (no token)", **kya_log_payload)
 
+    # Managed sessions are driven by trusted peers only, never by paid callers.
     managed_session = (
-        _a2a_session_store.find_by_context(context_id) if context_id else None
+        _a2a_session_store.find_by_context(context_id)
+        if context_id and not auth.get("x402")
+        else None
     )
     if (
         managed_session
