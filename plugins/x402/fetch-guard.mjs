@@ -10,6 +10,51 @@ const rpc = new URL('https://rpc.testnet.radiustech.xyz');
 const permitted = new Set([target.origin, rpc.origin]);
 const maxBytes = 1_048_576;
 
+const expectedOffer = JSON.parse(process.env.HERMES_X402_EXPECTED_OFFER || 'null');
+if (!expectedOffer || typeof expectedOffer !== 'object' || Array.isArray(expectedOffer)) {
+  throw new Error('x402 validated payment offer is required');
+}
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]));
+  }
+  return value;
+}
+function offerKey(offer) {
+  if (!offer || typeof offer !== 'object' || Array.isArray(offer)) return null;
+  const normalized = { ...offer };
+  for (const field of ['asset', 'payTo']) {
+    if (typeof normalized[field] === 'string') normalized[field] = normalized[field].toLowerCase();
+  }
+  return JSON.stringify(canonical(normalized));
+}
+const expectedKey = offerKey(expectedOffer);
+function inspectedChallenge(headers, body) {
+  const encoded = headers.get('payment-required');
+  let challenge;
+  try {
+    if (encoded) {
+      if (encoded.length > maxBytes || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) throw new Error('invalid base64');
+      challenge = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
+    } else challenge = JSON.parse(body.toString('utf8'));
+  } catch { throw new Error('x402 repeated challenge is invalid'); }
+  if (!challenge || challenge.x402Version !== 2 || !Array.isArray(challenge.accepts)
+      || challenge.accepts.length === 0 || challenge.accepts.length > 32) {
+    throw new Error('x402 repeated challenge is invalid');
+  }
+  const inspected = challenge.accepts.find(offer => offerKey(offer) === expectedKey);
+  if (!inspected) throw new Error('x402 payment offer changed after inspection; refusing before signing');
+  // Preserve the selected offer and challenge metadata, removing alternate offers
+  // so SDK preference order cannot select a different recipient or authorization.
+  const bound = { ...challenge, accepts: [inspected] };
+  const content = Buffer.from(JSON.stringify(bound));
+  headers.set('payment-required', content.toString('base64'));
+  headers.set('content-length', String(content.length));
+  headers.delete('content-encoding');
+  return content;
+}
+
 function publicAddress(address) {
   if (isIP(address) === 4) {
     const [a, b] = address.split('.').map(Number);
@@ -74,7 +119,11 @@ globalThis.fetch = async (input, init = {}) => {
             if (Array.isArray(value)) value.forEach(v => responseHeaders.append(key, v));
             else if (value !== undefined) responseHeaders.set(key, value);
           }
-          const response = new Response([204, 205, 304].includes(res.statusCode) ? null : Buffer.concat(chunks), {
+          let content = Buffer.concat(chunks);
+          if (url.origin === target.origin && res.statusCode === 402) {
+            content = inspectedChallenge(responseHeaders, content);
+          }
+          const response = new Response([204, 205, 304].includes(res.statusCode) ? null : content, {
             status: res.statusCode, statusText: res.statusMessage, headers: responseHeaders,
           });
           Object.defineProperty(response, 'url', { value: url.href });

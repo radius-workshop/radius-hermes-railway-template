@@ -204,7 +204,7 @@ def _pick_requirement(challenge: dict, preferred=None) -> dict:
     raise X402Error("no Radius Testnet offer; Base and mainnet paid execution are disabled")
 
 
-def _run_radius_cli(args: list[str], target_url: str | None = None) -> dict:
+def _run_radius_cli(args: list[str], target_url: str | None = None, expected_offer: dict | None = None) -> dict:
     # No npx install, key export, private key argument, custom signer, or implicit approval.
     executable = os.environ.get("RADIUS_CLI_BIN", "").strip() or shutil.which("radius-cli")
     if not executable:
@@ -218,11 +218,14 @@ def _run_radius_cli(args: list[str], target_url: str | None = None) -> dict:
     env.pop("NODE_EXTRA_CA_CERTS", None)
     env.pop("NODE_TLS_REJECT_UNAUTHORIZED", None)
     if target_url:
+        if not isinstance(expected_offer, dict):
+            raise X402Error("validated payment offer is required before starting the payment CLI")
         guard = str(Path(__file__).resolve().with_name("fetch-guard.mjs"))
         if any(c.isspace() for c in guard):
             raise X402Error("payment plugin path cannot contain whitespace")
         env["NODE_OPTIONS"] = "--import=" + guard
         env["HERMES_X402_TARGET"] = target_url
+        env["HERMES_X402_EXPECTED_OFFER"] = json.dumps(expected_offer, separators=(",", ":"))
     proc = subprocess.run([executable, *args], input="", text=True, capture_output=True,
                           env=env, timeout=180)
     try:
@@ -235,18 +238,19 @@ def _run_radius_cli(args: list[str], target_url: str | None = None) -> dict:
     return result
 
 
-def _pay_radius_cli(method, url, headers, body, cap):
+def _pay_radius_cli(method, url, headers, body, cap, expected_offer):
     _validate_url(url)
     args = ["--json", "--network", "testnet", "--rpc-url", "https://rpc.testnet.radiustech.xyz",
             "--sbc", ASSET, "wallet", "pay", method.lower(), url,
             "--protocol", "x402", "--networks", "radius", "--threshold", format(cap, "f")]
-    # The CLI independently revalidates network/asset/scheme/amount on its own challenge.
+    # The subprocess guard binds its repeated challenge to this inspected offer
+    # before the SDK can select a recipient or sign. The CLI also revalidates it.
     # No -y / approve flag: never grant an unlimited allowance as a side effect.
     for key, value in headers.items():
         args.extend(["-H", f"{key}: {value}"])
     if body is not None:
         args.extend(["-d", body])
-    return _run_radius_cli(args, target_url=url)
+    return _run_radius_cli(args, target_url=url, expected_offer=expected_offer)
 
 
 def _preview(response):
@@ -305,7 +309,7 @@ def x402_request(params: dict) -> dict:
             else:
                 _append_ledger({**entry, "event": "signing", "outcome": "pending"})
                 signing_started = True
-                result = _pay_radius_cli(method, url, headers, body, min(cap, amount))
+                result = _pay_radius_cli(method, url, headers, body, min(cap, amount), offer)
                 payment = result.get("payment") or {}
                 settlement = _decode_b64json((result.get("headers") or {}).get("payment-response"))
                 tx = payment.get("txHash", "")
