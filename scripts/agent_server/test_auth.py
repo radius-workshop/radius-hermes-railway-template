@@ -2,6 +2,7 @@
 
 Run: python -m unittest discover -s scripts/agent_server -p test_auth.py
 """
+import base64
 import contextlib
 import io
 import json
@@ -103,6 +104,38 @@ class AuthTests(unittest.IsolatedAsyncioTestCase):
             await self.authenticate(self.peer_token(aud=auth.get_did()))
             with self.assertRaises(HTTPException):
                 await self.authenticate(self.peer_token(aud="did:web:other.example"))
+
+    async def test_nested_unverified_payload_is_denied_without_network(self):
+        header = base64.urlsafe_b64encode(b'{"alg":"ES256K"}').rstrip(b'=').decode()
+        nested = b'{"iss":' + b'[' * 2000 + b'"peer"' + b']' * 2000 + b'}'
+        payload = base64.urlsafe_b64encode(nested).rstrip(b'=').decode()
+        with patch.object(auth, "resolve_did_to_public_key", new_callable=AsyncMock) as resolver:
+            with self.assertRaises(HTTPException) as error:
+                await self.authenticate(header + '.' + payload + '.AA')
+            self.assertEqual(error.exception.status_code, 403)
+            resolver.assert_not_awaited()
+
+    async def test_unverified_inspection_cannot_disable_later_claim_verification(self):
+        os.environ["TRUSTED_DIDS"] = self.peer_did
+        decode = jwt.decode
+        options_seen = []
+
+        def record_decode(*args, **kwargs):
+            # Retain actual dict objects to detect reuse across verification modes.
+            options_seen.append(kwargs.get("options"))
+            return decode(*args, **kwargs)
+
+        with patch.object(jwt, "decode", side_effect=record_decode), \
+                patch.object(auth, "resolve_did_to_public_key", new_callable=AsyncMock,
+                             return_value=self.peer_key.public_key()):
+            for token in (self.peer_token(exp=int(auth.time.time()) - 10),
+                          self.peer_token(aud="did:web:another.example")):
+                with self.subTest(token=token), self.assertRaises(HTTPException):
+                    await self.authenticate(token)
+        self.assertEqual(len(options_seen), 4)
+        self.assertEqual(len({id(options) for options in options_seen}), 4)
+        self.assertIs(options_seen[0]["verify_signature"], False)
+        self.assertIsNot(options_seen[1].get("verify_signature"), False)
 
     async def test_resolution_failure_returns_forbidden(self):
         os.environ["TRUSTED_DIDS"] = self.peer_did

@@ -24,6 +24,11 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 # exact upstream dependency pin with an incompatible version.
 COPY scripts/agent_server/requirements.txt /tmp/agent-server-requirements.txt
 COPY scripts/requirements-messaging.txt /tmp/messaging-requirements.txt
+COPY scripts/patch_hermes_dependencies.py /tmp/patch_hermes_dependencies.py
+# Keep the pinned upstream source commit while applying the reviewed PyJWT
+# security compatibility overlay. Exact old metadata is required; provenance
+# records the source before/after hashes and the applied patch script hash.
+RUN python /tmp/patch_hermes_dependencies.py /opt/hermes-agent
 # Upstream's messaging extra requests discord.py[voice], whose PyNaCl<1.6
 # constraint is unsafe and requires uv-only overrides. This pip-based image
 # installs the same chat adapters without optional Discord voice dependencies.
