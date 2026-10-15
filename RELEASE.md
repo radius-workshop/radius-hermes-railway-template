@@ -53,3 +53,5 @@ and tests an image but does not publish a container image or deploy Railway.
 Deploy the desired tag/commit through the Railway workflow or service settings,
 then verify `/livez` reports the expected version. `/livez` checks the HTTP process;
 verify Hermes responses and any configured integrations separately.
+
+The image installs Telegram, Discord, and Slack chat dependencies from `scripts/requirements-messaging.txt`. These match the pinned Hermes messaging requirements with the optional Discord voice extra excluded: its published PyNaCl constraint conflicts with the upstream security override used by uv. Discord voice-channel support is unavailable in this image; update the messaging pins alongside `HERMES_GIT_REF`.

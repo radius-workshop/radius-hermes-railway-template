@@ -23,8 +23,13 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 # Resolve Hermes and the server together so neither can silently replace an
 # exact upstream dependency pin with an incompatible version.
 COPY scripts/agent_server/requirements.txt /tmp/agent-server-requirements.txt
-RUN pip install --no-cache-dir -e "/opt/hermes-agent[messaging,cron,cli,pty]" \
+COPY scripts/requirements-messaging.txt /tmp/messaging-requirements.txt
+# Upstream's messaging extra requests discord.py[voice], whose PyNaCl<1.6
+# constraint is unsafe and requires uv-only overrides. This pip-based image
+# installs the same chat adapters without optional Discord voice dependencies.
+RUN pip install --no-cache-dir -e "/opt/hermes-agent[cron,pty]" \
   -r /tmp/agent-server-requirements.txt \
+  -r /tmp/messaging-requirements.txt \
   && pip check
 
 
