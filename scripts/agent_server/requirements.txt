@@ -1,7 +1,7 @@
 # Direct dependencies tested on Python 3.11 in CI and installed in the image.
 fastapi==0.143.2
 uvicorn[standard]==0.54.0
-pyjwt[crypto]==2.13.0
+pyjwt[crypto]==2.15.1
 cryptography==50.0.0
 httpx==0.28.1
 a2a-sdk==0.3.24
