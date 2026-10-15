@@ -18,15 +18,15 @@ Agents created from this template automatically bootstrap the Radius skills repo
 This means new Railway-template agents should see both the portable skills and the tool/plugin surface:
 
 - skills: `radius-dev`, `x402`, `dripping-faucet`, `radius-agent-ops`
-- tools: `radius_wallet_address`, `radius_balance`, `radius_send_sbc`, `radius_send_rusd`, `radius_tx_status`, `radius_chain_info`
+- tools: `radius_wallet_address`, `radius_balance`, `radius_send_sbc`, `radius_tx_status`
 
 Local verification:
 
 ```bash
-RADIUS_SKILLS_REPO_CHECKOUT=/app/skills python3 -m unittest tests/test_radius_skills_bootstrap.py -v
+python3 -m unittest discover -s tests -p test_radius_skills_bootstrap.py -v
 ```
 
-This test intentionally does not cover the GitHub Action / webhook subscriber notification path.
+The tests run the real boot discovery and config registration against isolated fixtures and check bundled CLI tool registration. They require no external checkout, network, wallet or credentials.
 
 ## What You Get
 
