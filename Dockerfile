@@ -1,4 +1,4 @@
-FROM python:3.11-slim AS builder
+FROM python:3.11-slim-trixie AS builder
 
 ARG HERMES_GIT_REF=v2026.9.24
 
@@ -20,15 +20,15 @@ RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
-RUN pip install --no-cache-dir -e "/opt/hermes-agent[messaging,cron,cli,pty]"
-
-# Install the same direct dependencies exercised by CI.
+# Resolve Hermes and the server together so neither can silently replace an
+# exact upstream dependency pin with an incompatible version.
 COPY scripts/agent_server/requirements.txt /tmp/agent-server-requirements.txt
-RUN pip install --no-cache-dir -r /tmp/agent-server-requirements.txt \
+RUN pip install --no-cache-dir -e "/opt/hermes-agent[messaging,cron,cli,pty]" \
+  -r /tmp/agent-server-requirements.txt \
   && pip check
 
 
-FROM python:3.11-slim
+FROM python:3.11-slim-trixie
 
 # radius-cli (npm, from radiustechsystems/tools) is the wallet: keystore,
 # balances, transfers, receipts, signing. Pin it so boots are reproducible.
@@ -46,6 +46,7 @@ RUN apt-get update \
     tini \
     nodejs \
     npm \
+  && node -e 'if (Number(process.versions.node.split(".")[0]) < 20) throw new Error("radius-cli requires Node.js >=20")' \
   && npm install -g "radius-cli@${RADIUS_CLI_VERSION}" \
   && rm -rf /var/lib/apt/lists/*
 
