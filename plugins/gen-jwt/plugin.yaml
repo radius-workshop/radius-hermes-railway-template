@@ -1,0 +1,5 @@
+name: gen-jwt
+version: "1.0.0"
+description: "Generate signed JWT tokens for A2A authentication using this agent's RADIUS_PRIVATE_KEY identity"
+provides_tools:
+  - generate_a2a_token

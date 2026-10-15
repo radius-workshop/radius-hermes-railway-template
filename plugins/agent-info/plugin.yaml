@@ -1,0 +1,5 @@
+name: agent-info
+version: "1.0.0"
+description: "Aggregate public agent discovery metadata into a single tool call"
+provides_tools:
+  - get_agent_info

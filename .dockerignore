@@ -1,6 +1,5 @@
 .git
 .gitignore
-README.md
 railway.toml
 node_modules
 venv

@@ -1,9 +1,0 @@
-{
-  "name": "skills-server",
-  "version": "1.0.0",
-  "type": "module",
-  "private": true,
-  "dependencies": {
-    "hono": "^4.6.0"
-  }
-}

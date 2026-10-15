@@ -1,0 +1,17 @@
+services:
+  hermes:
+    build:
+      context: .
+      args:
+        HERMES_GIT_REF: main
+    env_file: .env
+    environment:
+      PORT: "3000"
+    ports:
+      - "3000:3000"
+    volumes:
+      - hermes-data:/data
+    restart: unless-stopped
+
+volumes:
+  hermes-data:

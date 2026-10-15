@@ -1,0 +1,26 @@
+{
+  "$schema": "https://schemas.agentskills.io/discovery/0.2.0/schema.json",
+  "skills": [
+    {
+      "name": "radius-wallet",
+      "type": "skill-md",
+      "description": "Inspect Radius wallet balances, transfers, and transaction state.",
+      "url": "http://localhost:3000/.well-known/agent-skills/radius-wallet/SKILL.md",
+      "digest": "sha256:mock-radius-wallet"
+    },
+    {
+      "name": "a2a-comms",
+      "type": "skill-md",
+      "description": "Send and receive A2A messages with JWT-based authentication.",
+      "url": "http://localhost:3000/.well-known/agent-skills/a2a-comms/SKILL.md",
+      "digest": "sha256:mock-a2a-comms"
+    },
+    {
+      "name": "registering-agent",
+      "type": "skill-md",
+      "description": "Prepare ERC-8004 identity metadata and agent registration flows.",
+      "url": "http://localhost:3000/.well-known/agent-skills/registering-agent/SKILL.md",
+      "digest": "sha256:mock-registering-agent"
+    }
+  ]
+}
