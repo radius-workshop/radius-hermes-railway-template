@@ -19,6 +19,9 @@ This template is worker-only: setup and configuration are done through Railway V
 - Built-in discovery aggregation tool via `get_agent_info`
 - Built-in deterministic ERC-8004 registry tools for reading and writing Radius agent registrations
 - Built-in outbound A2A helper via `send_a2a_message` with sender-side correlation logging
+- Built-in KYA spec verification tool via `kya_validate_claims` (fetches issuer JWKS, verifies ES256 signatures, enforces claim shape, audience/environment binding, and jti replay protection)
+- Built-in KYA spec minting tool via `generate_kya_token` (signs KYA / PAY / KYA-PAY JWTs with a persistent P-256 keypair; public half published at `/.well-known/jwks.json`)
+- Optional KYA signed-claim verification (requires `TRUSTED_KYA_ISSUERS`) at `POST /a2a` via the `KYA_INBOUND_POLICY` env var (`off` | `opportunistic` | `required`)
 - Railway-friendly observability: structured JSON logs from the agent server plus forwarded Hermes harness log files
 
 ## How it works
@@ -108,6 +111,17 @@ The bundled public Radius-facing skills include the template-owned skills plus a
 - *"Send a task to https://<other-agent>/a2a asking it to introduce itself."*
 - *"Use the outbound A2A tool to ask the peer agent what skills it has."*
 - *"Continue the existing A2A conversation with the peer agent and ask for a status update."*
+
+### KYA / KYAPay spec workflows
+
+- *"Verify this `kya+jwt` token from another agent against expected audience `swaps.radius.xyz`."*
+- *"Validate this KYA-PAY JWT and tell me whether the signature checks against the issuer JWKS."*
+- *"Check this KYA token but only accept it if the issuer is in our trusted allowlist."*
+- *"Validate this KYA token with replay protection disabled — I just want to inspect the claims."*
+- *"Mint a KYA token for audience https://peer.example so I can prove identity to that agent."*
+- *"Generate a kya-pay token paying 0.50 USD to https://swaps.radius.xyz with stp=coin."*
+- *"What URL should other agents use to fetch our JWKS?"* (Answer: `${PUBLIC_URL}/.well-known/jwks.json`)
+- *"Turn on KYA-required mode for inbound A2A requests."* (Set `KYA_INBOUND_POLICY=required` in Railway.)
 
 ### ERC-8004 registration workflows
 
@@ -294,7 +308,7 @@ This template includes a built-in Radius Testnet wallet. On first boot, the entr
 
 The agent can then check balances, send SBC tokens, and show explorer links — all via natural language in chat.
 
-The bundled wallet tools are backed by `radius-cli` and use a local persistent keystore under `${RADIUS_HOME:-/data/.hermes/.radius-cli}`.
+Use the built-in wallet tools (`radius_wallet_address`, `radius_balance`, `radius_send_sbc`, `radius_tx_status`) for wallet actions. These tools are backed by `radius-cli` and use a local persistent keystore under `${RADIUS_HOME:-/data/.hermes/.radius-cli}`.
 
 - Wallet creation happens automatically on first boot via `radius-cli wallet address`.
 - The same local wallet is used for wallet actions, DID/JWT auth, homepage wallet summary, and ERC-8004 identity.
@@ -580,7 +594,7 @@ Any `.md` file you place in the `skills/` directory of this repo will be copied 
 2. Write instructions in plain Markdown — what the agent should know, how to behave, what commands to run.
 3. Redeploy. The skill will be installed on next boot.
 
-The `radius-wallet.md` skill is already included and tells the agent to prefer the bundled Radius wallet tools, with script fallback where needed.
+The `radius-wallet.md` skill is already included and tells the agent to use the bundled Radius wallet tools. Direct CLI commands are reserved for explicit operator debugging; legacy wallet scripts have been removed.
 
 The `using-godaddy.md` skill is also included. It tells Hermes to route GoDaddy domain availability and suggestion requests to the configured GoDaddy MCP server, to use `godaddy_dns_set_records` for setting DNS records on a known GoDaddy-managed domain, and to route Agent Name Service registry requests to the local `godaddy-ans` plugin tools. GoDaddy ANS defaults to production; set `GODADDY_ANS_ENV=ote` only when OTE is explicitly required. For example, ANS registry searches should call `godaddy_ans_search` directly instead of inspecting plugin files, running Python scripts, installing packages, or reading GoDaddy API secrets in a terminal. ANS registration uses `godaddy_ans_prepare_registration` to inspect the Swagger-aligned payload and CSRs, then `godaddy_ans_register` to submit once the agent host, endpoint URLs, and domain-validation prerequisites are correct.
 
