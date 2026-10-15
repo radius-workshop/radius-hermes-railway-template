@@ -1,6 +1,6 @@
 FROM python:3.11-slim AS builder
 
-ARG HERMES_GIT_REF=main
+ARG HERMES_GIT_REF=v2026.9.24
 
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
