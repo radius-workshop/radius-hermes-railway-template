@@ -158,14 +158,23 @@ fi
 
 validate_platforms
 
-# === Radius: pre-load stored wallet keys into environment ===
-RADIUS_KEY_FILE="${HERMES_HOME}/.radius/key"
-RADIUS_ADDR_FILE="${HERMES_HOME}/.radius/address"
-mkdir -p "${HERMES_HOME}/.radius"
-if [[ -z "${RADIUS_PRIVATE_KEY:-}" && -f "$RADIUS_KEY_FILE" ]]; then
-  export RADIUS_PRIVATE_KEY="$(cat "$RADIUS_KEY_FILE")"
-  echo "[bootstrap] Loaded stored Radius wallet key."
-fi
+# === Radius CLI: ensure persistent wallet home ===
+# radius-cli owns the keystore and chain config. It reads RADIUS_HOME,
+# RADIUS_NETWORK, RADIUS_RPC_URL and RADIUS_SBC_ADDRESS from the environment
+# and derives the RPC URL and SBC address from the network when they are unset.
+RADIUS_HOME="${RADIUS_HOME:-${HERMES_HOME}/.radius-cli}"
+RADIUS_ADDR_FILE="${RADIUS_HOME}/address"
+mkdir -p "${RADIUS_HOME}"
+export RADIUS_HOME
+# radius-cli defaults to mainnet; this template defaults to testnet.
+export RADIUS_NETWORK="${RADIUS_NETWORK:-testnet}"
+# radius-cli treats an empty override as set, so drop blank ones.
+for key in RADIUS_RPC_URL RADIUS_SBC_ADDRESS; do
+  val="${!key:-}"
+  if [[ -z "${val//[[:space:]]/}" ]]; then
+    unset "$key"
+  fi
+done
 if [[ -z "${RADIUS_WALLET_ADDRESS:-}" && -f "$RADIUS_ADDR_FILE" ]]; then
   export RADIUS_WALLET_ADDRESS="$(cat "$RADIUS_ADDR_FILE")"
 fi
@@ -204,10 +213,9 @@ for key in \
   TINKER_API_KEY WANDB_API_KEY RL_API_URL GITHUB_TOKEN BYTEROVER_API_KEY BYTEROVER_LOCAL LINEAR_API_KEY LINEAR_TEAM_ID LINEAR_PROJECT_ID \
   TERMINAL_BACKEND TERMINAL_DOCKER_IMAGE TERMINAL_SINGULARITY_IMAGE TERMINAL_MODAL_IMAGE TERMINAL_CWD TERMINAL_TIMEOUT TERMINAL_LIFETIME_SECONDS TERMINAL_CONTAINER_CPU TERMINAL_CONTAINER_MEMORY TERMINAL_CONTAINER_DISK TERMINAL_CONTAINER_PERSISTENT TERMINAL_SANDBOX_DIR TERMINAL_SSH_HOST TERMINAL_SSH_USER TERMINAL_SSH_PORT TERMINAL_SSH_KEY SUDO_PASSWORD \
   WEB_TOOLS_DEBUG VISION_TOOLS_DEBUG MOA_TOOLS_DEBUG IMAGE_TOOLS_DEBUG CONTEXT_COMPRESSION_ENABLED CONTEXT_COMPRESSION_THRESHOLD CONTEXT_COMPRESSION_MODEL HERMES_MAX_ITERATIONS HERMES_TOOL_PROGRESS HERMES_TOOL_PROGRESS_MODE \
-  RADIUS_PRIVATE_KEY RADIUS_WALLET_ADDRESS RADIUS_NETWORK RADIUS_AUTO_FUND \
+  RADIUS_HOME RADIUS_WALLET_ADDRESS RADIUS_NETWORK RADIUS_RPC_URL RADIUS_SBC_ADDRESS RADIUS_CHAIN_ID RADIUS_EXPLORER_URL RADIUS_CLI_BIN RADIUS_AUTO_FUND RADIUS_FAUCET_URL \
   ERC8004_NETWORK ERC8004_TESTNET_RPC_URL ERC8004_TESTNET_REGISTRY ERC8004_TESTNET_EXPLORER_URL ERC8004_TESTNET_CHAIN_ID ERC8004_MAINNET_RPC_URL ERC8004_MAINNET_REGISTRY ERC8004_MAINNET_EXPLORER_URL ERC8004_MAINNET_CHAIN_ID ERC8004_GAS_LIMIT ERC8004_MAX_AGENT_URI_BYTES \
   AGENT_NAME AGENT_DESCRIPTION AGENT_IMAGE AGENT_ACTIVE AGENT_X402_SUPPORT AGENT_SUPPORTED_TRUST AGENT_A2A_VERSION AGENT_ERC8004_ID AGENT_ERC8004_REGISTRY AGENT_ANS_NAME AGENT_ANS_AGENT_ID AGENT_ANS_HOST AGENT_ANS_STATUS AGENT_WALLET AGENT_EMAIL AGENT_ENS \
-  PARA_API_KEY PARA_SECRET_API_KEY PARA_ENVIRONMENT PARA_REST_BASE_URL PARA_WALLET_ID \
   WEBHOOK_PORT WEBHOOK_SECRET DEBUG_SKILLS \
   EXPECTED_VENDORED_SKILLS STRICT_VENDORED_SKILLS VENDORED_SKILLS_SOURCE \
   RADIUS_SKILLS_AUTO_UPDATE RADIUS_SKILLS_REPO RADIUS_SKILLS_BRANCH RADIUS_SKILLS_WEBHOOK_SECRET RADIUS_SKILLS_GITHUB_TOKEN RADIUS_SKILLS_DIR RADIUS_SKILLS_SYNC_TIMEOUT_SECONDS RADIUS_SKILLS_BOOTSTRAP_FROM_IMAGE \
@@ -296,33 +304,134 @@ else
   echo "[bootstrap] Existing Hermes data found. Skipping one-time init."
 fi
 
-# === Radius: wallet setup ===
-RADIUS_WALLET_MARKER="${HERMES_HOME}/.radius/initialized"
-if [[ ! -f "$RADIUS_WALLET_MARKER" ]]; then
-  echo "[bootstrap] Setting up Radius wallet..."
-  if python3 /app/scripts/radius/wallet_init.py; then
-    date -u +"%Y-%m-%dT%H:%M:%SZ" > "$RADIUS_WALLET_MARKER"
-    # Reload keys generated during init into the current process environment so
-    # the agent server and JWT auth use the persistent wallet immediately.
-    if [[ -f "$RADIUS_KEY_FILE" ]]; then
-      export RADIUS_PRIVATE_KEY="$(cat "$RADIUS_KEY_FILE")"
+# === Radius CLI: wallet setup ===
+RADIUS_WALLET_MARKER="${RADIUS_HOME}/initialized"
+radius_cli_cmd=("${RADIUS_CLI_BIN:-radius-cli}")
+if ! command -v "${radius_cli_cmd[0]}" >/dev/null 2>&1; then
+  if command -v npx >/dev/null 2>&1; then
+    radius_cli_cmd=(npx --yes radius-cli)
+  fi
+fi
+
+# Export the keystore's private key to power JWT auth + ERC-8004 signing.
+radius_export_private_key() {
+  printf 'y\n' | "${radius_cli_cmd[@]}" wallet export 2>/dev/null \
+    | grep -Eo '0x[a-fA-F0-9]{64}' | tail -n1 || true
+}
+
+# Signed faucet drip (challenge -> `radius-cli wallet sign` -> drip), as in the
+# dripping-faucet skill. The key never leaves radius-cli for this step.
+radius_faucet_drip() {
+  local address="$1"
+  local faucet_url="${RADIUS_FAUCET_URL:-https://testnet.radiustech.xyz/api/v1/faucet}"
+  local challenge message signature body response status tx_hash error_code retry_ms
+  faucet_url="${faucet_url%/}"
+
+  challenge="$(curl -sS --max-time 15 "${faucet_url}/challenge/${address}?token=SBC")" || {
+    echo "[radius] Faucet challenge request failed." >&2
+    return 1
+  }
+  message="$(jq -r '.message // .challenge // empty' <<<"$challenge" 2>/dev/null || true)"
+  if [[ -z "$message" ]]; then
+    echo "[radius] Faucet returned no challenge message." >&2
+    return 1
+  fi
+
+  signature="$(printf '%s' "$message" | "${radius_cli_cmd[@]}" wallet sign - 2>/dev/null \
+    | grep -Eo '0x[a-fA-F0-9]{130}' | head -n1 || true)"
+  if [[ -z "$signature" ]]; then
+    echo "[radius] Could not sign the faucet challenge with radius-cli." >&2
+    return 1
+  fi
+
+  body="$(jq -nc --arg address "$address" --arg signature "$signature" \
+    '{address: $address, token: "SBC", signature: $signature}')"
+  response="$(curl -sS --max-time 15 -X POST -H 'content-type: application/json' \
+    -d "$body" -w '\n%{http_code}' "${faucet_url}/drip")" || {
+    echo "[radius] Faucet drip request failed." >&2
+    return 1
+  }
+  status="${response##*$'\n'}"
+  response="${response%$'\n'*}"
+
+  if [[ "$status" == 2* ]]; then
+    tx_hash="$(jq -r '.tx_hash // .txHash // .hash // empty' <<<"$response" 2>/dev/null || true)"
+    if [[ -n "$tx_hash" ]]; then
+      echo "[radius] Faucet tx: ${tx_hash}"
     fi
-    if [[ -f "$RADIUS_ADDR_FILE" ]]; then
-      export RADIUS_WALLET_ADDRESS="$(cat "$RADIUS_ADDR_FILE")"
+    return 0
+  fi
+
+  error_code="$(jq -r 'if (.error | type) == "object" then .error.code else (.error // empty) end' <<<"$response" 2>/dev/null || true)"
+  if [[ "$error_code" == "rate_limited" ]]; then
+    retry_ms="$(jq -r '((.error | objects | .retry_after_ms) // .retry_after_ms // ((.retry_after_seconds // 0) * 1000)) | floor' <<<"$response" 2>/dev/null || echo 0)"
+    echo "[radius] Faucet rate-limited. Retry after $(( ${retry_ms:-0} / 1000 ))s."
+    return 0
+  fi
+  echo "[radius] Faucet drip failed (HTTP ${status}): ${error_code:-$response}" >&2
+  return 1
+}
+
+radius_wait_for_sbc() {
+  local address="$1" sbc
+  for _ in 1 2 3 4 5; do
+    sleep 3
+    sbc="$("${radius_cli_cmd[@]}" --json wallet balance "$address" 2>/dev/null | jq -r '.sbc // empty' 2>/dev/null || true)"
+    if [[ -n "$sbc" && "$sbc" != "0" ]]; then
+      echo "[radius] SBC balance: ${sbc} SBC"
+      return 0
+    fi
+  done
+}
+
+if [[ ! -f "$RADIUS_WALLET_MARKER" ]]; then
+  echo "[bootstrap] Setting up Radius wallet via radius-cli..."
+
+  if "${radius_cli_cmd[@]}" wallet address >/tmp/radius_wallet_address.txt 2>&1; then
+    radius_addr="$(grep -Eo '0x[a-fA-F0-9]{40}' /tmp/radius_wallet_address.txt | head -n1 || true)"
+    if [[ -n "$radius_addr" ]]; then
+      echo "$radius_addr" > "$RADIUS_ADDR_FILE"
+      export RADIUS_WALLET_ADDRESS="$radius_addr"
+      if ! grep -q "^RADIUS_WALLET_ADDRESS=" "$ENV_FILE" 2>/dev/null; then
+        echo "RADIUS_WALLET_ADDRESS=${RADIUS_WALLET_ADDRESS}" >> "$ENV_FILE"
+      fi
     fi
 
-    # Persist generated values to .env for downstream tools.
-    if [[ -n "${RADIUS_PRIVATE_KEY:-}" ]] && ! grep -q "^RADIUS_PRIVATE_KEY=" "$ENV_FILE" 2>/dev/null; then
-      echo "RADIUS_PRIVATE_KEY=${RADIUS_PRIVATE_KEY}" >> "$ENV_FILE"
+    radius_key="$(radius_export_private_key)"
+    if [[ -n "$radius_key" ]]; then
+      export RADIUS_PRIVATE_KEY="$radius_key"
+      if ! grep -q "^RADIUS_PRIVATE_KEY=" "$ENV_FILE" 2>/dev/null; then
+        echo "RADIUS_PRIVATE_KEY=${RADIUS_PRIVATE_KEY}" >> "$ENV_FILE"
+      fi
     fi
-    if [[ -n "${RADIUS_WALLET_ADDRESS:-}" ]] && ! grep -q "^RADIUS_WALLET_ADDRESS=" "$ENV_FILE" 2>/dev/null; then
-      echo "RADIUS_WALLET_ADDRESS=${RADIUS_WALLET_ADDRESS}" >> "$ENV_FILE"
+
+    # Optional faucet funding for first boot.
+    if [[ "${RADIUS_AUTO_FUND:-true}" != "false" && "${RADIUS_AUTO_FUND:-true}" != "0" && -n "${radius_addr:-}" ]]; then
+      echo "[radius] Requesting SBC from faucet..."
+      if radius_faucet_drip "$radius_addr"; then
+        radius_wait_for_sbc "$radius_addr" || true
+      else
+        echo "[radius] WARNING: faucet funding failed; continuing without it." >&2
+      fi
     fi
-    echo "[bootstrap] Radius wallet ready: $(cat "$RADIUS_ADDR_FILE" 2>/dev/null || echo 'unknown')"
+
+    date -u +"%Y-%m-%dT%H:%M:%SZ" > "$RADIUS_WALLET_MARKER"
+    echo "[bootstrap] Radius wallet ready: ${RADIUS_WALLET_ADDRESS:-unknown}"
   else
     echo "[bootstrap] WARNING: Radius wallet setup failed. Will retry on next boot." >&2
+    cat /tmp/radius_wallet_address.txt >&2 || true
   fi
 else
+  if [[ -f "$RADIUS_ADDR_FILE" ]]; then
+    export RADIUS_WALLET_ADDRESS="$(cat "$RADIUS_ADDR_FILE")"
+  fi
+  # Ensure auth key is available even on warm boots.
+  if [[ -z "${RADIUS_PRIVATE_KEY:-}" ]]; then
+    radius_key="$(radius_export_private_key)"
+    if [[ -n "$radius_key" ]]; then
+      export RADIUS_PRIVATE_KEY="$radius_key"
+    fi
+  fi
   echo "[bootstrap] Radius wallet already initialized: ${RADIUS_WALLET_ADDRESS:-unknown}"
 fi
 

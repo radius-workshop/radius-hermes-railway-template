@@ -69,6 +69,7 @@ from logging_utils import (
     set_request_context,
     update_request_context,
 )
+from radius_cli import radius_home, wallet_balance
 from security_headers import apply_browser_security_headers, wallet_explorer_link
 from url_utils import get_base_url
 
@@ -97,6 +98,10 @@ A2A_BRIDGE_MODEL = os.environ.get("A2A_BRIDGE_MODEL", "hermes-agent")
 HERMES_TIMEOUT = float(os.environ.get("HERMES_TIMEOUT", "120"))
 A2A_SESSION_ROOT = Path(HERMES_HOME) / "a2a-sessions"
 A2A_SESSION_TICK_SECONDS = float(os.environ.get("A2A_SESSION_TICK_SECONDS", "2.5"))
+
+RADIUS_RPC_TESTNET = os.environ.get("RADIUS_RPC_TESTNET", "https://rpc.testnet.radiustech.xyz")
+RADIUS_RPC_MAINNET = os.environ.get("RADIUS_RPC_MAINNET", "https://rpc.radiustech.xyz")
+TX_COUNT_CACHE_TTL = float(os.environ.get("TX_COUNT_CACHE_TTL", "15"))
 
 _hermes_client: Optional[HermesClient] = None
 _a2a_bridge: Optional[A2ABridge] = None
@@ -157,6 +162,56 @@ def _mock_wallet_summary() -> Optional[dict]:
         "rusd": os.environ.get("MOCK_RADIUS_RUSD_BALANCE", "10.099815153377649216"),
         "error": os.environ.get("MOCK_RADIUS_WALLET_ERROR") or None,
     }
+
+
+_tx_count_cache: dict[str, tuple[float, int | None]] = {}
+
+
+async def _fetch_tx_count(rpc_url: str, wallet_address: str) -> int | None:
+    if not wallet_address:
+        return None
+
+    cache_key = f"{rpc_url}|{wallet_address.lower()}"
+    now = time.time()
+    cached = _tx_count_cache.get(cache_key)
+    if cached and now - cached[0] < TX_COUNT_CACHE_TTL:
+        return cached[1]
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(
+                rpc_url,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "web3_getTransactionCount",
+                    "params": [wallet_address, "latest"],
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+            result_hex = data.get("result")
+            if not isinstance(result_hex, str):
+                _tx_count_cache[cache_key] = (now, None)
+                return None
+            tx_count = int(result_hex, 16)
+            _tx_count_cache[cache_key] = (now, tx_count)
+            return tx_count
+    except Exception as exc:
+        logger.warning("Failed to fetch tx count from %s: %s", rpc_url, exc)
+        _tx_count_cache[cache_key] = (now, None)
+        return None
+
+
+async def _get_wallet_tx_counts(wallet_address: str | None) -> dict[str, int | None]:
+    if not wallet_address:
+        return {"testnet": None, "mainnet": None}
+
+    testnet_count, mainnet_count = await asyncio.gather(
+        _fetch_tx_count(RADIUS_RPC_TESTNET, wallet_address),
+        _fetch_tx_count(RADIUS_RPC_MAINNET, wallet_address),
+    )
+    return {"testnet": testnet_count, "mainnet": mainnet_count}
 
 
 def _parse_allowed_roots() -> list[Path]:
@@ -257,8 +312,8 @@ def _is_observable_path(path: str) -> bool:
 
 
 def _radius_address_file() -> Path:
-    hermes_home = os.environ.get("HERMES_HOME", "/data/.hermes")
-    return Path(hermes_home) / ".radius" / "address"
+    # Written by entrypoint.sh after `radius-cli wallet address`.
+    return radius_home() / "address"
 
 
 def _wallet_address() -> Optional[str]:
@@ -289,16 +344,7 @@ def _build_wallet_summary() -> dict:
         }
 
     try:
-        result = subprocess.run(
-            [sys.executable, "/app/scripts/radius/balance.py", address],
-            capture_output=True,
-            text=True,
-            timeout=20,
-        )
-        if result.returncode != 0:
-            error = (result.stderr or result.stdout or "balance_failed").strip()
-            raise RuntimeError(error)
-        data = json.loads(result.stdout)
+        data = wallet_balance(address)
         return {
             "address": data.get("address") or address,
             "sbc": data.get("sbc"),
@@ -2095,15 +2141,6 @@ def _build_agent_graph_payload() -> dict[str, Any]:
             tags=["Memory"],
             metadata={"source": "runtime", "tools": []},
         )
-    if os.environ.get("PARA_API_KEY") or os.environ.get("PARA_WALLET_ID"):
-        add_capability(
-            "para",
-            "Para Wallet",
-            "Optional Para-backed session wallet provider is configured alongside the local Radius wallet.",
-            status="enabled",
-            tags=["Wallet", "Para"],
-            metadata={"source": "runtime", "tools": []},
-        )
 
     surface_specs = [
         (
@@ -2778,6 +2815,13 @@ async def index(request: Request):
     rusd_balance = wallet_summary.get("rusd") or "Unavailable"
     wallet_error = wallet_summary.get("error")
     explorer_link = wallet_explorer_link(wallet_summary.get("address"))
+    tx_counts = await _get_wallet_tx_counts(wallet_summary.get("address"))
+
+    def fmt_count(value: int | None) -> str:
+        return "unavailable" if value is None else f"{value:,}"
+
+    tx_count_testnet = fmt_count(tx_counts.get("testnet"))
+    tx_count_mainnet = fmt_count(tx_counts.get("mainnet"))
 
     published_skills = skills_index.get("skills", [])
     graph_payload = _build_agent_graph_payload()
@@ -4941,6 +4985,8 @@ async def index(request: Request):
             <div class='agent-detail-table'>
               <div class='agent-detail-row'><span>SBC Balance</span><strong>{html.escape(sbc_balance)}</strong></div>
               <div class='agent-detail-row'><span>RUSD Balance</span><strong>{html.escape(rusd_balance)}</strong></div>
+              <div class='agent-detail-row'><span>Total Tx (Testnet)</span><strong>{html.escape(tx_count_testnet)}</strong></div>
+              <div class='agent-detail-row'><span>Total Tx (Mainnet)</span><strong>{html.escape(tx_count_mainnet)}</strong></div>
               <div class='agent-detail-row'><span>DID</span><strong>{html.escape(did)}</strong></div>
               <div class='agent-detail-row'><span>EVM Address</span><a href='{html.escape(explorer_link)}' target='_blank' rel='noopener'>{html.escape(wallet_address)}</a></div>
               <div class='agent-detail-row'><span>Discovery</span><strong>{graph_external_count}</strong></div>
