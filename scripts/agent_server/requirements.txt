@@ -10,4 +10,4 @@ requests==2.33.0
 ruamel.yaml==0.18.17
 # Match the pinned Hermes runtime and its HTTP parser compatibility bound.
 pydantic==2.13.4
-httptools>=0.6.3,<0.9
+httptools==0.8.0
