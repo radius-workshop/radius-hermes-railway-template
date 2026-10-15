@@ -1,0 +1,5 @@
+name: kya-spec
+version: "2.0.0"
+description: "Verify KYA / PAY / KYA-PAY JWTs issued under the KYAPay specification — fetches issuer JWKS, verifies ES256 signatures, enforces claim shape and trust policy, and tracks jti for replay protection."
+provides_tools:
+  - kya_validate_claims
