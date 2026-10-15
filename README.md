@@ -45,7 +45,7 @@ The tests run the real boot discovery and config registration against isolated f
 - Built-in outbound A2A helper via `send_a2a_message` with sender-side correlation logging
 - Built-in KYA spec verification tool via `kya_validate_claims` (fetches issuer JWKS, verifies ES256 signatures, enforces claim shape, audience/environment binding, and jti replay protection)
 - Built-in KYA spec minting tool via `generate_kya_token` (signs KYA / PAY / KYA-PAY JWTs with a persistent P-256 keypair; public half published at `/.well-known/jwks.json`)
-- Optional KYA signed-claim verification (requires `TRUSTED_KYA_ISSUERS`) at `POST /a2a` via the `KYA_INBOUND_POLICY` env var (`off` | `opportunistic` | `required`)
+- Optional KYA signed-claim verification (requires `TRUSTED_KYA_ISSUERS`) at `POST /a2a` via `A2A_AUTH_MODE` (`did_and_kya`, `did_or_kya`, or `kya_only`)
 - Railway-friendly observability: structured JSON logs from the agent server plus forwarded Hermes harness log files
 
 ## How it works
@@ -143,9 +143,9 @@ The bundled public Radius-facing skills include the template-owned skills plus a
 - *"Check this KYA token but only accept it if the issuer is in our trusted allowlist."*
 - *"Validate this KYA token with replay protection disabled — I just want to inspect the claims."*
 - *"Mint a KYA token for audience https://peer.example so I can prove identity to that agent."*
-- *"Generate a kya-pay token paying 0.50 USD to https://swaps.radius.xyz with stp=coin."*
+- *"Generate a signed kya-pay claim for an intended 0.50 USD payment to https://swaps.radius.xyz with stp=coin; do not submit or settle funds."*
 - *"What URL should other agents use to fetch our JWKS?"* (Answer: `${PUBLIC_URL}/.well-known/jwks.json`)
-- *"Turn on KYA-required mode for inbound A2A requests."* (Set `KYA_INBOUND_POLICY=required` in Railway.)
+- *"Turn on KYA-required mode for inbound A2A requests."* (Set `A2A_AUTH_MODE=did_and_kya` and `TRUSTED_KYA_ISSUERS=https://issuer.example` in Railway, alongside trusted peer DIDs. Use `kya_only` only when trusted KYA issuers should authorize requests without DID authentication.)
 
 ### ERC-8004 registration workflows
 
