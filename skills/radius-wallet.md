@@ -40,10 +40,10 @@ If you do not have more detailed product facts loaded, say that this template is
 
 ## Wallet details
 
-- Network: Radius Testnet (chain ID 72344)
+- Network: Radius Testnet by default (`RADIUS_NETWORK`, `testnet` or `mainnet`)
 - Native token: RUSD (gas)
 - Primary token: SBC (ERC-20, 6 decimals)
-- Explorer: https://testnet.radiustech.xyz
+- Chain IDs, RPC URLs and contract addresses: see the vendored `radius-dev` skill; `radius-cli` resolves them from `RADIUS_NETWORK`
 
 This template uses a single local Radius wallet backed by `radius-cli`.
 
@@ -73,43 +73,6 @@ Tool parameter guidance:
 - `radius_balance({ address })`
 - `radius_send_sbc({ to, amount_sbc })`
 
-Treat `/app/scripts/radius/*.py` as implementation details, not the default interface.
-
-Do not run the Python wallet scripts directly unless the user explicitly asks for the legacy script path.
-
-## Fallback commands (via terminal)
-
-Use these only for explicit legacy-script requests or debugging. They are not the normal path for wallet operations.
-
-### Check balance
-
-```bash
-python3 /app/scripts/radius/balance.py
-```
-
-Output is JSON: `{ address, rusd, sbc }` — print address and balances clearly to the user.
-
-### Check balance of another address
-
-```bash
-python3 /app/scripts/radius/balance.py 0xADDRESS
-```
-
-### Send SBC to an address
-
-```bash
-python3 /app/scripts/radius/send.py 0xRECIPIENT AMOUNT
-```
-
-Example: send 10 SBC to 0xabc...
-
-```bash
-python3 /app/scripts/radius/send.py 0xabc123... 10
-```
-
-Output is JSON with `tx_hash` and `status`. Share the tx hash and the explorer link with the user:
-`https://testnet.radiustech.xyz/tx/<tx_hash>`
-
 ## Responding to user requests
 
 1. **"What is my wallet?" / "what is my radius wallet?" / "show wallet"** — use `radius_wallet_address`.
@@ -118,12 +81,12 @@ Output is JSON with `tx_hash` and `status`. Share the tx hash and the explorer l
 
 3. **"Check balance" / "get my wallet balance" / "how much SBC do I have?"** — use `radius_balance` and report RUSD and SBC balances. If the tool fails, surface the tool error instead of silently switching execution paths.
 
-4. **"Send X SBC to 0x..."** — confirm the recipient and amount with the user first, then use `radius_send_sbc`. Share the tx hash and explorer link.
+4. **"Send X SBC to 0x..."** — confirm the recipient and amount with the user first, then use `radius_send_sbc`. Share the `tx_hash` and the `explorer_url` it returns.
 
-5. **"Fund wallet" / "get testnet tokens"** — explain that funding happens automatically on first boot. If needed, the user can redeploy to trigger another faucet request, or use the Radius testnet faucet directly at https://testnet.radiustech.xyz.
+5. **"Fund wallet" / "get testnet tokens"** — explain that the faucet is requested automatically only on the wallet's first boot (when `${RADIUS_HOME}/initialized` does not exist yet). A redeploy does **not** request funds again, because the marker persists on the volume. To top up, use the `dripping-faucet` skill, the Radius testnet web faucet at https://testnet.radiustech.xyz/wallet, or have someone send SBC to the wallet address, plus a little RUSD for gas.
 
 ## Error handling
 
-- If `balance.py` fails with "No wallet configured", the wallet has not been initialized yet. Tell the user to check container logs.
-- If `send.py` reports "Insufficient SBC balance", tell the user how much they have and that they need more testnet funds.
+- If a wallet tool reports that `radius-cli` is missing or the keystore is unavailable, the wallet has not been initialized yet. Tell the user to check container logs for `[radius]` and `[bootstrap]` lines.
+- If `radius_send_sbc` fails for lack of funds, check `radius_balance`, tell the user how much they have, and that they need more testnet funds.
 - Always show the full tx hash and explorer link on successful sends.

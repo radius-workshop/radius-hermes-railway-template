@@ -31,11 +31,10 @@ This repository is a batteries-included Hermes template. Assume these bundled re
 - `radius_wallet_address`, `radius_balance`, `radius_send_sbc`, and `radius_tx_status` are provided by the bundled `radius-cli` plugin and should be treated as the canonical way to perform Radius wallet actions.
 - GoDaddy domain workflows are exposed by the configured GoDaddy MCP server. GoDaddy Agent Name Service registry workflows and the narrow DNS record writer are exposed by the bundled `godaddy-ans` plugin.
 - `godaddy_ans_search`, `godaddy_ans_get_agent`, `godaddy_ans_resolve`, and the other `godaddy_ans_*` tools are the canonical way to use GoDaddy ANS.
-- `/app/scripts/radius/*` contains the built-in Radius wallet scripts.
 - `/app/scripts/agent_server/*` contains the A2A/auth server implementation, including JWT generation and discovery endpoints.
 - `/app/scripts/godaddy/*` contains the GoDaddy ANS helper implementation behind the plugin tools.
 
-For Radius wallet actions, prefer the `radius-cli` plugin tools. Treat `/app/scripts/radius/*` as implementation details for bootstrapping or faucet helpers, not the default wallet interface.
+For Radius wallet actions, prefer the `radius-cli` plugin tools. The wallet itself is `radius-cli` (keystore under `RADIUS_HOME`); there are no separate Python wallet scripts.
 
 For GoDaddy work, keep the two surfaces separate:
 

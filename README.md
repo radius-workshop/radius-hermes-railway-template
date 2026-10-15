@@ -42,6 +42,8 @@ railway link
 
 # 3. Set required env vars (at minimum: a provider + a platform)
 railway variables --set ANTHROPIC_API_KEY=sk-ant-...
+railway variables --set HERMES_INFERENCE_PROVIDER=anthropic
+railway variables --set LLM_MODEL=<anthropic-model-id>   # the default model is an OpenRouter/OpenAI ID
 railway variables --set TELEGRAM_BOT_TOKEN=123456:ABC...
 
 # 4. Run the pre-deploy check, then deploy
@@ -164,7 +166,8 @@ Template defaults (already included in `railway.toml`):
 - `HERMES_HOME=/data/.hermes`
 - `HOME=/data`
 - `MESSAGING_CWD=/data/workspace`
-- `LLM_MODEL=openai/gpt-5.4-nano`
+
+If `LLM_MODEL` is not set, `scripts/entrypoint.sh` writes `openai/gpt-5.4-nano` as the model in `config.yaml`.
 
 ## Important: how to set variables in Railway
 
@@ -250,6 +253,19 @@ SLACK_ALLOWED_USERS=U01234ABCDE,U09876WXYZ
 ```
 
 To find your Telegram user ID, message [@userinfobot](https://t.me/userinfobot).
+
+### Slack in a shared channel
+
+When the bot sits in a channel with other people (and other bots), these upstream Hermes Slack variables keep it scoped. They are read by the Hermes gateway from the Railway environment:
+
+```
+SLACK_ALLOWED_CHANNELS=C0123456789          # only respond in these channel IDs (DMs are exempt)
+SLACK_STRICT_MENTION=true                   # every channel message needs a fresh @mention
+SLACK_IGNORE_OTHER_USER_MENTIONS=true       # skip messages that open by @mentioning someone else
+SLACK_ALLOW_BOTS=mentions                   # other bots can reach it only by @mentioning it
+```
+
+`SLACK_ALLOWED_USERS` still applies on top of these. See the [Hermes Slack docs](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/slack) for the full list.
 
 ### Provider selection
 
@@ -368,12 +384,13 @@ Safe update workflow: dry-run the intended specialized tool, inspect the diff, s
 | `RADIUS_HOME` | Optional radius-cli home directory. Default: `/data/.hermes/.radius-cli`. |
 | `RADIUS_WALLET_ADDRESS` | Optional explicit wallet address override. Normally auto-derived from radius-cli keystore. |
 | `RADIUS_NETWORK` | Wallet network. Default: `testnet`. |
-| `RADIUS_RPC_URL` | Optional RPC override. Default testnet RPC is `https://rpc.testnet.radiustech.xyz`. |
-| `RADIUS_SBC_ADDRESS` | Optional SBC token address override. |
-| `RADIUS_CHAIN_ID` | Optional chain ID override. Default testnet chain id `72344`. |
-| `RADIUS_EXPLORER_URL` | Optional explorer override. Default `https://testnet.radiustech.xyz`. |
+| `RADIUS_RPC_URL` | Optional RPC override, read by radius-cli. Default: the RPC for `RADIUS_NETWORK`. |
+| `RADIUS_SBC_ADDRESS` | Optional SBC token address override, read by radius-cli. |
+| `RADIUS_CHAIN_ID` | Optional chain ID shown in `radius_tx_status` output. Default: from `RADIUS_NETWORK` (`72344` testnet, `723487` mainnet). |
+| `RADIUS_EXPLORER_URL` | Optional explorer used for tx links. Default: from `RADIUS_NETWORK`. |
 | `RADIUS_CLI_BIN` | Optional radius-cli binary path override. |
 | `RADIUS_AUTO_FUND` | Set to `false` to skip faucet on boot. Default: enabled. |
+| `RADIUS_FAUCET_URL` | Optional faucet API base for the first-boot drip. Default: `https://testnet.radiustech.xyz/api/v1/faucet`. |
 
 The radius-cli keystore is stored under `${RADIUS_HOME}` with restricted permissions and persists across redeploys via the Railway volume.
 
@@ -388,7 +405,7 @@ Once deployed, you can ask the agent:
 - *"What is my wallet address?"*
 - *"Check my Radius wallet balance now."*
 
-The preferred interface is the bundled `radius-cli` plugin tools. The underlying wallet bootstrap/faucet helper scripts live under `/app/scripts/radius/`.
+The preferred interface is the bundled `radius-cli` plugin tools. Boot-time wallet setup and the first-boot faucet drip are done in `scripts/entrypoint.sh` with `radius-cli` (`wallet address`, `wallet export`, `wallet sign`); the image pins radius-cli with the `RADIUS_CLI_VERSION` build arg.
 
 Wallet tool behavior:
 
@@ -487,7 +504,7 @@ References:
 
 ## Agent server
 
-The FastAPI agent server lives in [scripts/agent_server](/Users/eriks/dev/radius/hermes-railway-template/scripts/agent_server) and owns:
+The FastAPI agent server lives in [scripts/agent_server](scripts/agent_server) and owns:
 
 - the public discovery endpoints under `/.well-known/*`
 - `did:web` identity and JWT auth
@@ -498,7 +515,7 @@ The FastAPI agent server lives in [scripts/agent_server](/Users/eriks/dev/radius
 
 The implementation details now live in the local agent-server README:
 
-- [scripts/agent_server/README.md](/Users/eriks/dev/radius/hermes-railway-template/scripts/agent_server/README.md)
+- [scripts/agent_server/README.md](scripts/agent_server/README.md)
 
 That file contains:
 
@@ -593,12 +610,15 @@ At runtime, gateway sessions start in `MESSAGING_CWD` (`/data/workspace` by defa
 
 ### System prompt
 
-Set `HERMES_SYSTEM_PROMPT` in Railway Variables to give the agent a persistent identity and behavior context:
+Upstream Hermes does not read a `HERMES_SYSTEM_PROMPT` variable. To give the agent a persistent identity and behavior context, edit `HERMES.md` in your fork (it is force-copied into the workspace on every boot), or add per-channel prompts under `slack.channel_prompts` in `${HERMES_HOME}/config.yaml`:
 
-```
-You are a helpful assistant with a built-in Radius Testnet wallet. You can check
-balances, send SBC tokens, and help users interact with the Radius blockchain.
-Always confirm with the user before sending tokens.
+```yaml
+slack:
+  channel_prompts:
+    "C0123456789": |
+      You are a helpful assistant with a built-in Radius Testnet wallet. You can check
+      balances, send SBC tokens, and help users interact with the Radius blockchain.
+      Always confirm with the user before sending tokens.
 ```
 
 ## Simple usage guide
@@ -634,7 +654,7 @@ hermes pairing list
 2. Writes non-empty env vars to `${HERMES_HOME}/.env`.
 3. Clears empty integer-typed variables from the process environment (prevents `ValueError` in Hermes).
 4. Creates `${HERMES_HOME}/config.yaml` if it doesn't exist.
-5. Initializes Radius wallet if not already done (generates key, calls faucet).
+5. Initializes Radius wallet via radius-cli if not already done (creates the keystore, exports the key for JWT/ERC-8004, signs and requests a faucet drip).
 6. Copies all local `skills/*.md` files to `${HERMES_HOME}/skills/` (overwrites on each boot).
 7. Ensures the managed Radius external directory exists on persistent storage (`RADIUS_SKILLS_DIR`), bootstraps it from `/app/vendor/radius-skills` when empty (optional), scans all upstream skill directories, writes a discovery manifest, registers the derived parent roots as Hermes `skills.external_dirs`, and optionally warns or fails if `EXPECTED_VENDORED_SKILLS` are missing.
 8. Copies bundled plugins from `plugins/*` to `${HERMES_HOME}/plugins/`.
@@ -663,10 +683,12 @@ Make sure you're on a deployment with the updated entrypoint. The template now f
 Verify the Railway volume is mounted at `/data` in your service settings. Without the volume, state is lost on every deploy.
 
 **Radius wallet not initialized**
-Check deploy logs for `[radius]` lines. If wallet initialization appears to have failed, SSH in and run:
+Check deploy logs for `[radius]` and `[bootstrap]` lines. Setup retries on the next boot until it succeeds. To check the wallet by hand, SSH in and run:
 ```bash
-python3 /app/scripts/radius/wallet_init.py
+radius-cli wallet address
+radius-cli wallet balance
 ```
+To re-run first-boot setup (including the faucet drip), delete `${RADIUS_HOME}/initialized` and redeploy.
 
 **Skill not updating after edits**
 Skills now overwrite on every boot. Redeploy after editing any file in `skills/`.
@@ -693,3 +715,7 @@ docker run --rm \
   -v "$(pwd)/.tmpdata:/data" \
   hermes-railway-template
 ```
+
+---
+
+> ⚠️ **Demo code — not production-ready.** Provided as-is, without warranty, and may contain known, unpatched vulnerabilities (including in dependencies). If you reuse it, run your own security and supply-chain scans and patch before deploying.

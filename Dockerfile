@@ -17,7 +17,8 @@ ENV PATH="/opt/venv/bin:${PATH}"
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 RUN pip install --no-cache-dir -e "/opt/hermes-agent[messaging,cron,cli,pty]"
 
-# Python dependencies for agent_server and radius scripts
+# Python dependencies for agent_server and plugins. Wallet, chain and faucet
+# work goes through radius-cli, so no web3 stack is needed here.
 RUN pip install --no-cache-dir \
   "fastapi>=0.104.0" \
   "uvicorn[standard]>=0.24.0" \
@@ -25,11 +26,14 @@ RUN pip install --no-cache-dir \
   "cryptography>=41.0.0" \
   "httpx>=0.25.0" \
   "a2a-sdk>=0.3.0" \
-  "web3>=6.0.0" \
   "requests>=2.28.0"
 
 
 FROM python:3.11-slim
+
+# radius-cli (npm, from radiustechsystems/tools) is the wallet: keystore,
+# balances, transfers, receipts, signing. Pin it so boots are reproducible.
+ARG RADIUS_CLI_VERSION=0.4.0
 
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -40,7 +44,7 @@ RUN apt-get update \
     tini \
     nodejs \
     npm \
-  && npm install -g radius-cli \
+  && npm install -g "radius-cli@${RADIUS_CLI_VERSION}" \
   && rm -rf /var/lib/apt/lists/*
 
 # Install Foundry to a stable path that remains available after HOME is remapped.
@@ -63,7 +67,6 @@ WORKDIR /app
 COPY scripts/entrypoint.sh /app/scripts/entrypoint.sh
 RUN sed -i 's/\r$//' /app/scripts/entrypoint.sh && chmod +x /app/scripts/entrypoint.sh
 
-COPY scripts/radius /app/scripts/radius
 COPY scripts/godaddy /app/scripts/godaddy
 
 # Install and build linear-claude-skill (still Node.js)

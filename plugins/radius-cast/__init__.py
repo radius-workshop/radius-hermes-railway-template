@@ -8,11 +8,16 @@ import shutil
 import subprocess
 from pathlib import Path
 
-DEFAULT_RPC_URL = "https://rpc.testnet.radiustech.xyz"
 DEFAULT_NETWORK = "testnet"
-DEFAULT_CHAIN_ID = "72344"
-DEFAULT_SBC_ADDRESS = "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb"
-DEFAULT_EXPLORER_URL = "https://testnet.radiustech.xyz"
+
+# radius-cli resolves RPC URL and SBC address from RADIUS_NETWORK (or the
+# RADIUS_RPC_URL / RADIUS_SBC_ADDRESS env overrides) itself. It does not print
+# chain id or explorer, so those are mirrored here from radius-sdk's presets
+# for tool output only.
+NETWORK_INFO = {
+    "testnet": {"chain_id": "72344", "explorer_url": "https://testnet.radiustech.xyz"},
+    "mainnet": {"chain_id": "723487", "explorer_url": "https://network.radiustech.xyz"},
+}
 
 
 class RadiusCliError(RuntimeError):
@@ -28,6 +33,10 @@ def _radius_home() -> str:
 def _env() -> dict[str, str]:
     env = os.environ.copy()
     env["RADIUS_HOME"] = _radius_home()
+    # radius-cli treats an empty override as set; drop blanks so it falls back to network defaults.
+    for key in ("RADIUS_RPC_URL", "RADIUS_SBC_ADDRESS"):
+        if not env.get(key, "").strip():
+            env.pop(key, None)
     return env
 
 
@@ -51,23 +60,19 @@ def _radius_cli_cmd() -> list[str]:
 
 
 def _network() -> str:
-    return os.environ.get("RADIUS_NETWORK", DEFAULT_NETWORK)
+    return os.environ.get("RADIUS_NETWORK", "").strip() or DEFAULT_NETWORK
 
 
-def _rpc_url() -> str:
-    return os.environ.get("RADIUS_RPC_URL", DEFAULT_RPC_URL)
-
-
-def _sbc_address() -> str:
-    return os.environ.get("RADIUS_SBC_ADDRESS", DEFAULT_SBC_ADDRESS)
+def _network_info() -> dict[str, str]:
+    return NETWORK_INFO.get(_network(), NETWORK_INFO[DEFAULT_NETWORK])
 
 
 def _explorer_url() -> str:
-    return os.environ.get("RADIUS_EXPLORER_URL", DEFAULT_EXPLORER_URL).rstrip("/")
+    return os.environ.get("RADIUS_EXPLORER_URL", _network_info()["explorer_url"]).rstrip("/")
 
 
 def _chain_id() -> str:
-    return str(os.environ.get("RADIUS_CHAIN_ID", DEFAULT_CHAIN_ID))
+    return str(os.environ.get("RADIUS_CHAIN_ID", _network_info()["chain_id"]))
 
 
 def _run(args: list[str]) -> str:
@@ -80,14 +85,8 @@ def _run(args: list[str]) -> str:
 
 
 def _common_args(*, json_output: bool = False) -> list[str]:
-    args = [
-        "--network",
-        _network(),
-        "--rpc-url",
-        _rpc_url(),
-        "--sbc",
-        _sbc_address(),
-    ]
+    # RADIUS_RPC_URL / RADIUS_SBC_ADDRESS pass through _env() and are read by radius-cli.
+    args = ["--network", _network()]
     if json_output:
         args.append("--json")
     return args
