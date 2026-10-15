@@ -117,7 +117,7 @@ Wildcard entries match subdomains only (not the apex host).
 Policies, set via `KYA_INBOUND_POLICY`:
 
 - `off` (default): the header is ignored.
-- `opportunistic`: validate when present, log success/failure (`event=a2a.kya`), never reject.
+- `opportunistic`: validate when present, log success/failure (`event=a2a.kya`), never reject invalid tokens when an issuer allowlist is configured. A missing allowlist fails closed.
 - `required`: validate when present, reject if missing or invalid (HTTP 401 with JSON-RPC `InvalidRequest`).
 
 The gate emits `a2a.kya` structured log events with `kya_action`, `kya_policy`, `kya_present`, `kya_issuer`, `kya_signature_verified`, `kya_errors`, and `kya_reason` fields for Railway filtering.
@@ -380,7 +380,7 @@ The FastAPI server disables default uvicorn access logs so the structured lines 
 | `KYA_INBOUND_HEADER` | HTTP header carrying the KYA JWT. Defaults to `skyfire-pay-id` (per spec). |
 | `KYA_EXPECTED_AUDIENCE` | Audience the gate enforces against `payload.aud`. Defaults to `BASE_URL`. |
 | `KYA_EXPECTED_ENVIRONMENT` | Optional environment value enforced against `payload.env` (`production`, `sandbox`, ...). |
-| `TRUSTED_KYA_ISSUERS` | Comma-separated allowlist of KYA issuer URLs. When empty, any signature-verified issuer is accepted. |
+| `TRUSTED_KYA_ISSUERS` | Comma-separated allowlist of KYA issuer URLs. Required for KYA authentication; empty rejects KYA tokens before fetching any issuer keys. |
 | `AGENT_PUBLIC_IP` | Public IP used for the outbound `aid.creation_ip` claim when minting tokens via `generate_kya_token`. If unset, falls back to the A record of the public host. |
 | `AGENT_DID` | Default `sub` claim for minted KYA tokens. Falls back to `did:web:<public-host>` if unset. |
 
@@ -499,3 +499,5 @@ Check:
 - [a2a_sessions.py](a2a_sessions.py)
 - [hermes_client.py](hermes_client.py)
 - [mock-agent-skills.index.json](mock-agent-skills.index.json)
+
+KYA tokens prove signed claims from configured issuers, not regulatory compliance or payment settlement. Replay detection is bounded to this process and resets on restart; use one replica and short token lifetimes.

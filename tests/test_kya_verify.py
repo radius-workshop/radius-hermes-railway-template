@@ -195,6 +195,7 @@ class KyaMintTests(unittest.TestCase):
             decision = kya_verify.evaluate_inbound(
                 token=out["token"],
                 policy="required",
+                trusted_issuers={"https://hermes.example"},
                 expected_audience="https://peer.example",
             )
         self.assertEqual(decision["action"], "accept", msg=decision)
@@ -223,6 +224,7 @@ class KyaMintTests(unittest.TestCase):
             decision = kya_verify.evaluate_inbound(
                 token=tampered,
                 policy="required",
+                trusted_issuers={"https://hermes.example"},
                 expected_audience="https://attacker.example",
             )
         self.assertEqual(decision["action"], "reject")
@@ -232,6 +234,7 @@ class KyaMintTests(unittest.TestCase):
             decision = kya_verify.evaluate_inbound(
                 token="not.a.realtoken",
                 policy="opportunistic",
+                trusted_issuers={"https://hermes.example"},
                 expected_audience="https://peer.example",
             )
         self.assertEqual(decision["action"], "warn")
@@ -300,6 +303,73 @@ class KyaMintTests(unittest.TestCase):
             enforce_audience=True,
         )
         self.assertTrue(any("trusted-issuer allowlist" in e for e in report.errors), msg=report.errors)
+
+    def _mint_for_peer(self, token_type="kya"):
+        return kya_verify.mint_token(
+            token_type=token_type, issuer="https://hermes.example", subject="did:web:hermes.example",
+            audience="https://peer.example", aid={"name": "Hermes", "creation_ip": "8.8.8.8"},
+            pay={"amt": "1.50", "cur": "USD"} if token_type == "kya-pay" else None,
+        )
+
+    def test_missing_or_untrusted_issuer_never_fetches_jwks(self):
+        token = self._mint_for_peer()["token"]
+        for trusted in (None, set(), {"https://untrusted.example"}):
+            with self.subTest(trusted=trusted), patch.object(kya_verify, "_http_get_json") as fetch:
+                report = kya_verify.verify_token(token_type="kya", token=token,
+                    expected_audience="https://peer.example", trusted_issuers=trusted)
+                self.assertFalse(report.ok)
+                fetch.assert_not_called()
+
+    def test_inbound_requires_operator_allowlist(self):
+        with patch.dict(os.environ, {"TRUSTED_KYA_ISSUERS": ""}), patch.object(kya_verify, "_http_get_json") as fetch:
+            result = kya_verify.evaluate_inbound(token=self._mint_for_peer()["token"], policy="required")
+        self.assertEqual(result["action"], "reject")
+        self.assertEqual(result["reason"], "trusted_kya_issuers_required")
+        fetch.assert_not_called()
+
+    def test_combined_token_accepted_once(self):
+        token = self._mint_for_peer("kya-pay")["token"]
+        with patch.object(kya_verify, "_http_get_json", return_value=kya_verify.get_kya_jwks()):
+            first = kya_verify.evaluate_inbound(token=token, policy="required", expected_audience="https://peer.example",
+                trusted_issuers={"https://hermes.example"})
+            second = kya_verify.evaluate_inbound(token=token, policy="required", expected_audience="https://peer.example",
+                trusted_issuers={"https://hermes.example"})
+        self.assertEqual(first["action"], "accept", first)
+        self.assertEqual(second["action"], "reject", second)
+        self.assertTrue(any("Replay" in e for e in second["report"].errors))
+
+    def test_replay_cache_covers_expiry_clock_skew(self):
+        import jwt
+        out = self._mint_for_peer()
+        out["payload"]["exp"] = int(time.time()) - 1
+        token = jwt.encode(out["payload"], kya_verify._KYA_PRIVATE_KEY, algorithm="ES256", headers=out["header"])
+        params = dict(token_type="kya", token=token, expected_audience="https://peer.example",
+            jwks_override=kya_verify.get_kya_jwks(), clock_skew=60)
+        self.assertTrue(kya_verify.verify_token(**params).ok)
+        self.assertFalse(kya_verify.verify_token(**params).ok)
+
+    def test_nonfinite_timestamps_are_invalid(self):
+        for field in ("iat", "exp"):
+            for value in (float("inf"), float("nan")):
+                errors = []
+                payload = {"iat": int(time.time()), "exp": int(time.time()) + 60, field: value}
+                kya_verify._validate_timestamps(payload, errors, 60)
+                self.assertTrue(errors)
+
+    def test_issuer_allowlist_preserves_origin_and_path(self):
+        patterns = {"https://*.example/Issuer"}
+        self.assertTrue(kya_verify._issuer_allowed("https://peer.example/Issuer", patterns))
+        for issuer in ("https://peer.example/issuer", "https://peer.example:8443/Issuer",
+                "https://peer.example/Issuer?x=1", "https://user@peer.example/Issuer", "https://example/Issuer"):
+            self.assertFalse(kya_verify._issuer_allowed(issuer, patterns), issuer)
+
+    def test_private_or_mixed_dns_is_rejected(self):
+        import socket
+        with patch.object(kya_verify.socket, "getaddrinfo", return_value=[
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443)),
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))]):
+            with self.assertRaises(ValueError):
+                kya_verify._validate_outbound_jwks_url("https://issuer.example/.well-known/jwks.json")
 
 
 if __name__ == "__main__":

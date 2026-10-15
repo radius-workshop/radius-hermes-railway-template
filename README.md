@@ -21,7 +21,7 @@ This template is worker-only: setup and configuration are done through Railway V
 - Built-in outbound A2A helper via `send_a2a_message` with sender-side correlation logging
 - Built-in KYA spec verification tool via `kya_validate_claims` (fetches issuer JWKS, verifies ES256 signatures, enforces claim shape, audience/environment binding, and jti replay protection)
 - Built-in KYA spec minting tool via `generate_kya_token` (signs KYA / PAY / KYA-PAY JWTs with a persistent P-256 keypair; public half published at `/.well-known/jwks.json`)
-- Optional KYA inbound enforcement at `POST /a2a` via the `KYA_INBOUND_POLICY` env var (`off` | `opportunistic` | `required`)
+- Optional KYA signed-claim verification (requires `TRUSTED_KYA_ISSUERS`) at `POST /a2a` via the `KYA_INBOUND_POLICY` env var (`off` | `opportunistic` | `required`)
 - Railway-friendly observability: structured JSON logs from the agent server plus forwarded Hermes harness log files
 
 ## How it works

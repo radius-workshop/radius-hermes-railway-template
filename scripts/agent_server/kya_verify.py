@@ -27,7 +27,10 @@ from __future__ import annotations
 
 import base64
 import ipaddress
+import http.client
+import ssl
 import json
+import math
 import os
 import re
 import socket
@@ -38,7 +41,6 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
 # ---------------------------------------------------------------------------
@@ -143,60 +145,50 @@ def reset_caches() -> None:
 
 
 def _http_get_json(url: str, timeout: int = DEFAULT_HTTP_TIMEOUT) -> dict[str, Any]:
-    _validate_outbound_jwks_url(url)
+    address = _validate_outbound_jwks_url(url)
+    parsed = urlsplit(url)
 
-    req = Request(
-        url,
-        headers={
-            "Accept": "application/json,application/jwk-set+json;q=0.9,*/*;q=0.1",
-            "User-Agent": "hermes-kya/2.0",
-        },
-    )
+    class PinnedHTTPSConnection(http.client.HTTPSConnection):
+        def connect(self):
+            # Connect to the checked address without a second DNS lookup, keeping
+            # the issuer hostname for TLS certificate verification and SNI.
+            raw = socket.create_connection((address, 443), timeout=self.timeout)
+            try:
+                self.sock = self._context.wrap_socket(raw, server_hostname=self.host)
+            except Exception:
+                raw.close()
+                raise
 
-    class _NoRedirect(HTTPRedirectHandler):
-        def redirect_request(self, req, fp, code, msg, headers, newurl):
-            return None
-
-    opener = build_opener(_NoRedirect)
-    with opener.open(req, timeout=timeout) as response:
-        charset = response.headers.get_content_charset() or "utf-8"
-        raw = response.read().decode(charset, errors="replace")
-    data = json.loads(raw)
+    connection = PinnedHTTPSConnection(parsed.hostname, timeout=timeout, context=ssl.create_default_context())
+    try:
+        connection.request("GET", parsed.path or "/", headers={"Accept": "application/json", "User-Agent": "hermes-kya"})
+        response = connection.getresponse()
+        if response.status != 200:
+            raise ValueError("JWKS endpoint did not return HTTP 200; redirects are disabled")
+        raw = response.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            raise ValueError("JWKS document exceeds 1 MiB")
+        data = json.loads(raw)
+    finally:
+        connection.close()
     if not isinstance(data, dict):
-        raise ValueError(f"Expected JSON object from {url}, got {type(data).__name__}")
+        raise ValueError("JWKS document must be a JSON object")
     return data
 
 
-def _validate_outbound_jwks_url(url: str) -> None:
+def _validate_outbound_jwks_url(url: str) -> str:
     parsed = urlsplit(url)
-    if parsed.scheme.lower() != "https":
-        raise ValueError("JWKS URL must use https")
-    host = parsed.hostname
-    if not host:
-        raise ValueError("JWKS URL has no hostname")
-
+    if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
+            or parsed.password is not None or parsed.port not in (None, 443)
+            or parsed.query or parsed.fragment):
+        raise ValueError("JWKS URL must use HTTPS on port 443 without credentials, query or fragment")
     try:
-        addrinfo = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
-    except Exception as err:
-        raise ValueError(f"Unable to resolve JWKS host '{host}': {err}") from err
-
-    for _family, _socktype, _proto, _canonname, sockaddr in addrinfo:
-        ip_raw = sockaddr[0]
-        try:
-            ip = ipaddress.ip_address(ip_raw)
-        except ValueError as err:
-            raise ValueError(f"Resolved host '{host}' to invalid IP '{ip_raw}': {err}") from err
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_multicast
-            or ip.is_reserved
-            or ip.is_unspecified
-        ):
-            raise ValueError(
-                f"Resolved host '{host}' to disallowed non-public IP '{ip}' for JWKS fetch"
-            )
+        addresses = socket.getaddrinfo(parsed.hostname, 443, type=socket.SOCK_STREAM)
+    except OSError as err:
+        raise ValueError("Unable to resolve JWKS host") from err
+    if not addresses or any(not ipaddress.ip_address(item[4][0]).is_global for item in addresses):
+        raise ValueError("JWKS host must resolve only to public IP addresses")
+    return addresses[0][4][0]
 
 
 def _b64url_decode(segment: str) -> bytes:
@@ -241,43 +233,26 @@ def _select_jwk(jwks: dict[str, Any], kid: str) -> dict[str, Any]:
 
 
 def _issuer_allowed(issuer: str, trusted_issuers: set[str]) -> bool:
-    issuer_norm = issuer.strip().rstrip("/").lower()
-    parsed = urlsplit(issuer_norm)
-    host = parsed.hostname or ""
-    scheme = parsed.scheme
-
+    parsed = urlsplit(issuer.rstrip("/"))
+    if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
+            or parsed.password is not None or parsed.port not in (None, 443)
+            or parsed.query or parsed.fragment):
+        return False
     for raw in trusted_issuers:
-        pattern = str(raw).strip().rstrip("/").lower()
-        if not pattern:
-            continue
-
-        if pattern.startswith("https://*.") or pattern.startswith("http://*."):
-            pattern_parsed = urlsplit(pattern)
-            suffix = (pattern_parsed.hostname or "")
-            if suffix.startswith("*."):
-                suffix = suffix[2:]
-            if (
-                pattern_parsed.scheme == scheme
-                and host.endswith("." + suffix)
-                and host != suffix
-            ):
-                return True
-            continue
-
-        if pattern.startswith("*."):
-            suffix = pattern[2:]
-            if host.endswith("." + suffix) and host != suffix:
-                return True
-            continue
-
+        pattern = str(raw).strip().rstrip("/")
         if "://" not in pattern:
-            if host == pattern:
-                return True
+            pattern = "https://" + pattern
+        allowed = urlsplit(pattern)
+        if (allowed.scheme != "https" or allowed.username is not None or allowed.password is not None
+                or allowed.port not in (None, 443) or allowed.query or allowed.fragment
+                or allowed.path != parsed.path):
             continue
-
-        if issuer_norm == pattern:
+        host = allowed.hostname or ""
+        if host.startswith("*."):
+            if parsed.hostname.endswith("." + host[2:]):
+                return True
+        elif parsed.hostname == host:
             return True
-
     return False
 
 
@@ -356,13 +331,13 @@ def _is_public_ip(value: str) -> bool:
 def _validate_timestamps(payload: dict[str, Any], errors: list[str], clock_skew: int) -> None:
     now = int(time.time())
     iat = payload.get("iat")
-    if isinstance(iat, (int, float)) and not isinstance(iat, bool):
+    if isinstance(iat, (int, float)) and not isinstance(iat, bool) and (not isinstance(iat, float) or math.isfinite(iat)):
         if int(iat) > now + clock_skew:
             errors.append("Claim 'iat' is in the future beyond allowed clock skew.")
     else:
         errors.append("Claim 'iat' must be a numeric Unix timestamp.")
     exp = payload.get("exp")
-    if isinstance(exp, (int, float)) and not isinstance(exp, bool):
+    if isinstance(exp, (int, float)) and not isinstance(exp, bool) and (not isinstance(exp, float) or math.isfinite(exp)):
         if int(exp) <= now - clock_skew:
             errors.append("Claim 'exp' indicates the token is expired.")
     else:
@@ -534,6 +509,13 @@ def verify_token(
         and isinstance(alg, str)
         and alg in SUPPORTED_JWA
     )
+    if jwks_override is None and not trusted_issuers:
+        report.errors.append("A trusted-issuer allowlist is required before fetching JWKS.")
+    # Reject invalid claims and unauthorized issuers before network access or
+    # replay-cache mutation. An offline JWKS override is a diagnostic/test hook.
+    if report.errors:
+        report.ok = False
+        return report
     if can_verify:
         try:
             if jwks_override is not None:
@@ -552,11 +534,11 @@ def verify_token(
     else:
         report.errors.append("Cannot verify signature: missing or invalid iss/kid/alg in token.")
 
-    if enforce_replay_protection and report.signature_verified:
+    if enforce_replay_protection and report.signature_verified and not report.errors:
         jti = payload.get("jti")
         exp = payload.get("exp")
         if isinstance(jti, str) and isinstance(exp, (int, float)):
-            if not _SEEN_JTI.check_and_add(str(issuer), jti, int(exp)):
+            if not _SEEN_JTI.check_and_add(str(issuer), jti, int(exp) + clock_skew):
                 report.errors.append(
                     f"Replay detected: jti='{jti}' for issuer '{issuer}' was already seen."
                 )
@@ -650,9 +632,9 @@ def setup_kya_key() -> tuple[str, dict[str, Any]]:
                 if not isinstance(private_key, EllipticCurvePrivateKey) or not isinstance(
                     private_key.curve, SECP256R1
                 ):
-                    raise ValueError("KYA key on disk is not a P-256 EC key; regenerating")
-            except Exception:
-                private_key = None
+                    raise ValueError("KYA key on disk is not a P-256 EC key")
+            except Exception as err:
+                raise ValueError("Cannot load persisted KYA key; restore the key before restarting") from err
 
         if private_key is None:
             private_key = generate_private_key(SECP256R1())
@@ -664,7 +646,8 @@ def setup_kya_key() -> tuple[str, dict[str, Any]]:
             )
             # Atomic write with restrictive perms.
             tmp_path = key_path.with_suffix(".pem.tmp")
-            with open(tmp_path, "wb") as fh:
+            fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as fh:
                 fh.write(pem)
             os.chmod(tmp_path, 0o600)
             os.replace(tmp_path, key_path)
@@ -893,13 +876,18 @@ def evaluate_inbound(
             }
         return {"action": "skip", "report": None, "reason": "no_token"}
 
+    effective_trusted = trusted_issuers if trusted_issuers is not None else parse_trusted_issuers(None)
+    if not effective_trusted:
+        return {"action": "reject", "report": None, "reason": "trusted_kya_issuers_required"}
     try:
+        header, _ = jwt_split(token)
+        token_type = "kya-pay" if header.get("typ") == "kya-pay+jwt" else "kya"
         report = verify_token(
-            token_type="kya",  # we accept kya+ and kya-pay+ through this lane
+            token_type=token_type,
             token=token,
             expected_audience=expected_audience or inbound_expected_audience(),
             expected_environment=expected_environment or inbound_expected_environment(),
-            trusted_issuers=trusted_issuers if trusted_issuers is not None else parse_trusted_issuers(None),
+            trusted_issuers=effective_trusted,
             clock_skew=clock_skew,
             enforce_audience=True,
             enforce_replay_protection=enforce_replay_protection,
@@ -917,21 +905,6 @@ def evaluate_inbound(
                 "reason": "kya_token_malformed",
             }
         return {"action": "warn", "report": report, "reason": "kya_token_malformed"}
-
-    # Allow kya-pay tokens through the same header (their typ differs).
-    if not report.signature_verified or report.errors:
-        # Retry as kya-pay if the only complaint is typ mismatch.
-        if any("typ='kya-pay+jwt'" in e or "kya-pay" in e for e in report.errors):
-            report = verify_token(
-                token_type="kya-pay",
-                token=token,
-                expected_audience=expected_audience or inbound_expected_audience(),
-                expected_environment=expected_environment or inbound_expected_environment(),
-                trusted_issuers=trusted_issuers if trusted_issuers is not None else parse_trusted_issuers(None),
-                clock_skew=clock_skew,
-                enforce_audience=True,
-                enforce_replay_protection=enforce_replay_protection,
-            )
 
     if report.ok:
         return {"action": "accept", "report": report, "reason": None}

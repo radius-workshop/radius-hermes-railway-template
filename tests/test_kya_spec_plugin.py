@@ -123,7 +123,7 @@ class KyaSpecPluginTests(unittest.TestCase):
         return token, headers, payload
 
     def _run(self, token: str, **kwargs) -> dict:
-        params = {"token_type": "kya", "token": token, "expected_audience": "seller-abc"}
+        params = {"token_type": "kya", "token": token, "expected_audience": "seller-abc", "trusted_issuers": "https://issuer.example"}
         params.update(kwargs)
         # Patch the JWKS HTTP fetch on kya_verify to return our fixture.
         with patch.object(kya_verify, "_http_get_json", return_value=self.jwks):
