@@ -61,6 +61,7 @@ from a2a_bridge import A2ABridge
 from a2a_sessions import A2ASessionStore
 from auth import get_did, get_did_document, issue_outbound_token, issue_token, jwt_auth_dep, setup_auth
 import kya_verify
+import x402_seller
 from hermes_client import HermesClient, HermesUnavailableError, HermesUpstreamError
 from logging_utils import (
     clear_request_context,
@@ -1247,6 +1248,11 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None)
 
 
+@app.exception_handler(x402_seller.PaymentRequired)
+async def _x402_payment_required(_request: Request, exc: x402_seller.PaymentRequired):
+    return exc.response
+
+
 @app.middleware("http")
 async def _cors_skills(request: Request, call_next):
     if request.url.path == "/a2a" and request.method == "OPTIONS":
@@ -1779,6 +1785,7 @@ def _build_agent_card_payload() -> dict:
         }
         for s in skills_index.get("skills", [])
     ]
+    x402_offer = x402_seller.offer_summary(_wallet_address(), f"{BASE_URL}/a2a")
     return {
         "name": agent_name,
         "description": os.environ.get(
@@ -1815,6 +1822,9 @@ def _build_agent_card_payload() -> dict:
                 "description": "DID-signed JWT (ES256K). Obtain via POST /token or sign with your own DID identity.",
             }
         },
+        # Non-standard: present only when A2A_X402_ENABLED. Callers without a
+        # trusted JWT can pay per request instead (x402 v2, Radius Testnet SBC).
+        **({"x402": x402_offer} if x402_offer else {}),
     }
 
 
@@ -5186,7 +5196,7 @@ async def oauth_protected_resource():
     )
 
 
-async def _handle_delegated(rpc_id, message: dict, issuer_did: str | None):
+async def _handle_delegated(rpc_id, message: dict, issuer_did: str | None, *, allow_managed_session: bool = True):
     webhook_secret = os.environ.get("WEBHOOK_SECRET")
     if not webhook_secret:
         return _rpc_error_response(
@@ -5215,7 +5225,7 @@ async def _handle_delegated(rpc_id, message: dict, issuer_did: str | None):
         a2a_task_id=task_id,
     )
     issuer_did_url = _did_web_to_base_url(issuer_did) if issuer_did else None
-    session = _a2a_session_store.find_by_context(context_id)
+    session = _a2a_session_store.find_by_context(context_id) if allow_managed_session else None
     webhook_payload = json.dumps(
         {
             "text": text,
@@ -5441,10 +5451,72 @@ async def a2a_auth_dep(request: Request) -> dict[str, Any]:
     }
 
 
-@app.post("/a2a")
-async def handle_a2a(request: Request, auth: dict = Depends(a2a_auth_dep)):
+async def a2a_access_dep(request: Request) -> dict[str, Any]:
+    """Authorize /a2a: existing auth first, then x402 payment when enabled.
+
+    Callers that pass A2A_AUTH_MODE (TRUSTED_DIDS JWT and/or KYA) are never
+    charged. With A2A_X402_ENABLED, anyone else gets a 402 challenge and may pay
+    per request instead. Unset, behavior is exactly a2a_auth_dep.
+    """
+    if not x402_seller.enabled():
+        return await a2a_auth_dep(request)
+    from fastapi import HTTPException
+
     try:
-        body = await request.json()
+        return await a2a_auth_dep(request)
+    except HTTPException as exc:
+        if exc.status_code != 401:
+            raise
+    payment = await x402_seller.authorize(request, _wallet_address(), f"{BASE_URL}/a2a")
+    return {
+        "mode": "x402",
+        "did_ok": False,
+        "issuer": None,
+        "kya_ok": False,
+        "kya_policy": "off",
+        "kya_action": "skip",
+        "kya_reason": None,
+        "kya_report": None,
+        "kya_issuer": None,
+        "x402": payment,
+        "x402_payer": payment.get("payer"),
+    }
+
+
+@app.post("/a2a")
+async def handle_a2a(request: Request, auth: dict = Depends(a2a_access_dep)):
+    payment = auth.get("x402")
+    try:
+        response = await _handle_a2a(request, auth)
+    except Exception:
+        if not payment or not payment.get("receipt"):
+            raise
+        log_event(logger, logging.ERROR, "Paid A2A failed after settlement", event="a2a.x402", outcome="delivery_failed")
+        response = JSONResponse({"error": "delivery_failed", "message": "Payment was reported settled but agent delivery failed; do not pay again automatically"}, status_code=500)
+    finally:
+        if payment:
+            x402_seller.release_unsettled(payment)
+    if payment:
+        return await x402_seller.finalize(payment, response)
+    return response
+
+
+async def _handle_a2a(request: Request, auth: dict) -> Response:
+    try:
+        if auth.get("x402"):
+            # A paid caller is untrusted. Bound body accumulation before any
+            # charge or backend work, including chunked requests.
+            raw_body = bytearray()
+            async with asyncio.timeout(30):
+                async for chunk in request.stream():
+                    raw_body.extend(chunk)
+                    if len(raw_body) > x402_seller.MAX_REQUEST_BYTES:
+                        return _rpc_error_response(None, InvalidRequestError(message="Paid A2A request body is too large"), status_code=413)
+            body = json.loads(raw_body)
+        else:
+            body = await request.json()
+    except TimeoutError:
+        return _rpc_error_response(None, InvalidRequestError(message="Paid A2A request body timed out"), status_code=408)
     except Exception:
         log_event(
             logger,
@@ -5512,6 +5584,23 @@ async def handle_a2a(request: Request, auth: dict = Depends(a2a_auth_dep)):
         )
 
     mode = _resolve_mode(method)
+    if auth.get("x402"):
+        # Validate all locally knowable failures before charging. The agent may
+        # call tools or submit a webhook, so settlement must precede that work.
+        if method not in {"message/send", "message/stream"}:
+            return _rpc_error_response(rpc_id, MethodNotFoundError(message="This operation is not supported"))
+        if not isinstance(message, dict) or not _message_text(message).strip():
+            return _rpc_error_response(rpc_id, InvalidParamsError(message="Invalid params: no text content in message parts"))
+        if mode == "delegated":
+            if method == "message/stream":
+                return _rpc_error_response(rpc_id, MethodNotFoundError(message="message/stream is only supported in direct mode"))
+            if not os.environ.get("WEBHOOK_SECRET"):
+                return _rpc_error_response(rpc_id, InternalError(message="Webhook not configured on this agent"), status_code=503)
+        elif not _a2a_bridge:
+            return _rpc_error_response(rpc_id, InternalError(message="Direct A2A bridge is unavailable"), status_code=503)
+        await x402_seller.settle(auth["x402"])
+        message["context_id"] = x402_seller.scoped_context(auth["x402"]["payer"], message.get("context_id"))
+
     message_id = message.get("message_id") if isinstance(message, dict) else None
     if isinstance(message, dict) and not message_id:
         message_id = message.get("id")
@@ -5590,8 +5679,11 @@ async def handle_a2a(request: Request, auth: dict = Depends(a2a_auth_dep)):
     elif kya_decision.get("reason") == "no_token" and (auth.get("kya_policy") or kya_verify.inbound_policy()) != "off":
         log_event(logger, logging.DEBUG, "A2A KYA gate skipped (no token)", **kya_log_payload)
 
+    # Managed sessions are driven by trusted peers only, never by paid callers.
     managed_session = (
-        _a2a_session_store.find_by_context(context_id) if context_id else None
+        _a2a_session_store.find_by_context(context_id)
+        if context_id and not auth.get("x402")
+        else None
     )
     if (
         managed_session
@@ -5673,6 +5765,7 @@ async def handle_a2a(request: Request, auth: dict = Depends(a2a_auth_dep)):
             rpc_id,
             message,
             auth.get("issuer") or auth.get("kya_issuer"),
+            allow_managed_session=not bool(auth.get("x402")),
         )
 
     if not _a2a_bridge:
@@ -5728,6 +5821,7 @@ async def handle_a2a(request: Request, auth: dict = Depends(a2a_auth_dep)):
                         rpc_id,
                         message,
                         auth.get("issuer") or auth.get("kya_issuer"),
+                        allow_managed_session=not bool(auth.get("x402")),
                     )
                 raise
 

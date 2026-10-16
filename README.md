@@ -352,6 +352,36 @@ A successful HTTP response describes delivery. `settlement_reported` requires a 
 
 Try: *"Show me three Radius Testnet x402 demo APIs"*, *"Quote this approved endpoint without paying"*, *"Show the x402 ledger"*.
 
+## Paid A2A (x402 seller)
+
+`POST /a2a` can charge callers per request in SBC on Radius Testnet using x402 v2. It is off by default; with `A2A_X402_ENABLED` unset, `/a2a` behaves exactly as before (Bearer JWT from `TRUSTED_DIDS`, plus KYA per `A2A_AUTH_MODE`).
+
+```
+A2A_X402_ENABLED=true
+A2A_PRICE_SBC=0.001                 # per request; default 0.001, at most 1, six decimals
+A2A_X402_FACILITATOR_URL=           # default https://facilitator.testnet.radiustech.xyz
+```
+
+A caller that passes the configured DID/KYA authentication is never charged. Enabling paid A2A also admits public callers through payment alone: the paid fallback does not require DID or KYA authentication, including when `A2A_AUTH_MODE=did_and_kya` or `kya_only` requires KYA on the authenticated path. Keep paid A2A disabled when every caller must satisfy that identity policy.
+
+Callers that fail authentication get `402 Payment Required` with a `PAYMENT-REQUIRED` header (also returned as the JSON body): one `exact` offer for SBC on Radius Testnet (`eip155:72344`) by EIP-3009. `payTo` is this agent's wallet address (`RADIUS_WALLET_ADDRESS` or the cached radius-cli address; the keystore is never read). The paid retry carries `PAYMENT-SIGNATURE`. The server checks it against the offer and asks the facilitator to verify and settle it before invoking Hermes. Rejected payment or an unknown settlement outcome prevents backend execution. A rejected settlement returns a fresh 402; a facilitator error or unknown settlement returns `502`. Check the payer's transactions before retrying an unknown outcome.
+
+Payment buys acceptance of a request for execution. A later backend error, delegated task failure, stream failure, or delivery timeout can occur after payment; there is no automatic refund. Successful settlement reports are returned in `PAYMENT-RESPONSE`, including when subsequent backend execution fails. These are facilitator reports and require independent on-chain reconciliation. Paid conversations are scoped to the verified payer and cannot drive trusted managed A2A sessions. When enabled, `/.well-known/agent-card.json` adds a non-standard `x402` object with the price and offer.
+
+Paid callers reach the same configured Hermes backend and its enabled tools, including wallet plugins and any terminal/file access. Use a dedicated testnet deployment with tools and plugins restricted to the intended service, a dedicated testnet wallet, and a separate LLM API key with a spend limit. Configure those restrictions before enabling public paid access.
+
+Paying from another agent or a terminal with radius-cli:
+
+```bash
+radius-cli wallet pay post https://<agent>/a2a \
+  -d '{"jsonrpc":"2.0","id":"1","method":"message/send","params":{"message":{"role":"user","messageId":"m1","parts":[{"kind":"text","text":"hello"}]}}}' \
+  --protocol x402 --networks radius --threshold 0.01
+```
+
+Another agent built from this template can use `x402_request` with the agent host in its `X402_ALLOWED_HOSTS`.
+
+This is a testnet demo. The seller has no cumulative cap, rate limit, refund path, or delivery ledger. Its replay guard is per process. The facilitator checks signatures, balances, and settlement; retain its receipts and reconcile unknown outcomes before retrying.
+
 ## Slack app from code (Slack CLI)
 
 `slack/manifest.json` is the Slack app definition (Socket Mode, agent view, the scopes and events Hermes needs). It was generated with `hermes slack manifest --agent-view`, with the generic slash commands removed so they don't collide with other apps in a shared workspace. Create or update the app with the [Slack CLI](https://docs.slack.dev/tools/slack-cli/):
