@@ -10,7 +10,7 @@ import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { verifyTypedData, encodeAbiParameters } from 'viem';
 import { uptoPermit2WitnessTypes } from '@x402/evm';
 import {
-  BASE_USDC, PERMIT2_ADDRESS, UPTO_PERMIT2_PROXY, Budget, ConfigError, createHandler, createPayer, guardedSigner,
+  BASE_USDC, PERMIT2_ADDRESS, UPTO_PERMIT2_PROXY, Budget, appendLedger, ConfigError, createHandler, createPayer, guardedSigner,
   loadConfig, spentFromLedger, toChatCompletion, toRunBody,
 } from '../lib.mjs';
 
@@ -172,8 +172,12 @@ test('402 upto -> signed Permit2 retry -> 200 with settlement; ledger records th
   assert.equal(state.requests[0].body.input.max_tokens, 100);
   assert.equal(state.requests[0].headers['payment-signature'], undefined);
   const rows = ledgerRows();
-  assert.deepEqual(rows.map((r) => r.event), ['started', 'completed']);
-  const done = rows[1];
+  assert.deepEqual(rows.map((r) => r.event), ['started', 'signing', 'completed']);
+  // Written before signing, so a crash mid-payment is still charged against the budget at the max.
+  assert.equal(rows[1].outcome, 'payment_unknown');
+  assert.equal(rows[1].authorized_max_atomic, '50000');
+  assert.equal(spentFromLedger(join(dir, 'x402', 'ledger.jsonl')).length, 1);
+  const done = rows[2];
   assert.equal(done.outcome, 'settlement_reported');
   assert.equal(done.settled_atomic, '1000');
   assert.equal(done.amount, '0.001');
@@ -260,6 +264,22 @@ test('the budget survives a restart through the ledger', async () => {
   await start({ CF_X402_DAILY_BUDGET: '0.1', CF_X402_MAX_PER_REQUEST: '0.1' });
   assert.equal((await chat({ messages: [{ role: 'user', content: 'one' }] })).status, 200);
   assert.equal(spentFromLedger(join(dir, 'x402', 'ledger.jsonl')).reduce((s, e) => s + e.atomic, 0n), 60000n);
+});
+
+test('refusals cost nothing after a restart; a crash after the signing row counts the maximum', async () => {
+  state.max = '200000';
+  await start({ CF_X402_MAX_PER_REQUEST: '0.1' });
+  assert.equal((await chat({})).status, 402);
+  state.allowance = 0n;
+  state.max = '50000';
+  assert.equal((await chat({ messages: [{ role: 'user', content: 'b' }] })).status, 402);
+  const path = join(dir, 'x402', 'ledger.jsonl');
+  assert.deepEqual(spentFromLedger(path), []);
+  // Simulate a crash: only `started` and `signing` rows for an id.
+  const crashed = { id: 'crash', ts: new Date().toISOString(), requested_by: 'cf-x402-proxy' };
+  appendLedger(path, { ...crashed, event: 'started', outcome: 'pending' });
+  appendLedger(path, { ...crashed, event: 'signing', outcome: 'payment_unknown', authorized_max_atomic: '50000' });
+  assert.deepEqual(spentFromLedger(path).map((e) => e.atomic), [50000n]);
 });
 
 test('a 2xx without a 402 (billed to the Cloudflare account) is delivered once, then the proxy refuses', async () => {
