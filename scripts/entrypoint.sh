@@ -390,14 +390,14 @@ if selected:
         state_file.write_text(json.dumps(state))
     if cfg.get("model") != model:
         cfg["model"] = model
-        cfg_file.write_text(yaml.dump(cfg, default_flow_style=False, allow_unicode=True))
+        cfg_file.write_text(yaml.dump(cfg, default_flow_style=False, allow_unicode=True, sort_keys=False))
     print(f"[bootstrap] Hermes main model -> cloudflare-x402 proxy ({model['default']} at {base_url}).")
 elif state is not None:
     if ours(cfg.get("model")):
         llm_model = os.environ.get("LLM_MODEL", "").strip()
         restored = llm_model or state.get("previous_model") or "openai/gpt-5.4-nano"
         cfg["model"] = restored
-        cfg_file.write_text(yaml.dump(cfg, default_flow_style=False, allow_unicode=True))
+        cfg_file.write_text(yaml.dump(cfg, default_flow_style=False, allow_unicode=True, sort_keys=False))
         print(f"[bootstrap] Hermes main model restored from cloudflare-x402 to {restored if isinstance(restored, str) else 'the previous model block'}.")
     state_file.unlink()
 PYEOF
@@ -1436,13 +1436,18 @@ if [[ "${RADIUS_INFERENCE_PROVIDER:-}" == "cloudflare-x402" ]]; then
     done
   ) &
   CF_X402_PID=$!
+  cf_x402_ready=false
   for _ in $(seq 1 30); do
     if curl -sf "http://127.0.0.1:${CF_X402_PORT}/health" >/dev/null 2>&1; then
+      cf_x402_ready=true
       echo "[bootstrap] cloudflare-x402 proxy ready."
       break
     fi
     sleep 1
   done
+  if [[ "$cf_x402_ready" != true ]]; then
+    echo "[bootstrap] WARNING: cloudflare-x402 proxy is not answering on 127.0.0.1:${CF_X402_PORT}; model calls will fail until it does (see [cf-x402] lines)." >&2
+  fi
   # Only the proxy needs these; keep them out of the agent's and gateway's environment.
   # (Advisory only: same-user processes can still read /proc/1/environ. The real caps are the
   # wallet balance, the bounded Permit2 allowance and the Cloudflare token's scope; see README.)

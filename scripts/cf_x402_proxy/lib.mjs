@@ -153,7 +153,9 @@ export function spentFromLedger(path, now = Date.now()) {
   for (const row of latest.values()) {
     const ts = Date.parse(row.ts);
     if (!Number.isFinite(ts) || now - ts > DAY_MS) continue;
-    const atomic = row.outcome === 'settlement_reported' ? row.settled_atomic : row.authorized_max_atomic;
+    // Settled calls count what was charged; calls that may still settle (including a crash after
+    // the `signing` row) count their authorised maximum. Refusals, rejections and errors cost nothing.
+    const atomic = row.outcome === 'settlement_reported' ? row.settled_atomic : row.outcome === 'payment_unknown' ? row.authorized_max_atomic : undefined;
     if (typeof atomic === 'string' && /^\d+$/.test(atomic) && atomic !== '0') out.push({ ts, atomic: BigInt(atomic) });
   }
   return out;
@@ -400,6 +402,8 @@ export function createPayer(config, { fetch: baseFetch = globalThis.fetch } = {}
         return decline(`rolling 24h budget of ${atomicToUsdc(ctx.budget.limit)} USDC would be exceeded`);
       }
       ctx.reservation = reservation;
+      // Durable before signing: a crash from here on leaves a row counted at the authorised maximum.
+      if (ctx.onSigning && !ctx.onSigning()) return decline('payment ledger unavailable; not signing');
       ctx.signing = true;
       return true;
     },
@@ -578,6 +582,14 @@ export function createHandler(config, { payer, budget, log = (line) => console.l
     if (!slot) return { outcome: 'error', error: { status: 429, message: 'too many queued inference requests', code: 'rate_limited' } };
     await slot;
     const ctx = { id: randomUUID(), started: now(), budget, signing: false, sent: false };
+    ctx.onSigning = () => {
+      try {
+        ledger(ctx, 'signing', 'payment_unknown', paymentFields(ctx));
+        return true;
+      } catch {
+        return false;
+      }
+    };
     const t0 = now();
     try {
       try {
@@ -587,7 +599,8 @@ export function createHandler(config, { payer, budget, log = (line) => console.l
         return { outcome: 'error', error: { status: 503, message: 'payment ledger unavailable; no request or payment attempted', code: 'ledger_unavailable' } };
       }
       const result = await runPaid(ctx, bodyText);
-      if (result.outcome === 'error' && ctx.reservation && !ctx.sent) budget.settle(ctx.reservation, 0n);
+      // Nothing left the process: whatever the outcome, the reservation is released.
+      if (ctx.reservation && !ctx.sent) budget.settle(ctx.reservation, 0n);
       try {
         ledger(ctx, 'completed', result.outcome, result.extra);
       } catch {

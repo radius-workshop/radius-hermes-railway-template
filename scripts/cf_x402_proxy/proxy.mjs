@@ -44,4 +44,10 @@ server.listen(config.port, '127.0.0.1', () => {
       `(used ${atomicToUsdc(budget.used())} in the last 24h) max_tokens=${config.maxTokens}`,
   );
 });
-for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => server.close(() => process.exit(0)));
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  process.on(sig, () => {
+    server.close(() => process.exit(0));
+    server.closeIdleConnections();
+    setTimeout(() => process.exit(0), 5000).unref();
+  });
+}
