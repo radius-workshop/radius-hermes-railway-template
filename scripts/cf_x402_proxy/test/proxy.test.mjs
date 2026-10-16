@@ -129,7 +129,7 @@ async function start(overrides = {}) {
   });
   const budget = new Budget(config.dailyBudget, spentFromLedger(config.ledgerPath));
   const handler = createHandler(config, { payer: createPayer(config), budget, log: (l) => logs.push(l) });
-  proxy = await listen((req, res) => handler(req, res).catch((e) => { res.writeHead(500); res.end(String(e)); }));
+  proxy = await listen((req, res) => handler(req, res).catch((e) => { logs.push(`internal error: ${e?.name}`); res.writeHead(500); res.end('internal error'); }));
 }
 
 function chat(body, key = PROXY_KEY) {
