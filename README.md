@@ -362,7 +362,13 @@ A2A_PRICE_SBC=0.001                 # per request; default 0.001, at most 1, six
 A2A_X402_FACILITATOR_URL=           # default https://facilitator.testnet.radiustech.xyz
 ```
 
-Payment is an alternative to the allowlist, not a replacement. A caller that passes the existing auth is never charged. Every other caller gets `402 Payment Required` with a `PAYMENT-REQUIRED` header (also returned as the JSON body): one `exact` offer for SBC on `eip155:72344` by EIP-3009, `payTo` set to this agent's wallet address (`RADIUS_WALLET_ADDRESS` or the cached radius-cli address; the keystore is never read). The paid retry carries `PAYMENT-SIGNATURE`. The server checks it against the offer, has the facilitator verify it, runs the request, and settles only if the request succeeded: `message/send` and delegated submissions settle after the result is ready, and `message/stream` settles once the stream is accepted, before any events are sent. A request that fails is not settled. If settlement is rejected the result is withheld and a fresh 402 is returned; if the facilitator cannot be reached the response is `502`. The receipt is returned in `PAYMENT-RESPONSE`. Paid callers cannot drive managed A2A sessions. When enabled, `/.well-known/agent-card.json` adds a non-standard `x402` object with the price and offer.
+A caller that passes the configured DID/KYA authentication is never charged. Enabling paid A2A also admits public callers through payment alone: the paid fallback does not require DID or KYA authentication, including when `A2A_AUTH_MODE=did_and_kya` or `kya_only` requires KYA on the authenticated path. Keep paid A2A disabled when every caller must satisfy that identity policy.
+
+Callers that fail authentication get `402 Payment Required` with a `PAYMENT-REQUIRED` header (also returned as the JSON body): one `exact` offer for SBC on Radius Testnet (`eip155:72344`) by EIP-3009. `payTo` is this agent's wallet address (`RADIUS_WALLET_ADDRESS` or the cached radius-cli address; the keystore is never read). The paid retry carries `PAYMENT-SIGNATURE`. The server checks it against the offer and asks the facilitator to verify and settle it before invoking Hermes. Rejected payment or an unknown settlement outcome prevents backend execution. A rejected settlement returns a fresh 402; a facilitator error or unknown settlement returns `502`. Check the payer's transactions before retrying an unknown outcome.
+
+Payment buys acceptance of a request for execution. A later backend error, delegated task failure, stream failure, or delivery timeout can occur after payment; there is no automatic refund. Successful settlement reports are returned in `PAYMENT-RESPONSE`, including when subsequent backend execution fails. These are facilitator reports and require independent on-chain reconciliation. Paid conversations are scoped to the verified payer and cannot drive trusted managed A2A sessions. When enabled, `/.well-known/agent-card.json` adds a non-standard `x402` object with the price and offer.
+
+Paid callers reach the same configured Hermes backend and its enabled tools, including wallet plugins and any terminal/file access. Use a dedicated testnet deployment with tools and plugins restricted to the intended service, a dedicated testnet wallet, and a separate LLM API key with a spend limit. Configure those restrictions before enabling public paid access.
 
 Paying from another agent or a terminal with radius-cli:
 
@@ -374,7 +380,7 @@ radius-cli wallet pay post https://<agent>/a2a \
 
 Another agent built from this template can use `x402_request` with the agent host in its `X402_ALLOWED_HOSTS`.
 
-This is a testnet demo. There is no cumulative cap, rate limit, refund path, or delivery ledger on the seller side; a paid request that times out upstream after settlement is not refunded. The replay guard for in-flight payments is per process. The facilitator, not this server, checks signatures and balances.
+This is a testnet demo. The seller has no cumulative cap, rate limit, refund path, or delivery ledger. Its replay guard is per process. The facilitator checks signatures, balances, and settlement; retain its receipts and reconcile unknown outcomes before retrying.
 
 ## Slack app from code (Slack CLI)
 

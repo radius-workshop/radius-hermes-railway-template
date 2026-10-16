@@ -15,6 +15,15 @@ trusted A2A communication, optional KYA signed claims, and Slack app setup.
   durable intent log. Delivery, reported settlement, and unknown payment outcomes
   are distinct; receipts still need independent reconciliation. Base and mainnet
   payments are excluded from this release.
+- **Inspect seller payment offers.** The buyer ledger captures up to 32 advertised
+  offers per 402 response and summarizes offered networks and tokens. These are
+  seller advertisements; paid execution remains limited to Radius Testnet.
+- **Offer optional paid A2A access.** Enable prepaid Radius Testnet requests while
+  authenticated peers remain free. Payment admits public callers without DID/KYA,
+  including required KYA modes, to the full configured Hermes backend. Use a
+  dedicated deployment with restricted tools and plugins. Payment precedes
+  execution; later failures have no automatic refund. See [Paid A2A setup](README.md#paid-a2a-x402-seller)
+  for access controls, receipts, and unknown settlement outcomes.
 - **Verify optional identity claims.** KYA verification requires trusted HTTPS
   issuers, checks audience and expiration, and prevents replay within one process.
   Signed claims do not certify regulatory compliance or settle a payment.
