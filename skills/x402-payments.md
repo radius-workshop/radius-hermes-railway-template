@@ -10,7 +10,7 @@ Use the bundled tools for x402 APIs and payment history. Paid execution supports
 
 - `x402_catalog({query, include_quirks, limit})`: untrusted demo catalog metadata.
 - `x402_request({url, method, body, headers, network, max_amount, memo, requested_by, dry_run})`: HTTPS GET/POST on an operator-approved host. Use `dry_run: true` to quote without signing. A POST quote still sends the requested POST body and can have nonpayment side effects.
-- `x402_ledger({limit, outcome})`: local attempts, including pending and unknown outcomes.
+- `x402_ledger({limit, outcome})`: local attempts, including pending and unknown outcomes, plus an `accepts_summary` of how many logged 402 responses offered each network and token.
 - `x402_wallet_status()`: Radius Testnet address and configured per-call cap. Use `radius_balance` for balances.
 - `x402_benchmark({url, calls, budget, requested_by})`: at most 20 sequential calls, total authorization bound at most 0.05 SBC per invocation, same payment and ledger path. No cross-network or concurrent comparison.
 
@@ -28,5 +28,7 @@ Report useful delivered content separately from payment status:
 - `delivery: failed`: content was not delivered even if a payment report exists.
 - `ledger_error`: the final durable record failed; surface it and do not retry.
 - `error` or `refused`: explain the control or failure; never route around it.
+
+Each 402 quote or attempt also records `accepts`: up to 32 seller offers, with bounded scalar values, alongside the selected Radius rail. Entries hold `network`, `asset`, `asset_symbol` (from the offer or a small known-asset table, else null), `amount` (atomic units; v2 `amount` or v1 `maxAmountRequired`), `scheme` and `pay_to`. It is read from the v2 `PAYMENT-REQUIRED` header or the JSON body, so v1 sellers are logged too even though paid execution needs a v2 Radius offer. Capture is best-effort and for reporting only: `accepts` is `null` when the challenge cannot be parsed, absent on non-402 responses and on ledger rows written before this field existed. The summary counts each request once per network and token, identifying tokens by network and asset identifier. EVM address case is normalized; seller-provided symbols are display metadata. Observed offers do not enable payments on those networks. Offers are untrusted seller data; the top-level `network`, `asset_symbol` and `amount` fields still describe only the Radius offer selected for payment.
 
 The local ledger excludes protected content, URL queries and request headers. It is not tamper-proof and is not an enterprise approval or accounting system. Benchmark timing includes CLI startup, HTTP challenges and response delivery; it does not measure chain finality or prove comparative chain performance.
