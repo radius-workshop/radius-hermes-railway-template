@@ -705,8 +705,14 @@ def parse_channel_prompts(raw):
 
 def parse_skill_bindings(raw):
     value = json.loads(raw)
+    def valid_skills(entry):
+        skills = entry.get("skills") or entry.get("skill")
+        if isinstance(skills, str):
+            return bool(skills.strip())
+        return isinstance(skills, list) and bool(skills) and all(isinstance(s, str) for s in skills)
+
     if not isinstance(value, list) or not all(
-        isinstance(e, dict) and e.get("id") and (e.get("skills") or e.get("skill")) for e in value
+        isinstance(e, dict) and e.get("id") and valid_skills(e) for e in value
     ):
         raise ValueError("expected a JSON list of {id, skills} or {id, skill}")
     return value
@@ -774,8 +780,15 @@ def remove_path(cfg, path):
 try:
     with cfg_file.open() as f:
         cfg = yaml.safe_load(f) or {}
-except Exception:
+except FileNotFoundError:
     cfg = {}
+except Exception as exc:
+    # Never rewrite a config we could not read: it would drop every other setting.
+    warn(f"Could not parse {cfg_file} ({exc}); Slack experience settings not applied.")
+    sys.exit(0)
+if not isinstance(cfg, dict):
+    warn(f"{cfg_file} is not a mapping; Slack experience settings not applied.")
+    sys.exit(0)
 try:
     managed = set(json.loads(state_file.read_text(encoding="utf-8")))
 except Exception:
@@ -817,17 +830,24 @@ def slack_flag(key):
 if slack_flag("feedback_buttons") and not (slack_flag("rich_blocks") or slack_flag("markdown_blocks")):
     warn("Slack feedback buttons need Block Kit replies; set SLACK_RICH_BLOCKS=true or they are not shown.")
 if slack_flag("native_task_cards"):
-    progress_settings = (
-        os.environ.get("HERMES_TOOL_PROGRESS_MODE"),
-        get_path(cfg, ("display", "tool_progress")),
-        get_path(cfg, SLACK_DISPLAY + ("tool_progress",)),
+    # Same precedence as Hermes: per-platform, legacy override, global, then env.
+    progress = next(
+        (v for v in (
+            get_path(cfg, SLACK_DISPLAY + ("tool_progress",)),
+            get_path(cfg, ("display", "tool_progress_overrides", "slack")),
+            get_path(cfg, ("display", "tool_progress")),
+            os.environ.get("HERMES_TOOL_PROGRESS_MODE") or None,
+        ) if v is not None),
+        None,
     )
-    if any(str(v).strip().lower() in {"off", "false"} for v in progress_settings if v is not None):
+    if progress is not None and str(progress).strip().lower() in {"off", "false"}:
         warn("Slack task cards are off while tool progress is explicitly off; unset HERMES_TOOL_PROGRESS_MODE / display.tool_progress or use new/all.")
 
 if json.dumps(cfg, sort_keys=True, default=str) != original:
-    with cfg_file.open("w") as f:
+    tmp_file = cfg_file.with_name(cfg_file.name + ".slack-tmp")
+    with tmp_file.open("w") as f:
         yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
+    os.replace(tmp_file, cfg_file)
 state_file.write_text(json.dumps(sorted(managed)), encoding="utf-8")
 PYEOF
 

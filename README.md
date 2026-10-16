@@ -312,7 +312,7 @@ SLACK_REACTION_TRIGGERS=true      # a reaction on the bot's own message becomes 
 |---|---|---|
 | `SLACK_STREAMING` | `display.platforms.slack.streaming` | Turns streaming on for Slack only, not Telegram or Discord. It needs the `assistant:write` scope and Slack's Agents & AI Apps feature. Without them, Hermes falls back to editing the message as it streams. Native streaming is skipped when `unfurl_links` or `unfurl_media` is set. |
 | `SLACK_RICH_BLOCKS` | `slack.rich_blocks` | Applies only to sending, so the app doesn't need reinstalling. A plain-text fallback is always sent. |
-| `SLACK_FEEDBACK_BUTTONS` | `slack.feedback_buttons` | Hermes only writes clicks to `agent.log` (`Feedback button clicked`); it doesn't store them anywhere. They are missing on replies that exceed Slack's 50-block limit. |
+| `SLACK_FEEDBACK_BUTTONS` | `slack.feedback_buttons` | Hermes only writes clicks to the gateway log (`Feedback button clicked`); it doesn't store them anywhere. They are missing on replies that exceed Slack's 50-block limit. |
 | `SLACK_NATIVE_TASK_CARDS` | `slack.native_task_cards` | Cards need a thread. Explicitly turning tool progress off also turns the cards off (`HERMES_TOOL_PROGRESS_MODE=off`, or `display.tool_progress: off` in `config.yaml`); the boot log warns when that happens. |
 | `SLACK_SUGGESTED_PROMPTS` | `slack.suggested_prompts` | `default`, or JSON: `[{"title":"Check my wallet","message":"What is my SBC balance?"}]` or `{"title":"Try:","prompts":[...]}`. Slack shows up to 4, in the agent DM only. |
 | `SLACK_LIVE_STATUS` | `display.platforms.slack.live_status` | `full` previews tool arguments such as file paths and commands. Use `verb` in shared channels. |
@@ -321,7 +321,7 @@ SLACK_REACTION_TRIGGERS=true      # a reaction on the bot's own message becomes 
 | `SLACK_CHANNEL_SKILL_BINDINGS` | `slack.channel_skill_bindings` | JSON list: `[{"id":"C0123456789","skills":["x402-payments"]}]`. Skills load when a session starts, so run `/new` after changing them. |
 | `SLACK_REACTION_TRIGGERS` | Hermes reads it directly | Use `true`, which only routes reactions on the bot's own messages. An emoji list (`white_check_mark,eyes`) routes reactions on anyone's message. A routed reaction skips the mention rules but still checks `SLACK_ALLOWED_USERS` and `SLACK_ALLOWED_CHANNELS`. |
 
-Invalid values are logged as warnings and leave that setting unchanged; they don't stop the boot. The log shows channel IDs and counts but never prompt text. The bundled `slack/manifest.json` already has every scope, event and interactivity setting these features need (`assistant:write`, `reactions:read`, `reaction_added`/`reaction_removed`, agent view), so no reinstall is needed if your app was created from it.
+A variable replaces any value written into `config.yaml` by hand, and removing the variable later deletes the setting rather than restoring the hand-written value. While `SLACK_RUNTIME_FOOTER` or `SLACK_LIVE_STATUS` is set, it overrides the chat commands `/footer` and `/verbose` in Slack. Invalid values are logged as warnings and leave that setting unchanged, and so does a `config.yaml` that can't be parsed; neither stops the boot. The log shows channel IDs and counts but never prompt text. The bundled `slack/manifest.json` already has every scope, event and interactivity setting these features need (`assistant:write`, `reactions:read`, `reaction_added`/`reaction_removed`, agent view), so no reinstall is needed if your app was created from it.
 
 ### Opening the bot to a whole workspace
 

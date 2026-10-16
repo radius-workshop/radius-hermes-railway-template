@@ -133,6 +133,41 @@ class SlackExperienceBootstrapTests(unittest.TestCase):
         result = self.boot(SLACK_FEEDBACK_BUTTONS="true", SLACK_RICH_BLOCKS="true", SLACK_NATIVE_TASK_CARDS="true")
         self.assertNotIn("WARNING", result.stderr)
 
+    def test_unparseable_config_is_never_rewritten(self):
+        broken = "model: keep-me\nterminal: [unclosed\n"
+        self.config.write_text(broken)
+        result = self.boot(SLACK_RICH_BLOCKS="true")
+        self.assertEqual(self.config.read_text(), broken)
+        self.assertIn("Could not parse", result.stderr)
+
+    def test_invalid_value_on_later_boot_keeps_managed_value(self):
+        self.boot(SLACK_CHANNEL_PROMPTS='{"C1": "first"}')
+        self.boot(SLACK_CHANNEL_PROMPTS="{broken")
+        self.assertEqual(self.load()["slack"]["channel_prompts"], {"C1": "first"})
+        self.boot()
+        self.assertNotIn("slack", self.load())
+
+    def test_suggested_prompts_title_form_and_false_values(self):
+        prompts = {"title": "Try:", "prompts": [{"title": "Balance", "message": "What is my SBC balance?"}]}
+        self.boot(SLACK_SUGGESTED_PROMPTS=json.dumps(prompts), SLACK_STREAMING="false")
+        cfg = self.load()
+        self.assertEqual(cfg["slack"]["suggested_prompts"], prompts)
+        self.assertIs(cfg["display"]["platforms"]["slack"]["streaming"], False)
+
+    def test_skill_bindings_require_skill_names(self):
+        result = self.boot(SLACK_CHANNEL_SKILL_BINDINGS='[{"id": "C1", "skills": 5}]')
+        self.assertIn("Ignoring SLACK_CHANNEL_SKILL_BINDINGS", result.stderr)
+        self.boot(SLACK_CHANNEL_SKILL_BINDINGS='[{"id": "C1", "skill": "x402-payments"}]')
+        self.assertEqual(self.load()["slack"]["channel_skill_bindings"], [{"id": "C1", "skill": "x402-payments"}])
+
+    def test_task_card_warning_follows_hermes_precedence(self):
+        self.config.write_text(yaml.safe_dump({"display": {"tool_progress": "off", "platforms": {"slack": {"tool_progress": "new"}}}}))
+        result = self.boot(SLACK_NATIVE_TASK_CARDS="true")
+        self.assertNotIn("task cards are off", result.stderr)
+        self.config.write_text(yaml.safe_dump({"display": {"tool_progress_overrides": {"slack": "off"}}}))
+        result = self.boot(SLACK_NATIVE_TASK_CARDS="true")
+        self.assertIn("task cards are off", result.stderr)
+
     def test_state_file_tracks_managed_vars(self):
         self.boot(SLACK_RICH_BLOCKS="false")
         self.assertEqual(json.loads((self.home / ".slack-experience-managed.json").read_text()), ["SLACK_RICH_BLOCKS"])
