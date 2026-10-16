@@ -13,7 +13,7 @@ The agent server in this directory is the FastAPI layer that exposes the public 
 - `logging_utils.py`: structured JSON logging helpers used by the server.
 - `url_utils.py`: base URL derivation from `PUBLIC_URL` / Railway env.
 - `gen_jwt.py`: local JWT generation helper used by the bundled plugin/tooling.
-- `x402_seller.py`: optional x402 payment gate for `/a2a` (402 challenge, facilitator verify and settle).
+- `x402_seller.py`: optional x402 payment gate for `/a2a`. Validates the request and requires a matching facilitator settlement report before invoking Hermes or submitting a webhook. Receipts are attached even if subsequent delivery fails; no automatic refund. Paid request bodies are capped at 1 MiB. Conversations are scoped to the verified payer and cannot drive managed sessions. This opt-in public paid path bypasses DID/KYA requirements; use a dedicated testnet agent with restricted capabilities.
 - `mock-agent-skills.index.json`: sample public skills index for local mock-page previewing.
 
 ## What the server does

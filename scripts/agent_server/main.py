@@ -5196,7 +5196,7 @@ async def oauth_protected_resource():
     )
 
 
-async def _handle_delegated(rpc_id, message: dict, issuer_did: str | None):
+async def _handle_delegated(rpc_id, message: dict, issuer_did: str | None, *, allow_managed_session: bool = True):
     webhook_secret = os.environ.get("WEBHOOK_SECRET")
     if not webhook_secret:
         return _rpc_error_response(
@@ -5225,7 +5225,7 @@ async def _handle_delegated(rpc_id, message: dict, issuer_did: str | None):
         a2a_task_id=task_id,
     )
     issuer_did_url = _did_web_to_base_url(issuer_did) if issuer_did else None
-    session = _a2a_session_store.find_by_context(context_id)
+    session = _a2a_session_store.find_by_context(context_id) if allow_managed_session else None
     webhook_payload = json.dumps(
         {
             "text": text,
@@ -5485,15 +5485,38 @@ async def a2a_access_dep(request: Request) -> dict[str, Any]:
 
 @app.post("/a2a")
 async def handle_a2a(request: Request, auth: dict = Depends(a2a_access_dep)):
-    response = await _handle_a2a(request, auth)
-    if auth.get("x402"):
-        return await x402_seller.finalize(auth["x402"], response)
+    payment = auth.get("x402")
+    try:
+        response = await _handle_a2a(request, auth)
+    except Exception:
+        if not payment or not payment.get("receipt"):
+            raise
+        log_event(logger, logging.ERROR, "Paid A2A failed after settlement", event="a2a.x402", outcome="delivery_failed")
+        response = JSONResponse({"error": "delivery_failed", "message": "Payment was reported settled but agent delivery failed; do not pay again automatically"}, status_code=500)
+    finally:
+        if payment:
+            x402_seller.release_unsettled(payment)
+    if payment:
+        return await x402_seller.finalize(payment, response)
     return response
 
 
 async def _handle_a2a(request: Request, auth: dict) -> Response:
     try:
-        body = await request.json()
+        if auth.get("x402"):
+            # A paid caller is untrusted. Bound body accumulation before any
+            # charge or backend work, including chunked requests.
+            raw_body = bytearray()
+            async with asyncio.timeout(30):
+                async for chunk in request.stream():
+                    raw_body.extend(chunk)
+                    if len(raw_body) > x402_seller.MAX_REQUEST_BYTES:
+                        return _rpc_error_response(None, InvalidRequestError(message="Paid A2A request body is too large"), status_code=413)
+            body = json.loads(raw_body)
+        else:
+            body = await request.json()
+    except TimeoutError:
+        return _rpc_error_response(None, InvalidRequestError(message="Paid A2A request body timed out"), status_code=408)
     except Exception:
         log_event(
             logger,
@@ -5561,6 +5584,23 @@ async def _handle_a2a(request: Request, auth: dict) -> Response:
         )
 
     mode = _resolve_mode(method)
+    if auth.get("x402"):
+        # Validate all locally knowable failures before charging. The agent may
+        # call tools or submit a webhook, so settlement must precede that work.
+        if method not in {"message/send", "message/stream"}:
+            return _rpc_error_response(rpc_id, MethodNotFoundError(message="This operation is not supported"))
+        if not isinstance(message, dict) or not _message_text(message).strip():
+            return _rpc_error_response(rpc_id, InvalidParamsError(message="Invalid params: no text content in message parts"))
+        if mode == "delegated":
+            if method == "message/stream":
+                return _rpc_error_response(rpc_id, MethodNotFoundError(message="message/stream is only supported in direct mode"))
+            if not os.environ.get("WEBHOOK_SECRET"):
+                return _rpc_error_response(rpc_id, InternalError(message="Webhook not configured on this agent"), status_code=503)
+        elif not _a2a_bridge:
+            return _rpc_error_response(rpc_id, InternalError(message="Direct A2A bridge is unavailable"), status_code=503)
+        await x402_seller.settle(auth["x402"])
+        message["context_id"] = x402_seller.scoped_context(auth["x402"]["payer"], message.get("context_id"))
+
     message_id = message.get("message_id") if isinstance(message, dict) else None
     if isinstance(message, dict) and not message_id:
         message_id = message.get("id")
@@ -5725,6 +5765,7 @@ async def _handle_a2a(request: Request, auth: dict) -> Response:
             rpc_id,
             message,
             auth.get("issuer") or auth.get("kya_issuer"),
+            allow_managed_session=not bool(auth.get("x402")),
         )
 
     if not _a2a_bridge:
@@ -5780,6 +5821,7 @@ async def _handle_a2a(request: Request, auth: dict) -> Response:
                         rpc_id,
                         message,
                         auth.get("issuer") or auth.get("kya_issuer"),
+                        allow_managed_session=not bool(auth.get("x402")),
                     )
                 raise
 

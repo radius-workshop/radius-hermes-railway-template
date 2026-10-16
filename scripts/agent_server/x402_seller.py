@@ -1,19 +1,19 @@
 """Seller-side x402 v2 payment gate for POST /a2a (Radius Testnet, SBC).
 
-Off unless A2A_X402_ENABLED is true. Hand-rolled because radius-sdk's seller
-(`radius-sdk/server`, `radius-sdk/hono`, 0.6.0) is TypeScript for Node >= 22,
-while this server is Python/FastAPI. The wire format mirrors radius-sdk and
-@x402/core: an unpaid request gets 402 with a base64 JSON `PAYMENT-REQUIRED`
+Off unless A2A_X402_ENABLED is true. Python/FastAPI implementation of the v2
+HTTP transport (https://github.com/x402-foundation/x402/blob/main/specs/transports-v2/http.md):
+an unpaid request gets 402 with a base64 JSON `PAYMENT-REQUIRED`
 header (also returned as the JSON body); the paid retry carries
 `PAYMENT-SIGNATURE`; the payment is checked by the facilitator's POST /verify,
-the request runs, and a successful response is settled with POST /settle and
-returned with a `PAYMENT-RESPONSE` header.
+the validated request is settled with POST /settle before agent execution, and
+the response carries a `PAYMENT-RESPONSE` header even if delivery later fails.
 
 The facilitator checks the signature and submits the transfer. This module only
 uses the wallet's public address (payTo) and never reads key material.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -21,13 +21,15 @@ import json
 import logging
 import os
 import re
+import secrets
 import time
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response
 
 from logging_utils import log_event
 
@@ -46,6 +48,9 @@ DEFAULT_FACILITATOR_URL = "https://facilitator.testnet.radiustech.xyz"
 PAYMENT_HEADERS = ("PAYMENT-SIGNATURE", "X-PAYMENT")
 MAX_HEADER_BYTES = 16 * 1024
 FACILITATOR_TIMEOUT = 30.0
+MAX_FACILITATOR_BYTES = 64 * 1024
+MAX_IN_FLIGHT = 4096
+MAX_REQUEST_BYTES = 1024 * 1024
 
 # Tests may swap in an httpx.MockTransport.
 _transport: Optional[httpx.AsyncBaseTransport] = None
@@ -86,13 +91,18 @@ def price_atomic() -> str:
 
 def facilitator_url() -> str:
     url = (os.environ.get("A2A_X402_FACILITATOR_URL", "").strip() or DEFAULT_FACILITATOR_URL).rstrip("/")
-    if not url.startswith("https://"):
-        raise ValueError("A2A_X402_FACILITATOR_URL must be https")
+    try:
+        parsed = urlsplit(url)
+        valid = parsed.scheme == "https" and parsed.hostname and parsed.port in {None, 443}
+    except ValueError:
+        valid = False
+    if not valid or parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment:
+        raise ValueError("A2A_X402_FACILITATOR_URL must be an HTTPS origin/path on port 443 without credentials, query, or fragment")
     return url
 
 
 def _valid_pay_to(address: Optional[str]) -> bool:
-    return bool(address and re.fullmatch(r"0x[0-9a-fA-F]{40}", address) and int(address, 16) != 0)
+    return bool(isinstance(address, str) and re.fullmatch(r"0x[0-9a-fA-F]{40}", address) and int(address, 16) != 0)
 
 
 def requirements(pay_to: str) -> dict[str, Any]:
@@ -149,7 +159,8 @@ def _payment_required(pay_to: str, resource_url: str, error: str) -> PaymentRequ
 
 
 def _unavailable(error: str, status_code: int, message: str) -> PaymentRequired:
-    return PaymentRequired(JSONResponse({"error": error, "message": message}, status_code=status_code))
+    return PaymentRequired(JSONResponse({"error": error, "message": message}, status_code=status_code,
+                                        headers={"Cache-Control": "private, no-store"}))
 
 
 def _decode_payment(header: str) -> Optional[dict[str, Any]]:
@@ -157,7 +168,7 @@ def _decode_payment(header: str) -> Optional[dict[str, Any]]:
         return None
     try:
         decoded = json.loads(base64.b64decode(header, validate=True).decode("utf-8"))
-    except (binascii.Error, UnicodeDecodeError, ValueError):
+    except (binascii.Error, UnicodeDecodeError, ValueError, RecursionError):
         return None
     return decoded if isinstance(decoded, dict) else None
 
@@ -176,10 +187,31 @@ def _matches(required: dict[str, Any], accepted: Any) -> bool:
     )
 
 
-def _digest(payment: dict[str, Any]) -> str:
-    return hashlib.sha256(
-        json.dumps(payment.get("payload"), sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+def _authorization(payment: dict[str, Any], required: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Validate the EIP-3009 identity before reserving or contacting a facilitator."""
+    payload = payment.get("payload")
+    auth = payload.get("authorization") if isinstance(payload, dict) else None
+    if not isinstance(auth, dict):
+        return None
+    if not _valid_pay_to(auth.get("from")) or not _valid_pay_to(auth.get("to")):
+        return None
+    if auth["to"].lower() != required["payTo"].lower() or auth.get("value") != required["amount"]:
+        return None
+    if not isinstance(auth.get("nonce"), str) or not re.fullmatch(r"0x[0-9a-fA-F]{64}", auth["nonce"]):
+        return None
+    for name in ("validAfter", "validBefore"):
+        if not isinstance(auth.get(name), str) or not re.fullmatch(r"[0-9]{1,78}", auth[name]):
+            return None
+    if int(auth["validBefore"]) <= int(auth["validAfter"]):
+        return None
+    return auth
+
+
+def _digest(authorization: dict[str, Any]) -> str:
+    # Signatures (including alternate ECDSA encodings) do not change the nonce
+    # consumed by EIP-3009. Keep the guard keyed by that on-chain identity.
+    identity = [NETWORK, ASSET.lower(), authorization["from"].lower(), authorization["nonce"].lower()]
+    return hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
 
 
 def _claim(digest: str) -> bool:
@@ -187,7 +219,7 @@ def _claim(digest: str) -> bool:
     for key, expires in list(_in_flight.items()):
         if expires <= now:
             _in_flight.pop(key, None)
-    if digest in _in_flight:
+    if digest in _in_flight or len(_in_flight) >= MAX_IN_FLIGHT:
         return False
     _in_flight[digest] = now + MAX_TIMEOUT_SECONDS
     return True
@@ -198,13 +230,20 @@ def _release(digest: str) -> None:
 
 
 async def _facilitator_post(path: str, body: dict[str, Any]) -> tuple[int, Any]:
-    async with httpx.AsyncClient(timeout=FACILITATOR_TIMEOUT, transport=_transport) as client:
-        resp = await client.post(f"{facilitator_url()}{path}", json=body)
+    async with asyncio.timeout(FACILITATOR_TIMEOUT):
+        async with httpx.AsyncClient(timeout=FACILITATOR_TIMEOUT, transport=_transport) as client:
+            async with client.stream("POST", f"{facilitator_url()}{path}", json=body) as resp:
+                raw = bytearray()
+                async for chunk in resp.aiter_bytes(chunk_size=8192):
+                    raw.extend(chunk)
+                    if len(raw) > MAX_FACILITATOR_BYTES:
+                        raise httpx.DecodingError("Facilitator response exceeds size limit")
+                status = resp.status_code
     try:
-        data = resp.json()
-    except ValueError:
+        data = json.loads(raw)
+    except (ValueError, RecursionError):
         data = None
-    return resp.status_code, data
+    return status, data
 
 
 async def authorize(request: Request, pay_to: Optional[str], resource_url: str) -> dict[str, Any]:
@@ -228,18 +267,21 @@ async def authorize(request: Request, pay_to: Optional[str], resource_url: str) 
     if not _matches(required, payment.get("accepted")):
         raise _payment_required(pay_to, resource_url, "invalid_payment: payment does not match the offered requirements")
 
-    digest = _digest(payment)
+    authorization = _authorization(payment, required)
+    if authorization is None:
+        raise _payment_required(pay_to, resource_url, "invalid_payment: malformed EIP-3009 authorization")
+    digest = _digest(authorization)
     if not _claim(digest):
         raise _payment_required(pay_to, resource_url, "invalid_payment: payment already in use")
 
     body = {"x402Version": X402_VERSION, "paymentPayload": payment, "paymentRequirements": required}
     try:
         status, data = await _facilitator_post("/verify", body)
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, TimeoutError) as exc:
         _release(digest)
         log_event(logger, logging.WARNING, "Paid A2A verify unreachable", event="a2a.x402", outcome="error", x402_error=type(exc).__name__)
         raise _unavailable("facilitator_error", 502, "Payment facilitator is unreachable; nothing was charged") from None
-    if not isinstance(data, dict) or "isValid" not in data:
+    if not 200 <= status < 300 or not isinstance(data, dict) or not isinstance(data.get("isValid"), bool):
         _release(digest)
         log_event(logger, logging.WARNING, "Paid A2A verify failed", event="a2a.x402", outcome="error", facilitator_status=status)
         raise _unavailable("facilitator_error", 502, "Payment facilitator returned an unexpected response; nothing was charged")
@@ -249,68 +291,87 @@ async def authorize(request: Request, pay_to: Optional[str], resource_url: str) 
         log_event(logger, logging.INFO, "Paid A2A payment rejected", event="a2a.x402", outcome="rejected", x402_reason=reason)
         raise _payment_required(pay_to, resource_url, reason)
 
+    payer = data.get("payer")
+    if not _valid_pay_to(payer) or payer.lower() != authorization["from"].lower():
+        _release(digest)
+        raise _unavailable("facilitator_error", 502, "Payment facilitator returned an inconsistent payer; nothing was charged")
+
     log_event(logger, logging.INFO, "Paid A2A payment verified", event="a2a.x402", outcome="verified",
               x402_payer=data.get("payer"), x402_amount=required["amount"])
     return {
         "payment": payment,
         "requirements": required,
-        "payer": data.get("payer"),
+        "payer": payer,
         "digest": digest,
         "pay_to": pay_to,
         "resource_url": resource_url,
     }
 
 
-def _delivered(response: Response) -> bool:
-    if isinstance(response, StreamingResponse):
-        return response.status_code < 400
-    if response.status_code >= 400:
-        return False
-    try:
-        body = json.loads(bytes(response.body))
-    except (AttributeError, ValueError):
-        return False
-    return isinstance(body, dict) and "error" not in body
+async def settle(ctx: dict[str, Any]) -> None:
+    """Require a bound settlement report before executing any agent work.
 
-
-async def finalize(ctx: dict[str, Any], response: Response) -> Response:
-    """Settle after a successful A2A response; leave failed requests unpaid.
-
-    message/send and delegated submissions settle after the handler has produced
-    its result. message/stream settles once the stream is accepted, before the
-    body is sent, so PAYMENT-RESPONSE can be a response header.
+    A facilitator report is trusted evidence, not independent chain reconciliation.
+    Keep reservations after an attempted settlement, including unknown outcomes.
     """
-    if not _delivered(response):
-        _release(ctx["digest"])
-        log_event(logger, logging.INFO, "Paid A2A request failed; payment not settled", event="a2a.x402",
-                  outcome="not_settled", x402_payer=ctx.get("payer"), status_code=response.status_code)
-        return response
-
+    ctx["settlement_attempted"] = True
     body = {"x402Version": X402_VERSION, "paymentPayload": ctx["payment"], "paymentRequirements": ctx["requirements"]}
     try:
         status, data = await _facilitator_post("/settle", body)
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, TimeoutError) as exc:
         data, status = None, None
         error_type = type(exc).__name__
     else:
         error_type = None
-    if not isinstance(data, dict) or "success" not in data:
+    if status is None or not 200 <= status < 300 or not isinstance(data, dict) or not isinstance(data.get("success"), bool):
         log_event(logger, logging.ERROR, "Paid A2A settle outcome unknown", event="a2a.x402", outcome="unknown",
                   x402_payer=ctx.get("payer"), facilitator_status=status, x402_error=error_type)
-        return JSONResponse(
-            {"error": "facilitator_error",
-             "message": "Settlement outcome unknown; check the payer's transactions before retrying"},
-            status_code=502,
-        )
+        raise _unavailable("facilitator_error", 502, "Settlement outcome unknown; check the payer's transactions before retrying")
     if data.get("success") is not True:
         reason = str(data.get("errorReason") or "settlement_failed")[:200]
+        if data.get("transaction") or reason == "settlement_pending":
+            raise _unavailable("facilitator_error", 502, "Settlement is not confirmed; reconcile the payer's transactions before retrying")
         log_event(logger, logging.WARNING, "Paid A2A settle rejected", event="a2a.x402", outcome="settle_failed",
                   x402_payer=ctx.get("payer"), x402_reason=reason)
-        return _payment_required(ctx["pay_to"], ctx["resource_url"], reason).response
+        raise _payment_required(ctx["pay_to"], ctx["resource_url"], reason)
+
+    transaction = data.get("transaction")
+    payer = data.get("payer")
+    if (
+        data.get("network") != ctx["requirements"]["network"]
+        or not _valid_pay_to(payer)
+        or payer.lower() != ctx["payer"].lower()
+        or not isinstance(transaction, str)
+        or not re.fullmatch(r"0x[0-9a-fA-F]{64}", transaction)
+        or int(transaction, 16) == 0
+    ):
+        raise _unavailable("facilitator_error", 502, "Settlement report is inconsistent; reconcile the payer's transactions before retrying")
 
     log_event(logger, logging.INFO, "Paid A2A payment settled", event="a2a.x402", outcome="settled",
               x402_payer=data.get("payer") or ctx.get("payer"), x402_amount=ctx["requirements"]["amount"],
               x402_transaction=data.get("transaction"))
-    response.headers["PAYMENT-RESPONSE"] = _b64json(data)
+    ctx["receipt"] = {"success": True, "transaction": transaction, "network": data["network"], "payer": payer}
+
+
+def scoped_context(payer: str, requested: Optional[str]) -> str:
+    """Keep paid conversations separate from trusted peers and other payers."""
+    prefix = f"x402:{payer.lower()}:"
+    if isinstance(requested, str) and re.fullmatch(re.escape(prefix) + r"[0-9a-f]{64}", requested):
+        return requested
+    token = requested if isinstance(requested, str) and requested else secrets.token_hex(32)
+    return prefix + hashlib.sha256(token.encode()).hexdigest()
+
+
+def release_unsettled(ctx: dict[str, Any]) -> None:
+    if not ctx.get("settlement_attempted"):
+        _release(ctx["digest"])
+
+
+async def finalize(ctx: dict[str, Any], response: Response) -> Response:
+    """Preserve the receipt separately from delivery, including backend failures."""
+    if not ctx.get("receipt"):
+        return response
+    response.headers["PAYMENT-RESPONSE"] = _b64json(ctx["receipt"])
     response.headers["Access-Control-Expose-Headers"] = "PAYMENT-RESPONSE"
+    response.headers["Cache-Control"] = "private, no-store"
     return response

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import importlib
 import json
 import os
@@ -33,10 +34,17 @@ def _unb64(value: str):
 class FakeBridge:
     def __init__(self, events):
         self.events = events
+        self.messages = []
 
     async def handle_send(self, rpc_id, message):
         self.events.append("handler")
-        return {"result": {"id": "task-1", "context_id": "ctx-1", "status": {"state": "TASK_STATE_COMPLETED"}}}
+        self.messages.append(message)
+        return {"result": {"id": "task-1", "context_id": message.get("context_id", "ctx-1"), "status": {"state": "TASK_STATE_COMPLETED"}}}
+
+    async def stream_events(self, rpc_id, message):
+        self.events.append("handler")
+        self.messages.append(message)
+        yield {"jsonrpc": "2.0", "id": rpc_id, "result": {"type": "message.completed"}}
 
 
 class A2AX402Tests(unittest.TestCase):
@@ -53,6 +61,7 @@ class A2AX402Tests(unittest.TestCase):
         self.facilitator_calls = []
         self.verify_result = {"isValid": True, "payer": PAYER}
         self.settle_result = {"success": True, "transaction": "0x" + "ab" * 32, "network": "eip155:72344", "payer": PAYER}
+        self.verify_status = self.settle_status = 200
         self.env = patch.dict(os.environ, {
             "A2A_X402_ENABLED": "true",
             "A2A_PRICE_SBC": "0.001",
@@ -63,9 +72,10 @@ class A2AX402Tests(unittest.TestCase):
         self.env.start()
         self.seller._in_flight.clear()
         self.seller._transport = httpx.MockTransport(self._facilitator)
+        self.bridge = FakeBridge(self.events)
         patches = [
             patch.object(self.main, "jwt_auth_dep", AsyncMock(side_effect=HTTPException(status_code=401))),
-            patch.object(self.main, "_a2a_bridge", FakeBridge(self.events)),
+            patch.object(self.main, "_a2a_bridge", self.bridge),
             patch.object(self.main, "A2A_MODE", "direct"),
         ]
         for p in patches:
@@ -83,7 +93,8 @@ class A2AX402Tests(unittest.TestCase):
         self.events.append(request.url.path)
         assert str(request.url).startswith("https://facilitator.testnet.radiustech.xyz/")
         result = self.verify_result if request.url.path == "/verify" else self.settle_result
-        return httpx.Response(200, json=result)
+        status = self.verify_status if request.url.path == "/verify" else self.settle_status
+        return httpx.Response(status, json=result)
 
     def _challenge(self):
         response = self.client.post("/a2a", json=SEND)
@@ -133,13 +144,14 @@ class A2AX402Tests(unittest.TestCase):
         self.assertNotIn("PAYMENT-RESPONSE", response.headers)
         self.assertEqual(self.events, ["handler"])
 
-    def test_paid_request_verifies_runs_then_settles(self):
+    def test_paid_request_verifies_settles_then_runs(self):
         offer = self._challenge()["accepts"][0]
         header = self._payment(offer)
         response = self.client.post("/a2a", json=SEND, headers={"PAYMENT-SIGNATURE": header})
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["result"]["id"], "task-1")
-        self.assertEqual(self.events, ["/verify", "handler", "/settle"])
+        self.assertEqual(self.events, ["/verify", "/settle", "handler"])
+        self.assertEqual(response.headers["Cache-Control"], "private, no-store")
         receipt = _unb64(response.headers["PAYMENT-RESPONSE"])
         self.assertTrue(receipt["success"])
         verify_body = self.facilitator_calls[0][1]
@@ -181,7 +193,189 @@ class A2AX402Tests(unittest.TestCase):
         response = self.client.post("/a2a", json=SEND, headers={"PAYMENT-SIGNATURE": self._payment(offer)})
         self.assertEqual(response.status_code, 402)
         self.assertNotIn("result", response.json())
-        self.assertEqual(self.events, ["/verify", "handler", "/settle"])
+        self.assertEqual(self.events, ["/verify", "/settle"])
+
+    def test_non_2xx_verification_cannot_authorize_work(self):
+        self.verify_status = 500
+        offer = self._challenge()["accepts"][0]
+        response = self.client.post("/a2a", json=SEND, headers={"PAYMENT-SIGNATURE": self._payment(offer)})
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(self.events, ["/verify"])
+
+    def test_settlement_requires_bound_complete_receipt_before_work(self):
+        original = dict(self.settle_result)
+        for changes in (
+            {"transaction": ""}, {"transaction": "0x" + "00" * 32},
+            {"network": "eip155:8453"}, {"payer": WALLET}, {"payer": None},
+        ):
+            with self.subTest(changes=changes):
+                self.events.clear()
+                self.settle_result = {**original, **changes}
+                offer = self._challenge()["accepts"][0]
+                response = self.client.post("/a2a", json=SEND, headers={"PAYMENT-SIGNATURE": self._payment(offer)})
+                self.assertEqual(response.status_code, 502)
+                self.assertEqual(self.events, ["/verify", "/settle"])
+                self.assertNotIn("PAYMENT-RESPONSE", response.headers)
+
+    def test_non_2xx_settlement_cannot_authorize_work(self):
+        self.settle_status = 500
+        offer = self._challenge()["accepts"][0]
+        response = self.client.post("/a2a", json=SEND, headers={"PAYMENT-SIGNATURE": self._payment(offer)})
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(self.events, ["/verify", "/settle"])
+
+    def test_pending_settlement_is_not_a_fresh_payment_challenge(self):
+        self.settle_result.update(success=False, errorReason="settlement_pending")
+        offer = self._challenge()["accepts"][0]
+        response = self.client.post("/a2a", json=SEND, headers={"PAYMENT-SIGNATURE": self._payment(offer)})
+        self.assertEqual(response.status_code, 502)
+        self.assertNotIn("PAYMENT-REQUIRED", response.headers)
+        self.assertEqual(self.events, ["/verify", "/settle"])
+
+    def test_unknown_settlement_retains_guard_and_never_runs_work(self):
+        def transport(request):
+            if request.url.path == "/settle":
+                self.events.append("/settle")
+                raise httpx.ReadTimeout("lost response", request=request)
+            return self._facilitator(request)
+
+        self.seller._transport = httpx.MockTransport(transport)
+        offer = self._challenge()["accepts"][0]
+        header = self._payment(offer)
+        response = self.client.post("/a2a", json=SEND, headers={"PAYMENT-SIGNATURE": header})
+        self.assertEqual(response.status_code, 502)
+        replay = self.client.post("/a2a", json=SEND, headers={"PAYMENT-SIGNATURE": header})
+        self.assertEqual(replay.status_code, 402)
+        self.assertEqual(self.events, ["/verify", "/settle"])
+
+    def test_same_nonce_with_altered_signature_is_replay(self):
+        offer = self._challenge()["accepts"][0]
+        payment = _unb64(self._payment(offer))
+        response = self.client.post("/a2a", json=SEND, headers={"PAYMENT-SIGNATURE": _b64(payment)})
+        self.assertEqual(response.status_code, 200)
+        payment["payload"]["signature"] = "0x" + "22" * 65
+        replay = self.client.post("/a2a", json=SEND, headers={"PAYMENT-SIGNATURE": _b64(payment)})
+        self.assertEqual(replay.status_code, 402)
+        self.assertEqual(self.events, ["/verify", "/settle", "handler"])
+
+    def test_verified_payer_must_match_authorization(self):
+        self.verify_result["payer"] = WALLET
+        offer = self._challenge()["accepts"][0]
+        response = self.client.post("/a2a", json=SEND, headers={"PAYMENT-SIGNATURE": self._payment(offer)})
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(self.events, ["/verify"])
+
+    def test_backend_failure_preserves_settlement_receipt(self):
+        offer = self._challenge()["accepts"][0]
+        with patch.object(self.bridge, "handle_send", AsyncMock(side_effect=self.main.HermesUpstreamError("backend failed"))):
+            response = self.client.post("/a2a", json=SEND, headers={"PAYMENT-SIGNATURE": self._payment(offer)})
+        self.assertEqual(response.status_code, 502)
+        self.assertIn("error", response.json())
+        self.assertTrue(_unb64(response.headers["PAYMENT-RESPONSE"])["success"])
+        self.assertEqual(self.events, ["/verify", "/settle"])
+
+    def test_paid_context_cannot_join_trusted_or_other_payer_context(self):
+        offer = self._challenge()["accepts"][0]
+        body = copy.deepcopy(SEND)
+        body["params"]["message"]["context_id"] = "trusted-context"
+        with patch.object(self.main._a2a_session_store, "find_by_context") as sessions:
+            response = self.client.post("/a2a", json=body, headers={"PAYMENT-SIGNATURE": self._payment(offer)})
+        sessions.assert_not_called()
+        context = self.bridge.messages[-1]["context_id"]
+        self.assertNotEqual(context, "trusted-context")
+        self.assertTrue(context.startswith(f"x402:{PAYER}:"))
+        body["params"]["message"]["context_id"] = response.json()["result"]["context_id"]
+        self.client.post("/a2a", json=body, headers={"PAYMENT-SIGNATURE": self._payment(offer)})
+        self.assertEqual(self.bridge.messages[-1]["context_id"], context)
+
+        second_payer = "0x2222222222222222222222222222222222222222"
+        self.verify_result["payer"] = self.settle_result["payer"] = second_payer
+        payment = _unb64(self._payment(offer))
+        payment["payload"]["authorization"]["from"] = second_payer
+        self.client.post("/a2a", json=body, headers={"PAYMENT-SIGNATURE": _b64(payment)})
+        self.assertNotEqual(self.bridge.messages[-1]["context_id"], context)
+
+    def test_stream_settles_before_first_backend_event(self):
+        offer = self._challenge()["accepts"][0]
+        response = self.client.post("/a2a", json={**SEND, "method": "message/stream"}, headers={"PAYMENT-SIGNATURE": self._payment(offer)})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("message.completed", response.text)
+        self.assertEqual(self.events, ["/verify", "/settle", "handler"])
+        self.assertIn("PAYMENT-RESPONSE", response.headers)
+
+    def test_delegated_submission_settles_first_and_excludes_managed_session(self):
+        offer = self._challenge()["accepts"][0]
+        body = copy.deepcopy(SEND)
+        body["params"]["message"]["context_id"] = "trusted-context"
+        client_mock = AsyncMock()
+        client_mock.post.return_value = httpx.Response(200)
+
+        async def webhook(*args, **kwargs):
+            self.events.append("webhook")
+            self.assertTrue(json.loads(kwargs["content"])["context_id"].startswith(f"x402:{PAYER}:"))
+            self.assertNotIn("a2a_session_id", json.loads(kwargs["content"]))
+            return httpx.Response(200)
+
+        client_mock.post.side_effect = webhook
+        original_client = httpx.AsyncClient
+
+        def factory(*args, **kwargs):
+            if kwargs.get("timeout") == 10.0:
+                context = AsyncMock()
+                context.__aenter__.return_value = client_mock
+                return context
+            return original_client(*args, **kwargs)
+
+        with patch.object(self.main, "A2A_MODE", "delegated"), patch.dict(os.environ, {"WEBHOOK_SECRET": "test-secret"}), \
+                patch.object(httpx, "AsyncClient", side_effect=factory), \
+                patch.object(self.main._a2a_session_store, "find_by_context") as sessions:
+            response = self.client.post("/a2a", json=body, headers={"PAYMENT-SIGNATURE": self._payment(offer)})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.events, ["/verify", "/settle", "webhook"])
+        sessions.assert_not_called()
+
+    def test_oversized_facilitator_response_fails_before_work(self):
+        self.seller._transport = httpx.MockTransport(lambda request: httpx.Response(200, content=b" " * (self.seller.MAX_FACILITATOR_BYTES + 1)))
+        offer = self._challenge()["accepts"][0]
+        response = self.client.post("/a2a", json=SEND, headers={"PAYMENT-SIGNATURE": self._payment(offer)})
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(self.events, [])
+
+    def test_oversized_request_body_is_not_charged(self):
+        offer = self._challenge()["accepts"][0]
+        response = self.client.post("/a2a", content=b" " * (self.seller.MAX_REQUEST_BYTES + 1), headers={"PAYMENT-SIGNATURE": self._payment(offer)})
+        self.assertEqual(response.status_code, 413)
+        self.assertEqual(self.events, ["/verify"])
+        self.assertEqual(self.seller._in_flight, {})
+
+    def test_invalid_json_schema_and_empty_text_are_not_charged(self):
+        offer = self._challenge()["accepts"][0]
+        empty = copy.deepcopy(SEND)
+        empty["params"]["message"]["parts"] = [{"kind": "text", "text": " "}]
+        for content in (b"{", b"[]", json.dumps(empty).encode()):
+            with self.subTest(content=content):
+                self.events.clear()
+                response = self.client.post("/a2a", content=content, headers={"PAYMENT-SIGNATURE": self._payment(offer), "Content-Type": "application/json"})
+                self.assertTrue(response.status_code == 400 or "error" in response.json())
+                self.assertEqual(self.events, ["/verify"])
+                self.assertEqual(self.seller._in_flight, {})
+
+    def test_settle_failure_never_starts_stream_or_delegated_work(self):
+        self.settle_result.update(success=False, transaction="", errorReason="invalid_nonce")
+        offer = self._challenge()["accepts"][0]
+        with patch.object(self.main, "_handle_delegated", AsyncMock()) as delegated:
+            response = self.client.post("/a2a", json={**SEND, "method": "message/stream"}, headers={"PAYMENT-SIGNATURE": self._payment(offer)})
+            self.assertEqual(response.status_code, 402)
+            with patch.object(self.main, "A2A_MODE", "delegated"), patch.dict(os.environ, {"WEBHOOK_SECRET": "test-secret"}):
+                response = self.client.post("/a2a", json=SEND, headers={"PAYMENT-SIGNATURE": self._payment(offer)})
+                self.assertEqual(response.status_code, 402)
+        delegated.assert_not_called()
+        self.assertNotIn("handler", self.events)
+
+    def test_facilitator_url_rejects_embedded_credentials_and_ambiguous_targets(self):
+        for bad in ("http://facilitator.example", "https://user:password@facilitator.example", "https://facilitator.example:8443", "https://facilitator.example/?secret=x", "https://facilitator.example/#secret"):
+            with self.subTest(url=bad), patch.dict(os.environ, {"A2A_X402_FACILITATOR_URL": bad}), self.assertRaises(ValueError):
+                self.seller.facilitator_url()
 
     def test_facilitator_unreachable_is_502(self):
         def down(request):
