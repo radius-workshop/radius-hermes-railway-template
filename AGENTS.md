@@ -10,6 +10,7 @@ This repository is a batteries-included Hermes template. Treat the bundled files
 - `plugins/agent-info` provides the `get_agent_info` tool used to retrieve an agent's public discovery metadata.
 - `plugins/radius-cast` now packages the `radius-cli` wallet integration and provides Radius wallet tools for address lookup, balances, transfers, and tx status.
 - `plugins/x402` provides `x402_request`, `x402_catalog`, `x402_ledger`, and `x402_wallet_status` for bounded Radius Testnet x402 requests on operator-approved hosts and a persistent attempt ledger. Base and mainnet paid execution are disabled.
+- `plugins/feedback-ledger` stores Slack 👍/👎 feedback clicks in `${HERMES_HOME}/feedback/ledger.jsonl` and provides `feedback_ledger` to read them; see `skills/feedback-ledger.md`.
 - `plugins/godaddy-ans` provides GoDaddy Agent Name Service registry tools such as `godaddy_ans_search`, lookup, resolution, registration, and validation, plus the narrow `godaddy_dns_set_records` domain DNS record writer.
 - `scripts/godaddy/*` contains GoDaddy ANS helper scripts behind the plugin tools.
 - `scripts/agent_server/*` contains the HTTP agent server, A2A bridge, auth, DID, and discovery implementation.
