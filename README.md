@@ -406,7 +406,7 @@ The bundled `feedback-ledger` plugin stores each 👍/👎 click on an agent rep
 | `rating` | `good` or `bad`. |
 | `session_id`, `session_start_timestamp`, `session_match` | The Hermes session that produced the reply and when it started (ISO-8601 UTC; across a compression continuation, the start of the first session). See below. |
 
-**Sessions.** The click payload has no session ID. The plugin reads `${HERMES_HOME}/state.db` read-only and looks for Hermes' Slack sessions for that channel, and for that thread if the reply is in one, that were live when the reply was posted. If one of those sessions has an assistant message stored within two minutes of the reply's ts, the closest one wins (`session_match: "reply_time"`). Otherwise, if every candidate belongs to one user, the newest session is used (`"thread"` or `"channel"`). Several people's sessions in one thread with no timing match give `"ambiguous"`. No session gives `"not_found"`, and an unreadable database gives `"unavailable"`. In those three cases both session fields are `null`; the plugin never guesses.
+**Sessions.** The click payload has no session ID. The plugin reads `${HERMES_HOME}/state.db` read-only and looks for Hermes' Slack sessions for that channel, and for that thread if the reply is in one, that were live when the reply was posted. If one of those sessions has an assistant message stored within two minutes of the reply's ts, the closest one wins (`session_match: "reply_time"`). Otherwise, if every candidate belongs to one user, the newest session is used (`"thread"` or `"channel"`). Several people's sessions in one thread with no timing match give `"ambiguous"`. No session gives `"not_found"`, and an unreadable database gives `"unavailable"`. In those three cases both session fields are `null`. `reply_time` is a heuristic: it picks the closest stored assistant message. A streamed turn that runs longer than two minutes can fall outside the window and end up `ambiguous`.
 
 **Duplicates, changes of mind and retention.** A Slack redelivery of the same click has the same `event_id`. It is skipped in memory, and the reader skips it again after a restart. Clicking 👍 and then 👎 stores two events. Summaries count only the latest click per user and reply, ordered by Slack's click time, and report it under `changed_mind`. Un-selecting a button isn't recorded as a retraction. When the file would pass `FEEDBACK_LEDGER_MAX_BYTES` (default 5 MB), it is renamed to `ledger.jsonl.1` and a new file is started. Only that one previous file is kept, so older feedback is deleted. `summary.oldest_retained` shows how far back the data goes. A click still being written during a redeploy can be lost.
 
@@ -415,7 +415,11 @@ The bundled `feedback-ledger` plugin stores each 👍/👎 click on an agent rep
 - It always returns `summary`: good and bad counts from each user's latest rating, `changed_mind`, raters, rated replies, a per-day trend over the last 31 days with data, and `oldest_retained`.
 - Entries are the latest rating per user and reply, newest first. `raw: true` returns every click event instead.
 - Reply excerpts are left out unless `include_text: true`.
-- When the tool runs in a Slack or other chat session, excerpts of replies rated in a different channel are withheld (`message_withheld`). That way a DM reply isn't quoted into a shared channel. Operator contexts such as the CLI see all excerpts. Set `FEEDBACK_LEDGER_TEXT_SCOPE=all` to lift this. This is a convenience filter, not access control: an agent with file or terminal tools can read the ledger file directly.
+- What a caller can see depends on where the tool runs (`caller_scope`):
+  - Local operator surfaces (CLI, TUI, desktop) see everything.
+  - A Slack session sees excerpts only from replies rated in its own channel; others come back as `message_withheld`. That way a DM reply isn't quoted into a shared channel.
+  - Every other context (A2A and API-server callers, cron, other chat platforms, or no session context) gets counts, ratings and timestamps, with no excerpts and no user IDs or names.
+- Set `FEEDBACK_LEDGER_TEXT_SCOPE=all` to lift these limits. They are a convenience filter, not access control: an agent with file or terminal tools can read the ledger file directly.
 - Excerpts and usernames are untrusted data. A reply can quote user or web content, so the output is marked with a `notice` and `untrusted_fields`.
 - `capture` reports this process's counters (`clicks_seen`, `recorded`, `duplicates`, `write_failures`, `last_write_error`). After a deploy where you've clicked a button, `clicks_seen: 0` means capture isn't wired.
 
@@ -424,7 +428,7 @@ The bundled `feedback-ledger` plugin stores each 👍/👎 click on an agent rep
 ```
 FEEDBACK_LEDGER=true                  # default on; false stops storing clicks (the tool can still read old rows)
 FEEDBACK_LEDGER_EXCERPT_CHARS=500     # 0-2000; 0 stores only hash and length
-FEEDBACK_LEDGER_MAX_BYTES=5000000     # rotate past this size; one previous file is kept
+FEEDBACK_LEDGER_MAX_BYTES=5000000     # 65536-20000000; rotate past this size; one previous file is kept
 FEEDBACK_LEDGER_TEXT_SCOPE=channel    # channel | all
 FEEDBACK_LEDGER_PATH=                 # default ${HERMES_HOME}/feedback/ledger.jsonl
 ```
@@ -439,7 +443,7 @@ tail -n 20 /data/.hermes/feedback/ledger.jsonl
 jq -r '[.message_timestamp, .user, .rating, .session_match] | @tsv' /data/.hermes/feedback/ledger.jsonl
 ```
 
-**Limits.** The ledger is local, best-effort and not tamper-proof. Ratings are what Slack reported for the clicking user. Capture depends on Hermes' `hermes_feedback` action ID and `positive`/`negative` values and on `register_platform_handler`. The image smoke check (`scripts/smoke_image.py`) and the tests fail if those change when Hermes is upgraded. If Hermes drops the plugin API, the plugin logs a warning and the tool still works. If it renames the action, `capture.clicks_seen` stays at 0.
+**Limits.** The ledger is local, best-effort and not tamper-proof. Ratings are what Slack reported for the clicking user. Capture depends on Hermes' `hermes_feedback` action ID and `positive`/`negative` values and on `register_platform_handler`. CI's image smoke check (`scripts/smoke_image.py`) fails if those change when Hermes is upgraded. `tests/test_feedback_ledger.py` also has contract tests against the real Slack adapter, but they run only where Hermes is importable (not in CI's test job). If Hermes drops the plugin API, the plugin logs a warning and the tool still works. If it renames the action, `capture.clicks_seen` stays at 0.
 
 Try: *"Show recent feedback"*, *"What are people unhappy about this week? Include the reply text"*, *"Show the feedback ledger"*.
 

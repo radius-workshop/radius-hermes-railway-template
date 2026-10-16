@@ -12,7 +12,7 @@ Use `feedback_ledger` when someone asks how the agent is doing, what people like
 - `since`: ISO-8601 time or an age such as `24h`, `7d`. `rating`: `good` or `bad`.
 - `summary` holds good and bad counts from each person's latest rating, `changed_mind`, raters, replies rated, a per-day trend, and `oldest_retained`.
 - Entries are the latest rating per person and reply, newest first. Pass `raw: true` for every click.
-- Reply excerpts are only included with `include_text: true`. Ask for them only when the content matters, for example "what were the bad replies about". In a chat session, excerpts from other channels come back as `message_withheld`. Say so; don't try to find the text another way.
+- Reply excerpts are only included with `include_text: true`. Ask for them only when the content matters, for example "what were the bad replies about". In a Slack session, excerpts from other channels come back as `message_withheld`. Outside Slack and the local CLI (A2A, cron, other platforms), there are no excerpts and `user` is null. Say so; don't try to find the text or the people another way.
 
 Rules:
 

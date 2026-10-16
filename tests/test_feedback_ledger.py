@@ -137,6 +137,15 @@ class RecordTests(Base):
         self.assertNotIn("sk-ant-", row["message"])
         self.assertNotIn("cd" * 32, row["message"])
         self.assertIn("0x" + "ab" * 32, row["message"])  # transaction hashes stay readable
+        phrase = " ".join(["abandon"] * 11 + ["about"])
+        for leak in ("seed phrase: " + phrase, "my mnemonic is " + phrase, "pk: 0x" + "ef" * 32,
+                     "priv 0x" + "ef" * 32, "password is hunter2hunter2", "api_key=abcdefgh12345"):
+            with self.subTest(leak=leak):
+                cleaned = fb.redact("before " + leak + " after")
+                self.assertNotIn("hunter2hunter2", cleaned)
+                self.assertNotIn("ef" * 32, cleaned)
+                self.assertNotIn("abandon abandon", cleaned)
+                self.assertNotIn("abcdefgh12345", cleaned)
         with patch.dict(os.environ, {"FEEDBACK_LEDGER_EXCERPT_CHARS": "0"}):
             self.record(action_ts="1760650001.000000", text=secret_text)
         row = self.lines()[1]
@@ -334,8 +343,32 @@ class ToolTests(Base):
                 self.assertTrue(all(e["message"] for e in self.tool(include_text=True)["entries"]))
             with patch.dict(os.environ, {"HERMES_SESSION_CHAT_ID": ""}):  # unknown chat: fail closed
                 self.assertTrue(all("message" not in e for e in self.tool(include_text=True)["entries"]))
-        # Operator contexts (CLI, API) see every excerpt.
-        self.assertTrue(all(e["message"] for e in self.tool(include_text=True)["entries"]))
+        # Local operator surfaces see every excerpt.
+        with patch.dict(os.environ, {"HERMES_SESSION_SOURCE": "cli"}):
+            result = self.tool(include_text=True)
+            self.assertEqual(result["caller_scope"], "all")
+            self.assertTrue(all(e["message"] and e["user"] for e in result["entries"]))
+        # A2A/API callers, cron, other platforms and an unknown context get counts only.
+        for env in ({"HERMES_SESSION_PLATFORM": "api_server"}, {"HERMES_SESSION_PLATFORM": "telegram",
+                    "HERMES_SESSION_CHAT_ID": "C0123456789"}, {}):
+            with self.subTest(env=env), patch.dict(os.environ, env):
+                result = self.tool(include_text=True)
+                self.assertEqual(result["caller_scope"], "none")
+                self.assertEqual(result["summary"]["bad"], 2)
+                for entry in result["entries"]:
+                    self.assertNotIn("message", entry)
+                    self.assertNotIn("user_name", entry)
+                    self.assertIsNone(entry["user"])
+
+    def test_latest_click_orders_entries_after_a_change_of_mind(self):
+        self.path.unlink()
+        self.record(user="U1AAAAAA", value="positive", action_ts="1760650100.000000", message_ts="1760650090.000000")
+        self.record(user="U2BBBBBB", value="positive", action_ts="1760650110.000000", message_ts="1760650090.000000")
+        self.record(user="U1AAAAAA", value="negative", action_ts="1760650120.000000", message_ts="1760650090.000000")
+        with patch.dict(os.environ, {"HERMES_SESSION_SOURCE": "cli"}):
+            result = self.tool(limit=1)
+        self.assertEqual([(e["user"], e["rating"]) for e in result["entries"]], [("U1AAAAAA", "bad")])
+        self.assertEqual(self.tool()["summary"]["changed_mind"], 1)
 
     def test_malformed_lines_are_counted_not_fatal(self):
         with self.path.open("a") as fh:
@@ -372,11 +405,11 @@ class SlackMiddlewareTests(Base):
 
         self.app.action("hermes_feedback")(core_feedback)
 
-    def dispatch(self, body):
+    def dispatch(self, body, wait=True):
         async def run():
             response = await self.app.async_dispatch(self.AsyncBoltRequest(body=body, mode="socket_mode"))
             await asyncio.sleep(0.05)
-            for _ in range(100):  # wait for the executor write
+            for _ in range(100 if wait else 0):  # wait for the executor write
                 if self.path.exists() or fb._state["write_failures"]:
                     break
                 await asyncio.sleep(0.02)
@@ -411,7 +444,7 @@ class SlackMiddlewareTests(Base):
         self.app.action("hermes_approve_once")(other)
         body = click()
         body["actions"] = [{"type": "button", "action_id": "hermes_approve_once", "value": "s"}]
-        self.assertEqual(self.dispatch(body).status, 200)
+        self.assertEqual(self.dispatch(body, wait=False).status, 200)
         self.assertEqual(seen, ["hermes_approve_once"])
         self.assertFalse(self.path.exists())
 

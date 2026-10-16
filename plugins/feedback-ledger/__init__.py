@@ -54,8 +54,11 @@ _SECRETS = [
     re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}"),
     # A 32-byte hex value is usually a tx hash (kept); next to key words it is a private key.
-    re.compile(r"(?i)(?:private[ _-]?key|secret|seed)\W{0,24}(?:0x)?[0-9a-f]{64}\b"),
-    re.compile(r"(?i)\b(?:api[_-]?key|password|passwd|secret|token)\b\s*[:=]\s*[^\s,;]{8,}"),
+    re.compile(r"(?i)\b(?:priv(?:ate)?[ _-]?key|privkey|priv|pk|key|secret|seed)\b\W{0,24}(?:0x)?[0-9a-f]{64}\b"),
+    # BIP-39 recovery phrases: 12-24 lowercase words after a seed/mnemonic/recovery label.
+    re.compile(r"(?i)\b(?:seed|mnemonic|recovery)(?:[ _-]?(?:phrase|words))?\b\W{0,24}(?:(?:is|are|was)\s+)?(?:[a-z]{3,8}\s+){11,23}[a-z]{3,8}\b"),
+    re.compile(r"(?i)\b(?:api[_-]?key|password|passwd|passphrase|secret|token)\b(?:\s+is)?\s*[:=]?\s+[^\s,;]{8,}"),
+    re.compile(r"(?i)\b(?:api[_-]?key|password|passwd|passphrase|secret|token)\b\s*[:=]\s*[^\s,;]{8,}"),
 ]
 
 # Process-local capture state, reported by the tool. Clicks are handled in the gateway process.
@@ -64,6 +67,14 @@ _state = {"installed_apps": 0, "clicks_seen": 0, "recorded": 0, "duplicates": 0,
 _recent_ids: "collections.OrderedDict[str, None]" = collections.OrderedDict()
 _recent_lock = threading.Lock()
 _RECENT_MAX = 2048
+_redactor_warned: list = []
+OPERATOR_SURFACES = {"cli", "tui", "local", "desktop"}
+
+
+def _bump(key: str, amount: int = 1, **values) -> None:
+    with _recent_lock:  # counters are touched from the event loop and executor threads
+        _state[key] += amount
+        _state.update(values)
 
 
 class FeedbackError(ValueError):
@@ -86,7 +97,7 @@ def _int_env(name: str, default: int, low: int, high: int) -> int:
 
 
 def _max_bytes() -> int:
-    return _int_env("FEEDBACK_LEDGER_MAX_BYTES", DEFAULT_MAX_BYTES, 65_536, 100_000_000)
+    return _int_env("FEEDBACK_LEDGER_MAX_BYTES", DEFAULT_MAX_BYTES, 65_536, 20_000_000)
 
 
 def _excerpt_chars() -> int:
@@ -131,8 +142,13 @@ def redact(text: str) -> str:
     try:
         from agent.redact import redact_sensitive_text
         text = redact_sensitive_text(text, force=True, redact_url_credentials=True)
-    except Exception:  # older/newer Hermes or running outside it: the local patterns still apply
+    except ImportError:  # running outside Hermes: the local patterns still apply
         pass
+    except Exception as err:  # Hermes changed its redactor: keep going on the local patterns, say so once
+        if not _redactor_warned:
+            _redactor_warned.append(True)
+            logger.warning("[feedback-ledger] Hermes redact_sensitive_text failed (%s); using local patterns only",
+                           type(err).__name__)
     for pattern in _SECRETS:
         text = pattern.sub("[redacted]", text)
     return text
@@ -249,7 +265,7 @@ def lookup_session(db: Path, channel: str | None, thread_ts: str | None, message
         return {**out, "session_match": "unavailable"}
     try:
         at = float(message_ts)
-        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1.0)
+        conn = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True, timeout=1.0)
         try:
             conn.row_factory = sqlite3.Row
             query = ("SELECT id, user_id, started_at, parent_session_id, thread_id FROM sessions"
@@ -336,18 +352,17 @@ def persist(record: dict, path: Path, state_db: Path) -> bool:
     """Complete and store one click. Never raises; failures are logged and counted."""
     try:
         if _seen(record["event_id"]):
-            _state["duplicates"] += 1
+            _bump("duplicates")
             logger.info("[feedback-ledger] duplicate Slack delivery ignored: %s", record["event_id"])
             return False
         record.update(lookup_session(state_db, record.get("channel"), record.get("thread_ts"), record["message_ts"]))
         append(path, record)
-        _state["recorded"] += 1
+        _bump("recorded")
         logger.info("[feedback-ledger] recorded %s feedback from %s on %s (session match: %s)",
                     record["rating"], record["user"], record["message_ts"], record["session_match"])
         return True
     except Exception as err:  # never let storage problems reach the gateway
-        _state["write_failures"] += 1
-        _state["last_write_error"] = f"{type(err).__name__}: {str(err)[:200]}"
+        _bump("write_failures", last_write_error=f"{type(err).__name__}: {str(err)[:200]}")
         logger.error("[feedback-ledger] could not record feedback click (%s); Slack still got its ack "
                      "but the click is missing from %s", _state["last_write_error"], path)
         return False
@@ -360,11 +375,11 @@ def process(body: dict, actions: list, path: Path, state_db: Path) -> int:
         try:
             record = build_record(body, action)
         except Exception:
-            _state["write_failures"] += 1
+            _bump("write_failures")
             logger.exception("[feedback-ledger] could not parse a feedback click; not recorded")
             continue
         if record is None:
-            _state["unusable"] += 1
+            _bump("unusable")
             logger.warning("[feedback-ledger] feedback click without a usable rating/user/message ts; not recorded")
             continue
         stored += persist(record, path, state_db)
@@ -384,7 +399,7 @@ def capture(body) -> int:
     actions = feedback_actions(body)
     if not actions:
         return 0
-    _state["clicks_seen"] += len(actions)
+    _bump("clicks_seen", len(actions))
     args = (body, actions, ledger_path(), _hermes_home() / "state.db")
     try:
         asyncio.get_running_loop().run_in_executor(None, process, *args)
@@ -419,7 +434,7 @@ def wire_slack(app, _adapter=None) -> bool:
         app._radius_feedback_ledger_wired = True
     except Exception:  # pragma: no cover - slotted app objects
         pass
-    _state["installed_apps"] += 1
+    _bump("installed_apps")
     logger.info("[feedback-ledger] capturing Slack feedback clicks into %s", ledger_path())
     return True
 
@@ -459,6 +474,32 @@ def read_events() -> tuple[list, int, int]:
     """All retained events, oldest file first, deduplicated by event_id, sorted by click time."""
     events, seen, malformed, duplicates = [], set(), 0, 0
     path = ledger_path()
+    lock_fd = None
+    try:  # shared lock: a rotation can't happen between reading the two files
+        lock_fd = os.open(path.with_name(path.name + ".lock"), os.O_RDONLY)
+        fcntl.flock(lock_fd, fcntl.LOCK_SH)
+    except OSError:
+        pass
+    try:
+        rows = _read_files(path)
+    finally:
+        if lock_fd is not None:
+            os.close(lock_fd)
+    for row in rows:
+        if row is None:
+            malformed += 1
+        elif row["event_id"] in seen:
+            duplicates += 1
+        else:
+            seen.add(row["event_id"])
+            events.append(row)
+    events.sort(key=_click_time)
+    return events, malformed, duplicates
+
+
+def _read_files(path: Path) -> list:
+    """Rows of the rotated and current file in order; None marks a malformed line."""
+    rows: list = []
     for candidate in (_rotated(path), path):
         if not candidate.exists():
             continue
@@ -470,33 +511,32 @@ def read_events() -> tuple[list, int, int]:
                             or row.get("rating") not in {"good", "bad"}:
                         raise ValueError()
                 except ValueError:
-                    malformed += 1
-                    continue
-                if row["event_id"] in seen:
-                    duplicates += 1
-                    continue
-                seen.add(row["event_id"])
-                events.append(row)
-    events.sort(key=_click_time)
-    return events, malformed, duplicates
+                    row = None
+                rows.append(row)
+    return rows
 
 
-def _caller_channel():
-    """None for operator contexts (CLI, cron-less API, tests); else the calling chat id.
+def _caller_scope() -> tuple[str, str]:
+    """Who is asking, for deciding which excerpts and identities the tool returns.
 
-    Uses Hermes' default-deny ``session_is_messaging_surface``. A messaging caller without a
-    chat id gets "" which matches no row, so excerpts fail closed.
+    ("all", "") for a local operator surface (CLI, TUI, desktop); ("chat", chat_id) for a Slack
+    session, which sees excerpts from its own channel only; ("none", "") for everything else,
+    including A2A/API-server callers, cron, other chat platforms and an unknown context.
     """
     try:
-        from gateway.session_context import get_session_env, session_is_messaging_surface
-        messaging = session_is_messaging_surface()
+        from gateway.session_context import get_session_env
     except Exception:
         def get_session_env(name, default=""):
             return os.environ.get(name, default)
-        messaging = bool(os.environ.get("HERMES_PLATFORM") or os.environ.get("HERMES_SESSION_PLATFORM"))
-    if not messaging:
-        return None
-    return str(get_session_env("HERMES_SESSION_CHAT_ID", "") or "")
+    platform = str(os.environ.get("HERMES_PLATFORM") or get_session_env("HERMES_SESSION_PLATFORM", "") or "")
+    source = str(get_session_env("HERMES_SESSION_SOURCE", "") or "")
+    idents = {i.strip().lower() for i in (platform, source)} - {""}
+    if idents and idents <= OPERATOR_SURFACES:
+        return "all", ""
+    chat = str(get_session_env("HERMES_SESSION_CHAT_ID", "") or "")
+    if platform.strip().lower() == "slack" and chat:
+        return "chat", chat
+    return "none", ""
 
 
 def feedback_ledger(params: dict) -> dict:
@@ -524,6 +564,7 @@ def feedback_ledger(params: dict) -> dict:
         key = (event.get("team_id"), event.get("channel"), event.get("message_ts"), event.get("user"))
         if key in latest and latest[key]["rating"] != event["rating"]:
             changed.add(key)
+        latest.pop(key, None)  # re-insert so the dict stays ordered by each key's latest click
         latest[key] = event
     current = list(latest.values())
     by_day: dict = {}
@@ -546,22 +587,27 @@ def feedback_ledger(params: dict) -> dict:
     if rating:
         rows = [r for r in rows if r["rating"] == rating]
     scope = os.environ.get("FEEDBACK_LEDGER_TEXT_SCOPE", "channel").strip().lower()
-    caller = None if scope == "all" else _caller_channel()
+    caller, chat = ("all", "") if scope == "all" else _caller_scope()
     entries = []
     for row in rows[-limit:][::-1]:
         row = dict(row)
         text = row.pop("message", None)
+        if caller == "none":  # not a local operator or Slack session: counts and timestamps only
+            row.pop("user_name", None)
+            row["user"] = None
         if include_text and text is not None:
-            if caller is not None and row.get("channel") != caller:
-                row["message_withheld"] = "rated in another channel"
-            else:
+            if caller == "all" or (caller == "chat" and row.get("channel") == chat):
                 row["message"] = text
+            else:
+                row["message_withheld"] = ("rated in another channel" if caller == "chat"
+                                           else "only shown to Slack sessions and local operators")
         entries.append(row)
     return {
         "ledger_path": str(ledger_path()),
         "capture": {"enabled": enabled(), **_state},
         "summary": summary,
         "view": "events" if raw else "latest_rating_per_user_and_message",
+        "caller_scope": caller,
         "entries_total": len(rows),
         "entries": entries,
         "malformed_lines": malformed,
