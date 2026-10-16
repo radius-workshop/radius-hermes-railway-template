@@ -207,7 +207,7 @@ for key in \
   OPENROUTER_API_KEY OPENAI_API_KEY OPENAI_BASE_URL ANTHROPIC_API_KEY LLM_MODEL HERMES_INFERENCE_PROVIDER HERMES_PORTAL_BASE_URL NOUS_INFERENCE_BASE_URL HERMES_NOUS_MIN_KEY_TTL_SECONDS HERMES_DUMP_REQUESTS \
   TELEGRAM_BOT_TOKEN TELEGRAM_ALLOWED_USERS TELEGRAM_ALLOW_ALL_USERS TELEGRAM_HOME_CHANNEL TELEGRAM_HOME_CHANNEL_NAME \
   DISCORD_BOT_TOKEN DISCORD_ALLOWED_USERS DISCORD_ALLOW_ALL_USERS DISCORD_HOME_CHANNEL DISCORD_HOME_CHANNEL_NAME DISCORD_REQUIRE_MENTION DISCORD_FREE_RESPONSE_CHANNELS \
-  SLACK_BOT_TOKEN SLACK_APP_TOKEN SLACK_ALLOWED_USERS SLACK_ALLOW_ALL_USERS SLACK_HOME_CHANNEL SLACK_HOME_CHANNEL_NAME SLACK_ALLOWED_CHANNELS SLACK_STRICT_MENTION SLACK_IGNORE_OTHER_USER_MENTIONS SLACK_ALLOW_BOTS WHATSAPP_ENABLED WHATSAPP_ALLOWED_USERS \
+  SLACK_BOT_TOKEN SLACK_APP_TOKEN SLACK_ALLOWED_USERS SLACK_ALLOW_ALL_USERS SLACK_HOME_CHANNEL SLACK_HOME_CHANNEL_NAME SLACK_ALLOWED_CHANNELS SLACK_STRICT_MENTION SLACK_IGNORE_OTHER_USER_MENTIONS SLACK_ALLOW_BOTS SLACK_REQUIRE_MENTION SLACK_REACTION_TRIGGERS WHATSAPP_ENABLED WHATSAPP_ALLOWED_USERS \
   GATEWAY_ALLOW_ALL_USERS \
   FIRECRAWL_API_KEY NOUS_API_KEY BROWSERBASE_API_KEY BROWSERBASE_PROJECT_ID BROWSERBASE_PROXIES BROWSERBASE_ADVANCED_STEALTH BROWSER_SESSION_TIMEOUT BROWSER_INACTIVITY_TIMEOUT FAL_KEY ELEVENLABS_API_KEY VOICE_TOOLS_OPENAI_KEY \
   TINKER_API_KEY WANDB_API_KEY RL_API_URL GITHUB_TOKEN BYTEROVER_API_KEY BYTEROVER_LOCAL LINEAR_API_KEY LINEAR_TEAM_ID LINEAR_PROJECT_ID \
@@ -616,6 +616,220 @@ with cfg_file.open("w") as f:
     yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
 PYEOF
 fi
+
+# === Slack experience settings: re-applied from env on every boot ===
+# Each SLACK_* var below writes one Hermes config.yaml key. An unset var leaves
+# the key alone unless this block wrote it on an earlier boot, in which case the
+# key is removed, so Railway Variables stay the source of truth. "none" clears a
+# key. Mention, bot and reaction gating are not written here: Hermes reads
+# SLACK_REQUIRE_MENTION, SLACK_STRICT_MENTION, SLACK_ALLOW_BOTS,
+# SLACK_ALLOWED_CHANNELS and SLACK_REACTION_TRIGGERS from the environment.
+echo "[bootstrap] Applying Slack experience settings to config.yaml..."
+python3 - <<'PYEOF' || echo "[bootstrap] WARNING: Could not apply Slack experience settings; continuing." >&2
+import json
+import os
+import sys
+from pathlib import Path
+
+import yaml
+
+home = Path(os.environ["HERMES_HOME"])
+cfg_file = home / "config.yaml"
+state_file = home / ".slack-experience-managed.json"
+
+TRUE = {"1", "true", "yes", "on"}
+FALSE = {"0", "false", "no", "off"}
+FOOTER_FIELDS = ("model", "context_pct", "latency", "served_model", "cwd")
+DEFAULT_SUGGESTED_PROMPTS = [
+    {"title": "Check my wallet", "message": "What is my Radius Testnet wallet address and SBC balance?"},
+    {"title": "Try an x402 API", "message": "Show me three Radius Testnet x402 demo APIs and quote one without paying."},
+    {"title": "What can you do?", "message": "What Radius tools and skills do you have, and when should I use each one?"},
+    {"title": "Build on Radius", "message": "How do I send a stablecoin payment on Radius Testnet with viem?"},
+]
+
+
+def warn(message):
+    print(f"[bootstrap] WARNING: {message}", file=sys.stderr)
+
+
+def parse_bool(raw):
+    value = raw.lower()
+    if value in TRUE:
+        return True
+    if value in FALSE:
+        return False
+    raise ValueError("expected true or false")
+
+
+def parse_live_status(raw):
+    value = raw.lower()
+    if value not in {"full", "verb", "off"}:
+        raise ValueError("expected full, verb or off")
+    return value
+
+
+def parse_footer(raw):
+    value = raw.lower()
+    if value in FALSE:
+        return {"enabled": False}
+    if value in TRUE:
+        # Leave out cwd: it would show the workspace path in shared channels.
+        return {"enabled": True, "fields": ["model", "context_pct"]}
+    fields = [f.strip() for f in value.split(",") if f.strip()]
+    unknown = [f for f in fields if f not in FOOTER_FIELDS]
+    if unknown:
+        raise ValueError(f"unknown fields {unknown}; use {', '.join(FOOTER_FIELDS)}")
+    return {"enabled": True, "fields": fields}
+
+
+def parse_prompts(raw):
+    if raw.lower() == "default":
+        return DEFAULT_SUGGESTED_PROMPTS
+    value = json.loads(raw)
+    rows = value.get("prompts") if isinstance(value, dict) else value
+    if not isinstance(rows, list) or not all(
+        isinstance(r, dict) and r.get("title") and r.get("message") for r in rows
+    ):
+        raise ValueError("expected a JSON list of {title, message} or {title, prompts}")
+    if len(rows) > 4:
+        warn("SLACK_SUGGESTED_PROMPTS has more than 4 prompts; Slack shows the first 4.")
+    return value
+
+
+def parse_channel_prompts(raw):
+    value = json.loads(raw)
+    if not isinstance(value, dict) or not all(isinstance(v, str) for v in value.values()):
+        raise ValueError("expected a JSON object of channel ID to prompt text")
+    return {str(k): v for k, v in value.items()}
+
+
+def parse_skill_bindings(raw):
+    value = json.loads(raw)
+    if not isinstance(value, list) or not all(
+        isinstance(e, dict) and e.get("id") and (e.get("skills") or e.get("skill")) for e in value
+    ):
+        raise ValueError("expected a JSON list of {id, skills} or {id, skill}")
+    return value
+
+
+def describe(env_name, value):
+    # Never log prompt text: print shapes, counts and channel IDs only.
+    if env_name == "SLACK_CHANNEL_PROMPTS":
+        return f"prompts for channels {sorted(value)}"
+    if env_name == "SLACK_CHANNEL_SKILL_BINDINGS":
+        return f"bindings for channels {[str(e['id']) for e in value]}"
+    if env_name == "SLACK_SUGGESTED_PROMPTS":
+        rows = value.get("prompts") if isinstance(value, dict) else value
+        return f"{len(rows)} prompts"
+    return value
+
+
+SLACK_DISPLAY = ("display", "platforms", "slack")
+SETTINGS = (
+    ("SLACK_STREAMING", SLACK_DISPLAY + ("streaming",), parse_bool),
+    ("SLACK_LIVE_STATUS", SLACK_DISPLAY + ("live_status",), parse_live_status),
+    ("SLACK_RUNTIME_FOOTER", SLACK_DISPLAY + ("runtime_footer",), parse_footer),
+    ("SLACK_RICH_BLOCKS", ("slack", "rich_blocks"), parse_bool),
+    ("SLACK_NATIVE_TASK_CARDS", ("slack", "native_task_cards"), parse_bool),
+    ("SLACK_FEEDBACK_BUTTONS", ("slack", "feedback_buttons"), parse_bool),
+    ("SLACK_SUGGESTED_PROMPTS", ("slack", "suggested_prompts"), parse_prompts),
+    ("SLACK_CHANNEL_PROMPTS", ("slack", "channel_prompts"), parse_channel_prompts),
+    ("SLACK_CHANNEL_SKILL_BINDINGS", ("slack", "channel_skill_bindings"), parse_skill_bindings),
+)
+
+
+def set_path(cfg, path, value):
+    node = cfg
+    for key in path[:-1]:
+        if not isinstance(node.get(key), dict):
+            node[key] = {}
+        node = node[key]
+    node[path[-1]] = value
+
+
+def get_path(cfg, path):
+    node = cfg
+    for key in path:
+        if not isinstance(node, dict) or key not in node:
+            return None
+        node = node[key]
+    return node
+
+
+def remove_path(cfg, path):
+    parents = [cfg]
+    for key in path[:-1]:
+        node = parents[-1].get(key)
+        if not isinstance(node, dict):
+            return
+        parents.append(node)
+    parents[-1].pop(path[-1], None)
+    # Drop the parent sections this left empty.
+    for depth in range(len(path) - 2, -1, -1):
+        if parents[depth + 1]:
+            break
+        parents[depth].pop(path[depth], None)
+
+
+try:
+    with cfg_file.open() as f:
+        cfg = yaml.safe_load(f) or {}
+except Exception:
+    cfg = {}
+try:
+    managed = set(json.loads(state_file.read_text(encoding="utf-8")))
+except Exception:
+    managed = set()
+
+original = json.dumps(cfg, sort_keys=True, default=str)
+for env_name, path, parse in SETTINGS:
+    raw = os.environ.get(env_name, "").strip()
+    dotted = ".".join(path)
+    if not raw:
+        if env_name in managed:
+            remove_path(cfg, path)
+            managed.discard(env_name)
+            print(f"[bootstrap] {dotted} removed ({env_name} is unset)")
+        continue
+    if raw.lower() == "none":
+        remove_path(cfg, path)
+        managed.discard(env_name)
+        print(f"[bootstrap] {dotted} cleared ({env_name}=none)")
+        continue
+    try:
+        value = parse(raw)
+    except (ValueError, json.JSONDecodeError) as exc:
+        warn(f"Ignoring {env_name}: {exc}. {dotted} left unchanged.")
+        continue
+    set_path(cfg, path, value)
+    managed.add(env_name)
+    print(f"[bootstrap] {dotted} = {describe(env_name, value)}")
+
+slack_cfg = cfg.get("slack") if isinstance(cfg.get("slack"), dict) else {}
+slack_extra = get_path(cfg, ("platforms", "slack", "extra")) or {}
+
+
+def slack_flag(key):
+    raw = slack_cfg.get(key, slack_extra.get(key) if isinstance(slack_extra, dict) else None)
+    return str(raw).strip().lower() in TRUE
+
+
+if slack_flag("feedback_buttons") and not (slack_flag("rich_blocks") or slack_flag("markdown_blocks")):
+    warn("Slack feedback buttons need Block Kit replies; set SLACK_RICH_BLOCKS=true or they are not shown.")
+if slack_flag("native_task_cards"):
+    progress_settings = (
+        os.environ.get("HERMES_TOOL_PROGRESS_MODE"),
+        get_path(cfg, ("display", "tool_progress")),
+        get_path(cfg, SLACK_DISPLAY + ("tool_progress",)),
+    )
+    if any(str(v).strip().lower() in {"off", "false"} for v in progress_settings if v is not None):
+        warn("Slack task cards are off while tool progress is explicitly off; unset HERMES_TOOL_PROGRESS_MODE / display.tool_progress or use new/all.")
+
+if json.dumps(cfg, sort_keys=True, default=str) != original:
+    with cfg_file.open("w") as f:
+        yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
+state_file.write_text(json.dumps(sorted(managed)), encoding="utf-8")
+PYEOF
 
 # === vendored skills: persist Radius external directory and discover skill roots ===
 RADIUS_SKILLS_DIR="${RADIUS_SKILLS_DIR:-/data/.hermes/external-skills/radius-skills}"
