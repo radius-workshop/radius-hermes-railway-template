@@ -298,7 +298,7 @@ For a channel shared with other agents (peer bots), use the Hermes peer-agent pr
 These Railway variables turn on the Slack-native reply features in Hermes. All are off by default, so an existing deployment behaves the same until you set them. On every boot the entrypoint writes them into `config.yaml`. If you remove a variable it wrote, the setting is removed on the next boot. Set a variable to `none` to clear a value someone wrote into `config.yaml` by hand.
 
 ```
-SLACK_STREAMING=true              # replies type out live (Slack chat.startStream); Slack only
+SLACK_STREAMING=true              # replies type out live (Slack chat.startStream); Slack only. See the note below
 SLACK_RICH_BLOCKS=true            # Block Kit replies: headers, real lists, native tables
 SLACK_FEEDBACK_BUTTONS=true       # 👍/👎 under final replies (needs SLACK_RICH_BLOCKS=true)
 SLACK_NATIVE_TASK_CARDS=true      # tool calls shown as live Slack task cards
@@ -310,7 +310,7 @@ SLACK_REACTION_TRIGGERS=true      # a reaction on the bot's own message becomes 
 
 | Variable | Hermes setting | Notes |
 |---|---|---|
-| `SLACK_STREAMING` | `display.platforms.slack.streaming` | Turns streaming on for Slack only, not Telegram or Discord. It needs the `assistant:write` scope and Slack's Agents & AI Apps feature. Without them, Hermes falls back to editing the message as it streams. Native streaming is skipped when `unfurl_links` or `unfurl_media` is set. |
+| `SLACK_STREAMING` | `display.platforms.slack.streaming` | Turns streaming on for Slack only, not Telegram or Discord. It needs the `assistant:write` scope and Slack's Agents & AI Apps feature. Without them, Hermes falls back to editing the message as it streams. Native streaming is skipped when `unfurl_links` or `unfurl_media` is set. **Known issue:** with the pinned Hermes (v2026.9.24), a natively streamed reply can appear twice, the streamed copy and then a second message with the Block Kit table and feedback buttons, and the "is working" indicator never clears. Hermes posts the final reply again whenever its text isn't an exact continuation of the stream, and doesn't close the stream. Hermes v0.22.0 fixes this. Until the template moves to it, leave this off or set it to `false`. The boot log warns while it is on. |
 | `SLACK_RICH_BLOCKS` | `slack.rich_blocks` | Applies only to sending, so the app doesn't need reinstalling. A plain-text fallback is always sent. Hermes converts the agent's markdown: headers, lists, one pipe table, `---` dividers and `>` quotes render natively, and fenced code becomes a code block. The agent can't send its own Block Kit JSON or buttons; JSON in a reply shows as a code block. A reply over Slack's 50 blocks or 39,000 characters is sent as plain text. While it's on (and `slack.markdown_blocks` isn't), the entrypoint also writes `platform_hints.slack` so the agent knows tables render, because Hermes' built-in Slack hint says they don't. A `platform_hints.slack` you wrote or edited yourself is kept. |
 | `SLACK_FEEDBACK_BUTTONS` | `slack.feedback_buttons` | Hermes only writes clicks to the gateway log (`Feedback button clicked`); it doesn't store them anywhere. They are missing on replies that exceed Slack's 50-block limit. |
 | `SLACK_NATIVE_TASK_CARDS` | `slack.native_task_cards` | Cards need a thread. Explicitly turning tool progress off also turns the cards off (`HERMES_TOOL_PROGRESS_MODE=off`, or `display.tool_progress: off` in `config.yaml`); the boot log warns when that happens. |

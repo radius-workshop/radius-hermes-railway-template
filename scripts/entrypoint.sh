@@ -827,6 +827,18 @@ def slack_flag(key):
     return str(raw).strip().lower() in TRUE
 
 
+# Hermes v2026.9.24 posts a natively streamed Slack reply a second time when
+# the final text isn't an exact continuation of the stream, and never closes
+# the stream, so "is working" stays up. Fixed upstream in Hermes v0.22.0.
+# Hermes skips native streaming when an unfurl key is set.
+unfurl_set = any(
+    isinstance(section, dict) and section.get(key) is not None
+    for section in (slack_cfg, slack_extra)
+    for key in ("unfurl_links", "unfurl_media")
+)
+if get_path(cfg, SLACK_DISPLAY + ("streaming",)) is True and not unfurl_set:
+    warn("Slack streaming in this Hermes version can post each reply twice and leave an "
+         "'is working' indicator; set SLACK_STREAMING=false until Hermes is upgraded to v0.22.0 or later.")
 if slack_flag("feedback_buttons") and not (slack_flag("rich_blocks") or slack_flag("markdown_blocks")):
     warn("Slack feedback buttons need Block Kit replies; set SLACK_RICH_BLOCKS=true or they are not shown.")
 if slack_flag("native_task_cards"):
