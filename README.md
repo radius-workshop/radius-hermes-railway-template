@@ -291,6 +291,38 @@ SLACK_ALLOW_BOTS=mentions                   # other bots can reach it only by @m
 
 `SLACK_ALLOWED_USERS` still applies on top of these. See the [Hermes Slack docs](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/slack) for the full list.
 
+For a channel shared with other agents (peer bots), use the Hermes peer-agent profile: `SLACK_REQUIRE_MENTION=true` (the Hermes default), `SLACK_STRICT_MENTION=true`, `SLACK_ALLOW_BOTS=mentions`, and leave `SLACK_ALLOWED_CHANNELS` empty unless you want to restrict channels. Keep these as Railway variables. Don't also set `require_mention`, `allow_bots` or `reaction_triggers` under `slack:` in `config.yaml`: Hermes reads the config value first, so a Railway change would be ignored.
+
+### Slack experience
+
+These Railway variables turn on the Slack-native reply features in Hermes. All are off by default, so an existing deployment behaves the same until you set them. On every boot the entrypoint writes them into `config.yaml`. If you remove a variable it wrote, the setting is removed on the next boot. Set a variable to `none` to clear a value someone wrote into `config.yaml` by hand.
+
+```
+SLACK_STREAMING=true              # replies type out live (Slack chat.startStream); Slack only
+SLACK_RICH_BLOCKS=true            # Block Kit replies: headers, real lists, native tables
+SLACK_FEEDBACK_BUTTONS=true       # 👍/👎 under final replies (needs SLACK_RICH_BLOCKS=true)
+SLACK_NATIVE_TASK_CARDS=true      # tool calls shown as live Slack task cards
+SLACK_SUGGESTED_PROMPTS=default   # 4 Radius starter prompts in the agent DM, or JSON (below)
+SLACK_LIVE_STATUS=verb            # status line detail: full (Hermes default) | verb | off
+SLACK_RUNTIME_FOOTER=on           # "model · context %" footer; or a list: model,context_pct,latency,served_model,cwd
+SLACK_REACTION_TRIGGERS=true      # a reaction on the bot's own message becomes an agent turn
+```
+
+| Variable | Hermes setting | Notes |
+|---|---|---|
+| `SLACK_STREAMING` | `display.platforms.slack.streaming` | Turns streaming on for Slack only, not Telegram or Discord. It needs the `assistant:write` scope and Slack's Agents & AI Apps feature. Without them, Hermes falls back to editing the message as it streams. Native streaming is skipped when `unfurl_links` or `unfurl_media` is set. |
+| `SLACK_RICH_BLOCKS` | `slack.rich_blocks` | Applies only to sending, so the app doesn't need reinstalling. A plain-text fallback is always sent. |
+| `SLACK_FEEDBACK_BUTTONS` | `slack.feedback_buttons` | Hermes only writes clicks to the gateway log (`Feedback button clicked`); it doesn't store them anywhere. They are missing on replies that exceed Slack's 50-block limit. |
+| `SLACK_NATIVE_TASK_CARDS` | `slack.native_task_cards` | Cards need a thread. Explicitly turning tool progress off also turns the cards off (`HERMES_TOOL_PROGRESS_MODE=off`, or `display.tool_progress: off` in `config.yaml`); the boot log warns when that happens. |
+| `SLACK_SUGGESTED_PROMPTS` | `slack.suggested_prompts` | `default`, or JSON: `[{"title":"Check my wallet","message":"What is my SBC balance?"}]` or `{"title":"Try:","prompts":[...]}`. Slack shows up to 4, in the agent DM only. |
+| `SLACK_LIVE_STATUS` | `display.platforms.slack.live_status` | `full` previews tool arguments such as file paths and commands. Use `verb` in shared channels. |
+| `SLACK_RUNTIME_FOOTER` | `display.platforms.slack.runtime_footer` | The footer is plain text at the end of the reply. When streaming is on, it arrives as a separate message. `on` leaves out `cwd`, so the workspace path isn't shown. |
+| `SLACK_CHANNEL_PROMPTS` | `slack.channel_prompts` | JSON object of channel ID to prompt: `{"C0123456789":"Support triage: be brief, link docs."}`. |
+| `SLACK_CHANNEL_SKILL_BINDINGS` | `slack.channel_skill_bindings` | JSON list: `[{"id":"C0123456789","skills":["x402-payments"]}]`. Skills load when a session starts, so run `/new` after changing them. |
+| `SLACK_REACTION_TRIGGERS` | Hermes reads it directly | Use `true`, which only routes reactions on the bot's own messages. An emoji list (`white_check_mark,eyes`) routes reactions on anyone's message. A routed reaction skips the mention rules but still checks `SLACK_ALLOWED_USERS` and `SLACK_ALLOWED_CHANNELS`. |
+
+A variable replaces any value written into `config.yaml` by hand, and removing the variable later deletes the setting rather than restoring the hand-written value. While `SLACK_RUNTIME_FOOTER` or `SLACK_LIVE_STATUS` is set, it overrides the chat commands `/footer` and `/verbose` in Slack. Invalid values are logged as warnings and leave that setting unchanged, and so does a `config.yaml` that can't be parsed; neither stops the boot. The log shows channel IDs and counts but never prompt text. The bundled `slack/manifest.json` already has every scope, event and interactivity setting these features need (`assistant:write`, `reactions:read`, `reaction_added`/`reaction_removed`, agent view), so no reinstall is needed if your app was created from it.
+
 ### Opening the bot to a whole workspace
 
 The agent has shell and file tools and runs as root, and `/data/.hermes/.env` holds the wallet key and API keys. Before allowing everyone (`SLACK_ALLOW_ALL_USERS=true`), turn those tools off. The wallet, x402, A2A, and ERC-8004 tools are plugins and keep working:
@@ -709,7 +741,7 @@ At runtime, gateway sessions start in `MESSAGING_CWD` (`/data/workspace` by defa
 
 ### System prompt
 
-Upstream Hermes does not read a `HERMES_SYSTEM_PROMPT` variable. To give the agent a persistent identity and behavior context, edit `HERMES.md` in your fork (it is force-copied into the workspace on every boot), or add per-channel prompts under `slack.channel_prompts` in `${HERMES_HOME}/config.yaml`:
+Upstream Hermes does not read a `HERMES_SYSTEM_PROMPT` variable. To give the agent a persistent identity and behavior context, edit `HERMES.md` in your fork (it is force-copied into the workspace on every boot), or add per-channel prompts with `SLACK_CHANNEL_PROMPTS` (see [Slack experience](#slack-experience)) or under `slack.channel_prompts` in `${HERMES_HOME}/config.yaml`:
 
 ```yaml
 slack:
