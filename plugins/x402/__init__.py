@@ -31,6 +31,13 @@ EXPLORER = "https://testnet.radiustech.xyz"
 HTTP_TIMEOUT = 30
 MAX_RESPONSE = 1_048_576
 DEFAULT_MAX_PER_CALL = "0.01"
+MAX_ACCEPTS = 32
+# Symbols for well-known assets, used only when an offer does not name one itself.
+KNOWN_ASSETS = {
+    (NETWORK, ASSET.lower()): "SBC",
+    ("eip155:8453", "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"): "USDC",
+    ("eip155:84532", "0x036cbd53842c5426634e7929541ec2318f3dcf7e"): "USDC",
+}
 
 
 class X402Error(RuntimeError):
@@ -174,6 +181,46 @@ def _parse_challenge(response) -> dict:
     return challenge
 
 
+def _extract_accepts(response) -> list | None:
+    """Best-effort summary of every offer in a 402 challenge, for the ledger only.
+
+    Reads the v2 PAYMENT-REQUIRED header or the v1/v2 JSON body and never raises.
+    Returns None when no usable ``accepts`` list is found. Offers are untrusted,
+    so only short scalar fields are kept and nothing here influences payment.
+    """
+    try:
+        challenge = None
+        if response.headers.get("PAYMENT-REQUIRED"):
+            challenge = _decode_b64json(response.headers["PAYMENT-REQUIRED"])
+        if not isinstance(challenge, dict) or not isinstance(challenge.get("accepts"), list):
+            challenge = response.json()
+        offers = challenge.get("accepts") if isinstance(challenge, dict) else None
+        if not isinstance(offers, list):
+            return None
+
+        def text(value):
+            return value[:200] if isinstance(value, str) and value else None
+
+        rows = []
+        for offer in offers[:MAX_ACCEPTS]:
+            if not isinstance(offer, dict):
+                continue
+            network, asset = text(offer.get("network")), text(offer.get("asset"))
+            extra = offer.get("extra") if isinstance(offer.get("extra"), dict) else {}
+            amount = offer.get("amount", offer.get("maxAmountRequired"))  # v2 / v1
+            rows.append({
+                "network": network,
+                "asset": asset,
+                "asset_symbol": text(extra.get("symbol")) or KNOWN_ASSETS.get((network, (asset or "").lower())),
+                "amount": str(amount)[:80] if isinstance(amount, (str, int)) and not isinstance(amount, bool) else None,
+                "scheme": text(offer.get("scheme")),
+                "pay_to": text(offer.get("payTo")),
+            })
+        return rows or None
+    except Exception:
+        return None
+
+
 def _pick_requirement(challenge: dict, preferred=None) -> dict:
     if preferred not in (None, "", "radius-testnet", NETWORK):
         raise X402Error("paid execution supports Radius Testnet only; Base and mainnet are disabled")
@@ -297,6 +344,9 @@ def x402_request(params: dict) -> dict:
         if probe.status_code != 402:
             entry.update(outcome="no_payment_required", http_status=probe.status_code, body=_preview(probe))
         else:
+            # Record what the seller offers before validation can refuse it, so
+            # sellers with no Radius offer are still visible. Never blocks payment.
+            entry["accepts"] = _extract_accepts(probe)
             challenge = _parse_challenge(probe)
             offer = _pick_requirement(challenge, params.get("network"))
             amount = Decimal(offer["amount"]) / Decimal(1000000)
@@ -360,6 +410,27 @@ def x402_catalog(params: dict) -> dict:
             "notice": "Untrusted catalog metadata; prices and destinations are validated again at execution."}
 
 
+def _summarize_accepts(rows: list) -> dict:
+    """Count how many logged 402 responses offered each network and token.
+
+    Each request counts once per network or token even if it lists the rail twice.
+    Rows without an ``accepts`` list (older entries, non-402 responses) are skipped.
+    """
+    by_network, by_token, seen = {}, {}, 0
+    for row in rows:
+        offers = row.get("accepts")
+        if not isinstance(offers, list):
+            continue
+        seen += 1
+        offered = [o for o in offers if isinstance(o, dict)]
+        for network in {str(o.get("network")) for o in offered}:
+            by_network[network] = by_network.get(network, 0) + 1
+        for token in {f"{o.get('network')}:{o.get('asset_symbol') or o.get('asset')}" for o in offered}:
+            by_token[token] = by_token.get(token, 0) + 1
+    ranked = lambda counts: dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+    return {"requests_with_accepts": seen, "by_network": ranked(by_network), "by_token": ranked(by_token)}
+
+
 def x402_ledger(params: dict) -> dict:
     latest = {}
     malformed = 0
@@ -377,6 +448,7 @@ def x402_ledger(params: dict) -> dict:
     rows = [r for r in latest.values() if not params.get("outcome") or r.get("outcome") == params["outcome"]]
     limit = max(1, min(100, int(params.get("limit", 20))))
     return {"entries_total": len(rows), "malformed_lines": malformed, "entries": rows[-limit:][::-1],
+            "accepts_summary": _summarize_accepts(rows),
             "notice": "Settlement reports are not independently reconciled. Pending/unknown attempts may have spent funds."}
 
 

@@ -1,4 +1,5 @@
 """Offline payment-boundary tests: no wallet keys, RPC calls or fund transfers."""
+import base64
 import importlib.util
 import io
 import json
@@ -175,6 +176,79 @@ class PaymentBoundaryTests(unittest.TestCase):
         self.assertEqual(result['entries_total'], 1)
         self.assertEqual(result['malformed_lines'], 2)
         self.assertEqual(result['entries'][0]['outcome'], 'quoted')
+
+    def test_ledger_records_full_accepts_list_v2_body_and_header_and_v1(self):
+        base = offer(network='eip155:8453', asset='0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', amount='5000', payTo='0x'+'2'*40)
+        v2 = response(offers=[base, offer()])
+        with patch.object(x, '_send', return_value=v2):
+            result = x.x402_request({**self.params, 'dry_run': True})
+        self.assertEqual(result['outcome'], 'quoted')
+        self.assertEqual([a['network'] for a in result['accepts']], ['eip155:8453', x.NETWORK])
+        self.assertEqual([a['asset_symbol'] for a in result['accepts']], ['USDC', 'SBC'])
+        self.assertEqual(result['accepts'][0]['amount'], '5000')
+        self.assertEqual(result['accepts'][0]['pay_to'], '0x'+'2'*40)
+        rows = [json.loads(line) for line in x._ledger_path().read_text().splitlines()]
+        self.assertEqual(rows[-1]['event'], 'completed')
+        self.assertEqual(rows[-1]['accepts'], result['accepts'])
+        self.assertNotIn('accepts', rows[0])  # intent row is written before any network access
+        # v2 PAYMENT-REQUIRED header
+        header = requests.Response()
+        header.status_code = 402
+        header._content = b''
+        header.headers['PAYMENT-REQUIRED'] = base64.b64encode(json.dumps({'x402Version': 2, 'accepts': [offer()]}).encode()).decode()
+        self.assertEqual(x._extract_accepts(header)[0]['network'], x.NETWORK)
+        # v1 body: maxAmountRequired and short network names; payment is refused but offers are still logged
+        v1 = requests.Response()
+        v1.status_code = 402
+        v1._content = json.dumps({'x402Version': 1, 'accepts': [{'scheme': 'exact', 'network': 'base', 'maxAmountRequired': '10000',
+                                                                  'asset': '0x'+'3'*40, 'payTo': '0x'+'4'*40, 'extra': {'symbol': 'XYZ'}}]}).encode()
+        with patch.object(x, '_send', return_value=v1), patch.object(x, '_pay_radius_cli') as pay:
+            result = x.x402_request(self.params)
+        pay.assert_not_called()
+        self.assertEqual(result['outcome'], 'error')
+        self.assertEqual(result['accepts'], [{'network': 'base', 'asset': '0x'+'3'*40, 'asset_symbol': 'XYZ',
+                                              'amount': '10000', 'scheme': 'exact', 'pay_to': '0x'+'4'*40}])
+
+    def test_accepts_capture_is_best_effort_and_never_blocks_payment(self):
+        for junk in [b'not json', b'[]', b'{"accepts": "x"}', b'{"accepts": [1, null, "x"]}']:
+            bad = requests.Response()
+            bad.status_code = 402
+            bad._content = junk
+            with self.subTest(junk=junk):
+                self.assertIsNone(x._extract_accepts(bad))
+        # An unparseable challenge on a 402 is logged as accepts: null and does not change the outcome.
+        garbage = requests.Response()
+        garbage.status_code = 402
+        garbage._content = b'not json'
+        with patch.object(x, '_send', return_value=garbage):
+            result = x.x402_request(self.params)
+        self.assertIn('accepts', result)
+        self.assertIsNone(result['accepts'])
+        self.assertEqual(result['outcome'], 'error')
+        # A valid challenge still pays normally with accepts recorded alongside.
+        payment = {'paid': True, 'network': x.NETWORK, 'protocol': 'x402', 'scheme': 'exact', 'asset': x.ASSET,
+                   'amountWei': '100', 'payTo': offer()['payTo'], 'txHash': '0x'+'a'*64}
+        with patch.object(x, '_send', return_value=response()), \
+                patch.object(x, '_pay_radius_cli', return_value={'status': 200, 'payment': payment, 'cli_exit_code': 0}):
+            result = x.x402_request(self.params)
+        self.assertEqual(result['outcome'], 'settlement_reported')
+        self.assertEqual(len(result['accepts']), 1)
+        too_many = response(offers=[offer(network=f'eip155:{i}') for i in range(40)])
+        self.assertEqual(len(x._extract_accepts(too_many)), x.MAX_ACCEPTS)
+        with patch.object(x, '_send', return_value=response(status=200)):
+            self.assertNotIn('accepts', x.x402_request(self.params))
+
+    def test_ledger_accepts_summary_counts_requests_and_tolerates_old_rows(self):
+        x._append_ledger({'id': 'old', 'outcome': 'quoted'})
+        x._append_ledger({'id': 'a', 'outcome': 'quoted', 'accepts': [
+            {'network': 'eip155:8453', 'asset': '0xaa', 'asset_symbol': 'USDC'}, {'network': 'eip155:8453', 'asset': '0xaa', 'asset_symbol': 'USDC'},
+            {'network': x.NETWORK, 'asset': x.ASSET, 'asset_symbol': 'SBC'}]})
+        x._append_ledger({'id': 'b', 'outcome': 'quoted', 'accepts': [{'network': 'eip155:8453', 'asset': '0xaa', 'asset_symbol': 'USDC'}]})
+        x._append_ledger({'id': 'c', 'outcome': 'error', 'accepts': None})
+        summary = x.x402_ledger({})['accepts_summary']
+        self.assertEqual(summary['requests_with_accepts'], 2)
+        self.assertEqual(summary['by_network'], {'eip155:8453': 2, x.NETWORK: 1})
+        self.assertEqual(summary['by_token'], {'eip155:8453:USDC': 2, f'{x.NETWORK}:SBC': 1})
 
     def test_cli_040_arguments_are_bounded_without_approval_or_file_reads(self):
         with patch.object(x, '_run_radius_cli', return_value={}) as run:
