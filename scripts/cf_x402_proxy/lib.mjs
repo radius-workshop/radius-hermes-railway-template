@@ -459,10 +459,9 @@ async function readCapped(response, limit) {
 }
 
 function authorized(req, key) {
-  const header = req.headers.authorization ?? '';
-  const m = /^Bearer\s+(.+)$/i.exec(header);
-  if (!m) return false;
-  const a = Buffer.from(m[1].trim());
+  const header = String(req.headers.authorization ?? '');
+  if (header.length > 512 || header.slice(0, 7).toLowerCase() !== 'bearer ') return false;
+  const a = Buffer.from(header.slice(7).trim());
   const b = Buffer.from(key);
   return a.length === b.length && timingSafeEqual(a, b);
 }
