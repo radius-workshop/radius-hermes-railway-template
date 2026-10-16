@@ -414,18 +414,34 @@ def _summarize_accepts(rows: list) -> dict:
     """Count how many logged 402 responses offered each network and token.
 
     Each request counts once per network or token even if it lists the rail twice.
-    Rows without an ``accepts`` list (older entries, non-402 responses) are skipped.
+    Tokens are identified by network and asset, never a seller-supplied symbol.
+    Rows without usable offers (older entries, non-402 responses) are skipped.
     """
     by_network, by_token, seen = {}, {}, 0
     for row in rows:
         offers = row.get("accepts")
         if not isinstance(offers, list):
             continue
+        networks, tokens = set(), set()
+        for offer in offers:
+            if not isinstance(offer, dict):
+                continue
+            network, asset = offer.get("network"), offer.get("asset")
+            if not isinstance(network, str) or not network.strip():
+                continue
+            networks.add(network)
+            if isinstance(asset, str) and asset.strip():
+                # EVM addresses have case-insensitive identity. Other namespaces
+                # can use case-sensitive asset identifiers, so preserve those.
+                if re.fullmatch(r"0x[0-9a-fA-F]{40}", asset):
+                    asset = asset.lower()
+                tokens.add(f"{network}:{asset}")
+        if not networks:
+            continue
         seen += 1
-        offered = [o for o in offers if isinstance(o, dict)]
-        for network in {str(o.get("network")) for o in offered}:
+        for network in networks:
             by_network[network] = by_network.get(network, 0) + 1
-        for token in {f"{o.get('network')}:{o.get('asset_symbol') or o.get('asset')}" for o in offered}:
+        for token in tokens:
             by_token[token] = by_token.get(token, 0) + 1
     ranked = lambda counts: dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
     return {"requests_with_accepts": seen, "by_network": ranked(by_network), "by_token": ranked(by_token)}

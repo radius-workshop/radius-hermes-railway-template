@@ -248,7 +248,25 @@ class PaymentBoundaryTests(unittest.TestCase):
         summary = x.x402_ledger({})['accepts_summary']
         self.assertEqual(summary['requests_with_accepts'], 2)
         self.assertEqual(summary['by_network'], {'eip155:8453': 2, x.NETWORK: 1})
-        self.assertEqual(summary['by_token'], {'eip155:8453:USDC': 2, f'{x.NETWORK}:SBC': 1})
+        self.assertEqual(summary['by_token'], {'eip155:8453:0xaa': 2, f'{x.NETWORK}:{x.ASSET.lower()}': 1})
+
+    def test_accepts_summary_uses_asset_identity_and_ignores_missing_fields(self):
+        first, second = '0x'+'a'*40, '0x'+'b'*40
+        summary = x._summarize_accepts([
+            {'accepts': [{'network': 'eip155:8453', 'asset': first, 'asset_symbol': 'USDC'},
+                         {'network': 'eip155:8453', 'asset': second, 'asset_symbol': 'USDC'},
+                         {'network': 'eip155:8453', 'asset': '0x'+'A'*40, 'asset_symbol': 'OTHER'},
+                         {'network': None, 'asset': first}, {}, None]},
+            {'accepts': [{'network': 'eip155:8453', 'asset': first, 'asset_symbol': 'RENAMED'},
+                         {'network': 'solana:testnet', 'asset': 'CaseSensitiveMint'}]},
+            {'accepts': [{}, {'network': ''}, {'network': None}]},
+            {'accepts': [{'network': 'base', 'asset': None}]},
+        ])
+        self.assertEqual(summary['requests_with_accepts'], 3)
+        self.assertEqual(summary['by_network'], {'eip155:8453': 2, 'base': 1, 'solana:testnet': 1})
+        self.assertEqual(summary['by_token'], {f'eip155:8453:{first}': 2,
+                                              f'eip155:8453:{second}': 1,
+                                              'solana:testnet:CaseSensitiveMint': 1})
 
     def test_cli_040_arguments_are_bounded_without_approval_or_file_reads(self):
         with patch.object(x, '_run_radius_cli', return_value={}) as run:
