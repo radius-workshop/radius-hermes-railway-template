@@ -168,6 +168,53 @@ class SlackExperienceBootstrapTests(unittest.TestCase):
         result = self.boot(SLACK_NATIVE_TASK_CARDS="true")
         self.assertIn("task cards are off", result.stderr)
 
+    def test_block_kit_replies_add_a_slack_prompt_hint(self):
+        result = self.boot(SLACK_RICH_BLOCKS="true")
+        hint = self.load()["platform_hints"]["slack"]["append"]
+        self.assertIn("pipe table", hint)
+        self.assertIn("cannot send Block Kit JSON", hint)
+        self.assertIn("slack-card", hint)
+        self.assertIn("platform_hints.slack = Block Kit formatting note", result.stdout)
+        self.assertNotIn(hint, result.stdout)
+        # Slack's native markdown block wins over rich_blocks and has other limits: no note.
+        self.config.write_text(yaml.safe_dump({"slack": {"markdown_blocks": True}}))
+        (self.home / ".slack-experience-managed.json").unlink()
+        self.boot(SLACK_RICH_BLOCKS="true")
+        self.assertNotIn("platform_hints", self.load())
+
+    def test_operator_edit_of_the_managed_hint_is_kept(self):
+        self.boot(SLACK_RICH_BLOCKS="true")
+        cfg = self.load()
+        cfg["platform_hints"]["slack"]["append"] = "Operator rewrote this."
+        self.config.write_text(yaml.safe_dump(cfg))
+        result = self.boot(SLACK_RICH_BLOCKS="true")
+        self.assertEqual(self.load()["platform_hints"]["slack"], {"append": "Operator rewrote this."})
+        self.assertIn("Keeping the existing platform_hints.slack", result.stdout)
+        self.boot()
+        self.assertEqual(self.load()["platform_hints"]["slack"], {"append": "Operator rewrote this."})
+
+    def test_block_kit_hint_is_removed_when_blocks_turn_off(self):
+        self.config.write_text(yaml.safe_dump({"platform_hints": {"telegram": "keep"}}))
+        self.boot(SLACK_RICH_BLOCKS="true")
+        result = self.boot(SLACK_RICH_BLOCKS="false")
+        self.assertEqual(self.load()["platform_hints"], {"telegram": "keep"})
+        self.assertIn("removed (Block Kit replies are off)", result.stdout)
+        self.boot()
+        self.assertEqual(self.load(), {"platform_hints": {"telegram": "keep"}})
+
+    def test_operator_slack_hint_is_never_replaced(self):
+        operator = {"platform_hints": {"slack": {"replace": "Operator Slack hint."}}}
+        self.config.write_text(yaml.safe_dump(operator))
+        result = self.boot(SLACK_RICH_BLOCKS="true")
+        self.assertEqual(self.load()["platform_hints"], operator["platform_hints"])
+        self.assertIn("Keeping the existing platform_hints.slack", result.stdout)
+        self.boot()
+        self.assertEqual(self.load(), operator)
+
+    def test_no_hint_without_block_kit(self):
+        self.boot(SLACK_STREAMING="true", SLACK_FEEDBACK_BUTTONS="true")
+        self.assertNotIn("platform_hints", self.load())
+
     def test_state_file_tracks_managed_vars(self):
         self.boot(SLACK_RICH_BLOCKS="false")
         self.assertEqual(json.loads((self.home / ".slack-experience-managed.json").read_text()), ["SLACK_RICH_BLOCKS"])

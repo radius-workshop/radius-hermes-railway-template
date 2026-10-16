@@ -843,6 +843,48 @@ if slack_flag("native_task_cards"):
     if progress is not None and str(progress).strip().lower() in {"off", "false"}:
         warn("Slack task cards are off while tool progress is explicitly off; unset HERMES_TOOL_PROGRESS_MODE / display.tool_progress or use new/all.")
 
+# Hermes' built-in Slack prompt hint says "tables are NOT supported" whether or
+# not rich_blocks is on. When it is, append the formatting the renderer really
+# supports. Any platform_hints.slack this block didn't write (or that an
+# operator has since edited) is kept.
+HINT_KEY = "platform_hints.slack"
+HINT_PATH = ("platform_hints", "slack")
+HINT_PREFIX = "Block Kit replies are on for this agent:"
+BLOCKS_HINT = (
+    HINT_PREFIX + " your markdown is rendered as Slack Block Kit, so "
+    "#/## headers, - and 1. lists (nesting allowed), one pipe table per reply (up to 5 columns), "
+    "--- dividers and > quotes display natively. This replaces the note above that tables are "
+    "not supported. Keep a reply under about 20 blocks (each header, paragraph, list, table, "
+    "divider or quote is one block); past Slack's 50-block limit the whole reply falls back to "
+    "plain text. You write markdown only: you cannot send Block Kit JSON, blocks or attachments "
+    "payloads, colored sidebars or custom buttons, and a JSON payload in a reply shows up as a "
+    "code block. For a card or themed layout, use the slack-card skill."
+)
+# markdown_blocks (Slack's native markdown block) takes precedence in Hermes and
+# has different limits, so the note is only for the rich_blocks renderer.
+blocks_on = slack_flag("rich_blocks") and not slack_flag("markdown_blocks")
+current_hint = get_path(cfg, HINT_PATH)
+hint_managed = (
+    HINT_KEY in managed
+    and isinstance(current_hint, dict)
+    and set(current_hint) == {"append"}
+    and str(current_hint["append"]).startswith(HINT_PREFIX)
+)
+if not hint_managed:
+    managed.discard(HINT_KEY)
+if hint_managed or current_hint is None:
+    if blocks_on:
+        set_path(cfg, HINT_PATH, {"append": BLOCKS_HINT})
+        managed.add(HINT_KEY)
+        if not hint_managed:
+            print(f"[bootstrap] {HINT_KEY} = Block Kit formatting note")
+    elif hint_managed:
+        remove_path(cfg, HINT_PATH)
+        managed.discard(HINT_KEY)
+        print(f"[bootstrap] {HINT_KEY} removed (Block Kit replies are off)")
+elif blocks_on:
+    print(f"[bootstrap] Keeping the existing {HINT_KEY}; it should say that tables render in Slack.")
+
 if json.dumps(cfg, sort_keys=True, default=str) != original:
     tmp_file = cfg_file.with_name(cfg_file.name + ".slack-tmp")
     with tmp_file.open("w") as f:
