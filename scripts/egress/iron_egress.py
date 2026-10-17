@@ -61,7 +61,7 @@ DAEMON_INFRA_ENV: Tuple[str, ...] = ("PATH", "HOME", "TZ", "LANG", "LC_ALL", "SS
 
 # Secrets that cannot be swapped by a header/path/query rewrite. They stay in
 # the agent service and are reported at boot.
-UNCOVERED_SECRETS: Dict[str, str] = {
+NOT_INJECTABLE: Dict[str, str] = {
     "DISCORD_BOT_TOKEN": "sent inside the Discord gateway websocket payload",
     "RADIUS_PRIVATE_KEY": "used locally for signing, never sent over HTTP",
     "WEBHOOK_SECRET": "verifies inbound webhooks",
@@ -154,8 +154,8 @@ def managed_specs(env: Mapping[str, str]) -> List[SecretSpec]:
     known = {**CATALOG, **_custom_specs(env)}
     specs = []
     for name in dict.fromkeys(names):
-        if name in UNCOVERED_SECRETS:
-            raise EgressError(f"{name} cannot be injected by the egress proxy ({UNCOVERED_SECRETS[name]}).")
+        if name in NOT_INJECTABLE:
+            raise EgressError(f"{name} cannot be injected by the egress proxy ({NOT_INJECTABLE[name]}).")
         if name not in known:
             raise EgressError(f"{name} has no injection rule. Add it to EGRESS_CUSTOM_SECRETS with its upstream hosts.")
         spec = known[name]
@@ -246,7 +246,7 @@ def client_env(env: Mapping[str, str], state_dir: Path) -> Tuple[Dict[str, str],
         if name not in managed and env.get(name):
             warnings.append(f"{name} is set on the agent service but not listed in EGRESS_SECRETS, so the real value is visible to the agent.")
     if env.get("DISCORD_BOT_TOKEN"):
-        warnings.append(f"DISCORD_BOT_TOKEN stays on the agent service: {UNCOVERED_SECRETS['DISCORD_BOT_TOKEN']}.")
+        warnings.append("DISCORD_BOT_TOKEN stays on the agent service: Discord sends it inside the gateway websocket payload.")
 
     state_dir.mkdir(parents=True, exist_ok=True)
     ca_path, bundle_path = state_dir / "ca.crt", state_dir / "ca-bundle.crt"
