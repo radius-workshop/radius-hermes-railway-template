@@ -12,6 +12,7 @@ This repository is a batteries-included Hermes template. Treat the bundled files
 - `plugins/x402` provides `x402_request`, `x402_catalog`, `x402_ledger`, and `x402_wallet_status` for bounded Radius Testnet x402 requests on operator-approved hosts and a persistent attempt ledger. Base and mainnet paid execution are disabled.
 - `plugins/godaddy-ans` provides GoDaddy Agent Name Service registry tools such as `godaddy_ans_search`, lookup, resolution, registration, and validation, plus the narrow `godaddy_dns_set_records` domain DNS record writer.
 - `scripts/godaddy/*` contains GoDaddy ANS helper scripts behind the plugin tools.
+- `scripts/egress/iron_egress.py` runs the optional iron-proxy egress service and sets up this agent to use it (proxy tokens, `HTTPS_PROXY`, CA bundle).
 - `scripts/agent_server/*` contains the HTTP agent server, A2A bridge, auth, DID, and discovery implementation.
 
 ## Expected behavior
@@ -24,6 +25,7 @@ This repository is a batteries-included Hermes template. Treat the bundled files
 - For GoDaddy ANS registration, read `skills/using-godaddy.md` first. Use `godaddy_ans_prepare_registration` to inspect the Swagger-aligned payload and CSRs, then use `godaddy_ans_register` when the agent host, endpoint URLs, and domain-validation prerequisites are correct.
 - In this repository, interpret `Radius` as the Radius network / ecosystem by default. Do not default to the geometry meaning or the RADIUS AAA protocol unless the user clearly asks for those.
 - If ByteRover is enabled, use it as structured long-term memory. Organize memories by session date and only persist durable, top-level topics plus wallet addresses, descriptions, and important transactions.
+- When `HERMES_EGRESS_PROXY=1`, provider keys and bot tokens in the environment are proxy tokens that only work through the egress proxy. Don't unset `HTTPS_PROXY` or bypass the proxy to make a call work; a 403 from the proxy means the host is not allowed or the request lacked its token, so report it to the operator.
 - For A2A auth, use `generate_a2a_token`. Do not write custom JWT signing code.
 - When you need project-specific behavior, inspect the relevant skill or script in this repo before answering from memory.
 - Treat this repo as intentionally prewired: skills, scripts, and plugins are part of the product surface.

@@ -44,6 +44,10 @@ Errors: say what failed in plain words, then the fix ("⚠️ Radius Testnet pay
 
 If a tool call fails, or returns the same result twice in a row, don't run it again unchanged. Read the result, then change the input, switch to a bundled tool (for example `radius_balance` instead of running `radius-cli` in the terminal), or stop and tell the user what failed and what you tried. When you are waiting on something such as a transaction receipt, check a few times at most, then say it is still pending. If a command is refused or blocked, don't retry it or work around the refusal; tell the user.
 
+## Egress Proxy
+
+When `HERMES_EGRESS_PROXY=1`, outbound HTTP(S) goes through the operator's egress proxy and the provider keys and bot tokens in your environment are proxy tokens, not real credentials. The proxy swaps in the real value on the right host. Never unset `HTTPS_PROXY`, edit the CA settings, or connect around the proxy to make a request work. A 403 from the proxy means the host isn't allowed or the request didn't carry its token: tell the user which host was refused.
+
 ## Meaning Of "Radius" In This Repository
 
 In this project, `Radius` means the Radius network / Radius ecosystem by default, not the geometry term and not the legacy RADIUS authentication protocol.
