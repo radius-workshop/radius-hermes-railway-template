@@ -215,6 +215,8 @@ Set at least one inference provider:
 | `OPENAI_API_KEY` + `OPENAI_BASE_URL` | OpenAI-compatible provider |
 | `ANTHROPIC_API_KEY` | Anthropic direct API |
 
+With the [egress proxy](#egress-proxy-with-secret-injection), set these on the egress service; the agent gets proxy tokens under the same names.
+
 Set at least one messaging platform:
 
 | Variable | Description |
@@ -352,6 +354,68 @@ LLM_MODEL=openai/gpt-5.4-nano
 ```
 
 Use any model ID supported by your provider. OpenRouter model IDs look like `openai/gpt-5.4-nano` or `openai/gpt-4o`.
+
+## Egress proxy with secret injection
+
+Optional. Keeps provider keys and bot tokens out of the agent container entirely, so they are never in Railway's agent variables, the process environment, or `${HERMES_HOME}/.env`. A prompt-injected `printenv` or `cat .env` only finds proxy tokens.
+
+It uses [iron-proxy](https://github.com/ironsh/iron-proxy) (v0.39.0, the version Hermes pins). Hermes ships the same pattern as `hermes egress`, but only for Docker terminal sandboxes; the agent process itself still reads real keys from `.env`. This template moves the boundary to a separate service instead:
+
+```
+agent service (tokens only) ──HTTPS_PROXY──▶ egress service (real secrets, iron-proxy) ──▶ upstream
+   OPENROUTER_API_KEY=sk-or-v1-hermes-egress-…     swaps the token for the real value,
+   trusts the egress CA                             only on that secret's hosts
+```
+
+- Tokens are derived from a shared seed (HMAC-SHA256), so neither service sends the other anything at runtime.
+- iron-proxy terminates TLS with your CA and swaps a token only on the hosts that secret belongs to. A token sent anywhere else passes through unchanged and is worthless.
+- On a secret's own host, a request without its token is refused (403), so the agent can't reach it with other credentials. Exception: hosts shared by two secrets, such as Slack's bot and app tokens.
+- iron-proxy runs with only the managed secrets and a few infrastructure variables in its environment. It refuses to dial loopback, link-local (cloud metadata), RFC1918, CGNAT or IPv6 ULA addresses, which covers Railway's private network, so the proxy can't be used to reach sibling services.
+- If a managed secret still has a real value on the agent service, the agent refuses to boot (`EGRESS_ENFORCE=false` downgrades that to a warning for migration).
+
+### Set it up on Railway
+
+1. Generate the CA and seed locally: `python3 scripts/egress/iron_egress.py gen-ca`. The output is ready for Railway's raw variable editor. Keep `EGRESS_CA_KEY` off the agent service.
+2. Add a second service from this repo, named `egress`. In its Settings, set **Railway Config File** to `/railway.egress.toml`. Give it no volume and no public domain.
+3. On **both** services (shared variables work well): `EGRESS_SECRETS`, `EGRESS_TOKEN_SEED`, `EGRESS_CA_CERT`.
+4. On **egress** only: `EGRESS_CA_KEY` and the real value of each name in `EGRESS_SECRETS`. Railway sealed variables are a good fit.
+5. On the **agent** service: `EGRESS_PROXY_URL=http://egress.railway.internal:9090`, then **delete** the real values of the managed secrets.
+
+Example: `EGRESS_SECRETS=OPENROUTER_API_KEY,SLACK_BOT_TOKEN,SLACK_APP_TOKEN`. The agent boots with tokens under those names, `HTTPS_PROXY`/`HTTP_PROXY` pointing at egress, and `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE` and `NODE_EXTRA_CA_CERTS` trusting the egress CA alongside the system roots. `localhost` and `*.railway.internal` bypass the proxy.
+
+Locally: put the shared settings in `.env` and the real secrets plus `EGRESS_CA_KEY` in `.env.egress`, then `docker compose -f docker-compose.yml -f docker-compose.egress.yml up`.
+
+### Which secrets can be injected
+
+| Secret | Hosts | Where the token is swapped |
+|---|---|---|
+| `OPENROUTER_API_KEY` | `openrouter.ai`, `*.openrouter.ai` | `Authorization` |
+| `OPENAI_API_KEY`, `VOICE_TOOLS_OPENAI_KEY` | `api.openai.com` | `Authorization` |
+| `ANTHROPIC_API_KEY` | `api.anthropic.com` | `x-api-key`, `Authorization` |
+| `NOUS_API_KEY` | `inference.nousresearch.com` | `Authorization` |
+| `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN` | `slack.com`, `*.slack.com` | `Authorization` |
+| `TELEGRAM_BOT_TOKEN` | `api.telegram.org` | URL path |
+| `GITHUB_TOKEN` | `api.github.com`, `uploads.github.com` | `Authorization` |
+| `LINEAR_API_KEY` | `api.linear.app` | `Authorization` |
+| `FIRECRAWL_API_KEY` | `api.firecrawl.dev` | `Authorization` |
+| `FAL_KEY` | `fal.run`, `*.fal.run`, `*.fal.ai` | `Authorization` |
+| `ELEVENLABS_API_KEY` | `api.elevenlabs.io` | `xi-api-key` |
+| `BROWSERBASE_API_KEY` | `*.browserbase.com` | `X-BB-API-Key`, query string |
+| `GODADDY_API_KEY`, `GODADDY_API_SECRET` | `api.godaddy.com`, `api.ote-godaddy.com` | `Authorization` |
+
+Tokens keep each provider's key prefix (`xoxb-`, `xapp-1-`, `sk-or-v1-`, …) so client-side format checks still pass. Point a secret at other hosts with `EGRESS_HOSTS_<NAME>=host1,host2` (both services), for example `EGRESS_HOSTS_OPENAI_API_KEY` when `OPENAI_BASE_URL` is a different provider. Add secrets that aren't built in with `EGRESS_CUSTOM_SECRETS` (both services):
+
+```json
+{"ACME_API_KEY": {"hosts": ["api.acme.com"], "headers": ["X-Acme-Key"], "query": false, "path": false, "prefix": ""}}
+```
+
+These stay on the agent service, because they aren't sent as a swappable HTTP credential: `DISCORD_BOT_TOKEN` (sent inside the gateway websocket), `RADIUS_PRIVATE_KEY` (local signing; it lives in the radius-cli keystore and is no longer written to `.env`), and the inbound auth secrets `WEBHOOK_SECRET`, `JWT_API_KEY` and `HERMES_API_KEY`. `git` over HTTPS sends `GITHUB_TOKEN` base64-encoded inside Basic auth, which can't be swapped; the API and `gh` work.
+
+### Egress allowlist
+
+By default every host is reachable through the proxy (`EGRESS_ALLOWED_HOSTS=*`); secrets stay bound to their own hosts either way. To make the proxy a default-deny firewall, list the hosts the agent may reach on the egress service (each managed secret's hosts are added automatically). Wildcards such as `*.radiustech.xyz` work. Set `EGRESS_ALLOWLIST_WARN_ONLY=true` first to log what would be blocked without blocking it. iron-proxy logs one JSON line per request to the egress service's logs, including which secrets were swapped.
+
+Railway can't force traffic through the proxy at the network level. A client that ignores `HTTPS_PROXY` connects directly, holding only tokens, so nothing real leaks. The x402 plugin connects directly by design, and radius-cli does too because Node's `fetch` ignores `HTTPS_PROXY`; neither uses a managed secret.
 
 ## Radius wallet
 
