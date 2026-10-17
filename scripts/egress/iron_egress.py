@@ -18,7 +18,7 @@ but there the agent process itself still reads real keys from ``.env``. This
 module splits the trust boundary across services instead.
 
 Subcommands:
-  client-env  agent side: print shell exports (tokens, proxy vars, CA bundle)
+  client-env  agent side: write shell exports (tokens, proxy vars, CA bundle) to a file
   proxy       egress side: render proxy.yaml and exec iron-proxy
   gen-ca      print a fresh CA pair and token seed for Railway variables
 """
@@ -425,12 +425,16 @@ def main(argv: List[str]) -> int:
     env = dict(os.environ)
     try:
         if command == "client-env":
+            # Exports go to a private file for the entrypoint to source, never
+            # to stdout, so running this by hand can't put tokens in logs.
+            if len(argv) != 3:
+                print("usage: iron_egress.py client-env <exports-file>", file=sys.stderr)
+                return 2
             state = Path(env.get("EGRESS_STATE_DIR") or Path(env.get("HERMES_HOME", "/data/.hermes")) / "egress")
             exports, warnings = client_env(env, state)
             for warning in warnings:
                 print(f"[egress] WARNING: {warning}", file=sys.stderr)
-            for key, value in exports.items():
-                print(f"export {key}={shlex.quote(value)}")
+            _write_private(Path(argv[2]), "".join(f"export {k}={shlex.quote(v)}\n" for k, v in exports.items()))
             return 0
         if command == "proxy":
             state = Path(env.get("EGRESS_STATE_DIR") or "/tmp/iron-egress")

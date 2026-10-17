@@ -164,15 +164,19 @@ append_if_set() {
 # real values never reach this container or ${HERMES_HOME}/.env.
 EGRESS_ENV_KEYS=()
 if [[ -n "${EGRESS_PROXY_URL:-}" ]]; then
-  if ! egress_exports="$(python3 /app/scripts/egress/iron_egress.py client-env)"; then
+  egress_exports="$(mktemp)"
+  if ! python3 /app/scripts/egress/iron_egress.py client-env "$egress_exports"; then
+    rm -f "$egress_exports"
     echo "[bootstrap] ERROR: Egress proxy setup failed; refusing to start with secrets unprotected." >&2
     exit 1
   fi
-  eval "$egress_exports"
+  # shellcheck source=/dev/null
+  source "$egress_exports"
   while IFS= read -r line; do
     key="${line#export }"
     EGRESS_ENV_KEYS+=("${key%%=*}")
-  done <<<"$egress_exports"
+  done <"$egress_exports"
+  rm -f "$egress_exports"
   unset egress_exports
   echo "[bootstrap] Egress proxy: outbound traffic via ${EGRESS_PROXY_URL}; injected secrets: ${EGRESS_SECRETS}."
   if ! python3 - <<'PYEOF'

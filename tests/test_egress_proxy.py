@@ -131,12 +131,15 @@ class AgentSideTests(unittest.TestCase):
         with self.assertRaisesRegex(egress.EgressError, "private key"):
             egress.client_env(agent_env(EGRESS_CA_CERT=cert + "\n" + key), self.state)
 
-    def test_cli_prints_shell_exports(self):
+    def test_cli_writes_private_exports_file_not_stdout(self):
         env = {**os.environ, **agent_env(), "EGRESS_STATE_DIR": str(self.state)}
-        result = subprocess.run([sys.executable, str(ROOT / "scripts/egress/iron_egress.py"), "client-env"],
+        out = self.state / "exports.sh"
+        result = subprocess.run([sys.executable, str(ROOT / "scripts/egress/iron_egress.py"), "client-env", str(out)],
                                 env=env, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        shown = subprocess.run(["bash", "-c", result.stdout + '\nprintf "%s" "$SLACK_APP_TOKEN"'], text=True, capture_output=True)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(oct(out.stat().st_mode & 0o777), "0o600")
+        shown = subprocess.run(["bash", "-c", f'source "{out}"; printf "%s" "$SLACK_APP_TOKEN"'], text=True, capture_output=True)
         self.assertTrue(shown.stdout.startswith("xapp-1-hermes-egress-"))
 
 
@@ -249,6 +252,7 @@ class LiveIronProxyTests(unittest.TestCase):
         (tmp / "up.key").write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
         self.upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Echo)
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ctx.load_cert_chain(tmp / "up.crt", tmp / "up.key")
         self.upstream.socket = ctx.wrap_socket(self.upstream.socket, server_side=True)
         threading.Thread(target=self.upstream.serve_forever, daemon=True).start()
