@@ -79,10 +79,12 @@ class SecretSpec:
     match_query: bool = False
     # Kept in front of the token so clients that sniff key formats still accept it.
     prefix: str = ""
+    # Hosts the client also needs that never see the secret (added to an explicit allowlist).
+    companions: Tuple[str, ...] = ()
 
 
-def _spec(name, hosts, headers=("Authorization",), *, path=False, query=False, prefix=""):
-    return SecretSpec(name, tuple(hosts), tuple(headers), path, query, prefix)
+def _spec(name, hosts, headers=("Authorization",), *, path=False, query=False, prefix="", companions=()):
+    return SecretSpec(name, tuple(hosts), tuple(headers), path, query, prefix, tuple(companions))
 
 
 CATALOG: Dict[str, SecretSpec] = {s.name: s for s in (
@@ -91,8 +93,9 @@ CATALOG: Dict[str, SecretSpec] = {s.name: s for s in (
     _spec("ANTHROPIC_API_KEY", ("api.anthropic.com",), ("x-api-key", "Authorization"), prefix="sk-ant-"),
     _spec("NOUS_API_KEY", ("inference.nousresearch.com",)),
     _spec("VOICE_TOOLS_OPENAI_KEY", ("api.openai.com",), prefix="sk-"),
-    _spec("SLACK_BOT_TOKEN", ("slack.com", "*.slack.com"), prefix="xoxb-"),
-    _spec("SLACK_APP_TOKEN", ("slack.com", "*.slack.com"), prefix="xapp-1-"),
+    # Socket Mode's websocket runs on *.slack-edge.com with a one-time ticket, not the token.
+    _spec("SLACK_BOT_TOKEN", ("slack.com", "*.slack.com"), prefix="xoxb-", companions=("*.slack-edge.com",)),
+    _spec("SLACK_APP_TOKEN", ("slack.com", "*.slack.com"), prefix="xapp-1-", companions=("*.slack-edge.com",)),
     # Telegram puts the token in the URL path: /bot<token>/method.
     _spec("TELEGRAM_BOT_TOKEN", ("api.telegram.org",), (), path=True),
     _spec("GITHUB_TOKEN", ("api.github.com", "uploads.github.com")),
@@ -245,6 +248,12 @@ def client_env(env: Mapping[str, str], state_dir: Path) -> Tuple[Dict[str, str],
     for name in CATALOG:
         if name not in managed and env.get(name):
             warnings.append(f"{name} is set on the agent service but not listed in EGRESS_SECRETS, so the real value is visible to the agent.")
+    base_url = (env.get("OPENAI_BASE_URL") or "").strip()
+    if "OPENAI_API_KEY" in managed and base_url and not env.get("EGRESS_HOSTS_OPENAI_API_KEY"):
+        from urllib.parse import urlsplit
+        if (urlsplit(base_url).hostname or "") != "api.openai.com":
+            warnings.append("OPENAI_BASE_URL is not api.openai.com, so OPENAI_API_KEY is never swapped there. Set "
+                            "EGRESS_HOSTS_OPENAI_API_KEY to that host on both services.")
     if env.get("DISCORD_BOT_TOKEN"):
         warnings.append("DISCORD_BOT_TOKEN stays on the agent service: Discord sends it inside the gateway websocket payload.")
 
@@ -253,7 +262,10 @@ def client_env(env: Mapping[str, str], state_dir: Path) -> Tuple[Dict[str, str],
     ca_path.write_text(ca)
     bundle_path.write_text(_system_bundle().rstrip("\n") + "\n" + ca)
 
-    no_proxy = ",".join(dict.fromkeys(["localhost", "127.0.0.1", "::1", ".railway.internal", *_csv(env.get("EGRESS_NO_PROXY"))]))
+    # Radius RPC and faucet carry no managed secret, and some chain tools (Foundry)
+    # may not trust a MITM CA, so they connect directly.
+    no_proxy = ",".join(dict.fromkeys(["localhost", "127.0.0.1", "::1", ".railway.internal", ".radiustech.xyz",
+                                       *_csv(env.get("EGRESS_NO_PROXY"))]))
     http_proxy = _http_proxy_url(proxy_url)
     for key, value in {
         "HTTPS_PROXY": proxy_url, "HTTP_PROXY": http_proxy, "NO_PROXY": no_proxy,
@@ -277,7 +289,7 @@ def build_proxy_config(
     listen_host = (env.get("EGRESS_LISTEN_HOST") or "[::]").strip()
     allowed = _csv(env.get("EGRESS_ALLOWED_HOSTS")) or ["*"]
     if allowed != ["*"]:
-        for host in (h for s in specs for h in s.hosts):
+        for host in (h for s in specs for h in (*s.hosts, *s.companions)):
             if host not in allowed:
                 allowed.append(host)
     deny = env.get("EGRESS_DENY_CIDRS")

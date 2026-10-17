@@ -381,7 +381,7 @@ agent service (tokens only) ──HTTPS_PROXY──▶ egress service (real secr
 4. On **egress** only: `EGRESS_CA_KEY` and the real value of each name in `EGRESS_SECRETS`. Railway sealed variables are a good fit.
 5. On the **agent** service: `EGRESS_PROXY_URL=http://egress.railway.internal:9090`, then **delete** the real values of the managed secrets.
 
-Example: `EGRESS_SECRETS=OPENROUTER_API_KEY,SLACK_BOT_TOKEN,SLACK_APP_TOKEN`. The agent boots with tokens under those names, `HTTPS_PROXY`/`HTTP_PROXY` pointing at egress, and `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE` and `NODE_EXTRA_CA_CERTS` trusting the egress CA alongside the system roots. `localhost` and `*.railway.internal` bypass the proxy.
+Example: `EGRESS_SECRETS=OPENROUTER_API_KEY,SLACK_BOT_TOKEN,SLACK_APP_TOKEN`. The agent boots with tokens under those names, `HTTPS_PROXY`/`HTTP_PROXY` pointing at egress, and `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE` and `NODE_EXTRA_CA_CERTS` trusting the egress CA alongside the system roots. `localhost`, `*.railway.internal` and `*.radiustech.xyz` (Radius RPC and faucet, which carry no managed secret) bypass the proxy; add more with `EGRESS_NO_PROXY`.
 
 Locally: put the shared settings in `.env` and the real secrets plus `EGRESS_CA_KEY` in `.env.egress`, then `docker compose -f docker-compose.yml -f docker-compose.egress.yml up`.
 
@@ -413,7 +413,7 @@ These stay on the agent service, because they aren't sent as a swappable HTTP cr
 
 ### Egress allowlist
 
-By default every host is reachable through the proxy (`EGRESS_ALLOWED_HOSTS=*`); secrets stay bound to their own hosts either way. To make the proxy a default-deny firewall, list the hosts the agent may reach on the egress service (each managed secret's hosts are added automatically). Wildcards such as `*.radiustech.xyz` work. Set `EGRESS_ALLOWLIST_WARN_ONLY=true` first to log what would be blocked without blocking it. iron-proxy logs one JSON line per request to the egress service's logs, including which secrets were swapped.
+By default every host is reachable through the proxy (`EGRESS_ALLOWED_HOSTS=*`); secrets stay bound to their own hosts either way. To make the proxy a default-deny firewall, list the hosts the agent may reach on the egress service (each managed secret's hosts are added automatically, plus `*.slack-edge.com` for Slack Socket Mode). Wildcards such as `*.radiustech.xyz` work. Set `EGRESS_ALLOWLIST_WARN_ONLY=true` first to log what would be blocked without blocking it. iron-proxy logs one JSON line per request to the egress service's logs, including which secrets were swapped.
 
 Railway can't force traffic through the proxy at the network level. A client that ignores `HTTPS_PROXY` connects directly, holding only tokens, so nothing real leaks. The x402 plugin connects directly by design, and radius-cli does too because Node's `fetch` ignores `HTTPS_PROXY`; neither uses a managed secret.
 

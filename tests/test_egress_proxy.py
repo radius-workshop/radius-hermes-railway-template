@@ -105,6 +105,7 @@ class AgentSideTests(unittest.TestCase):
         self.assertEqual(exports["HTTP_PROXY"], "http://egress.railway.internal:9091")
         self.assertEqual(exports["https_proxy"], exports["HTTPS_PROXY"])
         self.assertIn(".railway.internal", exports["NO_PROXY"].split(","))
+        self.assertIn(".radiustech.xyz", exports["NO_PROXY"].split(","))
         bundle = Path(exports["SSL_CERT_FILE"]).read_text()
         self.assertTrue(bundle.rstrip().endswith(_ca_pair()[0].strip()))
         self.assertEqual(Path(exports["NODE_EXTRA_CA_CERTS"]).read_text().strip(), _ca_pair()[0].strip())
@@ -125,6 +126,13 @@ class AgentSideTests(unittest.TestCase):
     def test_unmanaged_catalog_secret_is_reported(self):
         _, warnings = egress.client_env(agent_env(GITHUB_TOKEN="ghp_real"), self.state)
         self.assertTrue(any(w.startswith("GITHUB_TOKEN is set") for w in warnings))
+
+    def test_openai_base_url_elsewhere_is_reported(self):
+        env = agent_env(EGRESS_SECRETS="OPENAI_API_KEY", OPENAI_BASE_URL="https://llm.example.com/v1")
+        _, warnings = egress.client_env(env, self.state)
+        self.assertTrue(any("EGRESS_HOSTS_OPENAI_API_KEY" in w for w in warnings))
+        _, warnings = egress.client_env({**env, "EGRESS_HOSTS_OPENAI_API_KEY": "llm.example.com"}, self.state)
+        self.assertEqual(warnings, [])
 
     def test_private_key_in_cert_variable_is_refused(self):
         cert, key = _ca_pair()
@@ -186,6 +194,7 @@ class ProxySideTests(unittest.TestCase):
         self.assertEqual(domains[0], "grug402.dev")
         self.assertIn("openrouter.ai", domains)
         self.assertIn("*.slack.com", domains)
+        self.assertIn("*.slack-edge.com", domains)  # Socket Mode websocket
 
     def test_missing_or_token_values_are_refused(self):
         env = self.proxy_env()
