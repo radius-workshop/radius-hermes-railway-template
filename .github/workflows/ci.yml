@@ -34,11 +34,13 @@ jobs:
         run: |
           python -m pip install -r requirements-dev.txt
           python -m pip check
-      - name: Check version and shell syntax
+      - name: Check version, shell syntax, and whitespace
         run: |
           python scripts/validate_release.py
           find . -type f -name '*.sh' -not -path './.git/*' -print0 | xargs -0 -r -n1 bash -n
-          git diff --check
+          git diff --check "$(git hash-object -t tree /dev/null)" HEAD
+      - name: Lint
+        run: ruff check .
       - name: Run all repository tests
         run: python scripts/run_tests.py
 

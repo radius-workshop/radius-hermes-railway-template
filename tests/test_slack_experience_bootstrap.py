@@ -215,6 +215,20 @@ class SlackExperienceBootstrapTests(unittest.TestCase):
         self.boot(SLACK_STREAMING="true", SLACK_FEEDBACK_BUTTONS="true")
         self.assertNotIn("platform_hints", self.load())
 
+    def test_native_streaming_warns_about_duplicate_replies(self):
+        result = self.boot(SLACK_STREAMING="true")
+        self.assertIn("post each reply twice", result.stderr)
+        self.assertIn("SLACK_STREAMING=false", result.stderr)
+        result = self.boot(SLACK_STREAMING="false")
+        self.assertNotIn("twice", result.stderr)
+        # An unfurl key makes Hermes stream by editing instead, so no warning.
+        for operator in ({"slack": {"unfurl_links": False}},
+                         {"platforms": {"slack": {"extra": {"unfurl_media": True}}}}):
+            with self.subTest(operator=operator):
+                self.config.write_text(yaml.safe_dump(operator))
+                result = self.boot(SLACK_STREAMING="true")
+                self.assertNotIn("twice", result.stderr)
+
     def test_state_file_tracks_managed_vars(self):
         self.boot(SLACK_RICH_BLOCKS="false")
         self.assertEqual(json.loads((self.home / ".slack-experience-managed.json").read_text()), ["SLACK_RICH_BLOCKS"])

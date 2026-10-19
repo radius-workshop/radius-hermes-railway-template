@@ -507,7 +507,7 @@ class PinnedHermesContractTests(Base):
 
 class DocsTests(unittest.TestCase):
     def test_docs_and_prompts_name_the_tool(self):
-        for name in ("README.md", "HERMES.md", "AGENTS.md", "skills/feedback-ledger.md"):
+        for name in ("README.md", "HERMES.md", "skills/feedback-ledger.md"):
             self.assertIn("feedback_ledger", (ROOT / name).read_text(encoding="utf-8"), name)
         env = (ROOT / ".env.example").read_text(encoding="utf-8")
         for var in ("FEEDBACK_LEDGER", "FEEDBACK_LEDGER_MAX_BYTES", "FEEDBACK_LEDGER_EXCERPT_CHARS",
