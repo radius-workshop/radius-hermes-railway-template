@@ -4,8 +4,8 @@ from __future__ import annotations
 import subprocess
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
-from unittest import mock
 
 
 def git(*args, cwd=None):
@@ -47,7 +47,7 @@ class RadiusSkillsSyncTests(unittest.TestCase):
             ("RADIUS_SKILLS_STAGING_ROOT", self.root / "staging"),
             ("_radius_skills_clone_url", lambda: str(self.tools)),
         ):
-            patcher = mock.patch.object(main, target, value)
+            patcher = unittest.mock.patch.object(main, target, value)
             patcher.start()
             self.addCleanup(patcher.stop)
 
