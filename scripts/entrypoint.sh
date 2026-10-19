@@ -1235,7 +1235,11 @@ link_into_workspace() {
 
 link_into_workspace /app/HERMES.md "${MESSAGING_CWD}/HERMES.md" true
 link_into_workspace /app/HERMES.md "${MESSAGING_CWD}/.hermes.md" true
-link_into_workspace /app/AGENTS.md "${MESSAGING_CWD}/AGENTS.md" true
+# Older images also linked a runtime AGENTS.md. Hermes loads only the first
+# context file it finds and HERMES.md wins, so it was never read; drop the link.
+if [[ "$(readlink "${MESSAGING_CWD}/AGENTS.md" 2>/dev/null)" == "/app/AGENTS.md" ]]; then
+  rm -f "${MESSAGING_CWD}/AGENTS.md"
+fi
 link_into_workspace /app/README.md "${MESSAGING_CWD}/README.md"
 link_into_workspace "$SKILLS_DIR" "${MESSAGING_CWD}/skills"
 link_into_workspace "$PLUGINS_DIR" "${MESSAGING_CWD}/plugins"

@@ -12,7 +12,7 @@ This template is worker-only: setup and configuration are done through Railway V
 
 Agents created from this template automatically bootstrap the Radius skills repo snapshot into persistent external skills storage at startup:
 
-- `/app/vendor/radius-skills` is cloned into the image from `https://github.com/radiustechsystems/skills.git`
+- `/app/vendor/radius-skills` is cloned into the image from `https://github.com/radiustechsystems/skills.git` at the commit pinned by the `RADIUS_SKILLS_REF` build arg
 - on first boot, `scripts/entrypoint.sh` copies that snapshot to `RADIUS_SKILLS_DIR` (default `/data/.hermes/external-skills/radius-skills`)
 - Hermes `skills.external_dirs` is populated with the discovered Radius skill roots
 - the Radius `radius-cast` Hermes plugin remains enabled so the agent has deterministic Radius wallet tools
@@ -726,18 +726,13 @@ The template also includes an opinionated ByteRover memory skill and project ins
 
 ### Context files and cross-agent compatibility
 
-Hermes supports repo context files. Per the Hermes docs, project context is loaded by priority from `.hermes.md` / `HERMES.md`, then `AGENTS.md`, then `CLAUDE.md`, then `.cursorrules`.
+Hermes loads one project context file, first match wins: `.hermes.md` / `HERMES.md`, then `AGENTS.md`, then `CLAUDE.md`, then `.cursorrules`. The deployed agent therefore reads `HERMES.md`; edit that file (and `skills/*.md`) to change its behavior.
 
-This template ships both:
+`AGENTS.md` (and `CLAUDE.md`, which imports it) are for coding agents working on this repository. They are not shipped in the image.
 
-- `HERMES.md` for Hermes-native project context
-- `AGENTS.md` for Codex/Claude-style agents that look for `AGENTS.md`
+At runtime, gateway sessions start in `MESSAGING_CWD` (`/data/workspace` by default), not `/app`. To make the bundled project context discoverable immediately, the entrypoint links `HERMES.md`, `.hermes.md`, `README.md`, `skills/`, `plugins/`, and `scripts/` into the workspace root on boot.
 
-That gives you the same core instructions across Hermes and non-Hermes coding agents while keeping `HERMES.md` as the primary Hermes context file.
-
-At runtime, gateway sessions start in `MESSAGING_CWD` (`/data/workspace` by default), not `/app`. To make the bundled project context discoverable immediately, the entrypoint links `HERMES.md`, `.hermes.md`, `AGENTS.md`, `README.md`, `skills/`, `plugins/`, and `scripts/` into the workspace root on boot.
-
-`HERMES.md`, `.hermes.md`, and `AGENTS.md` are template-owned and are force-updated on every boot so the deployed agent always uses the repo's current instructions.
+`HERMES.md` and `.hermes.md` are template-owned and are force-updated on every boot so the deployed agent always uses the repo's current instructions.
 
 ### System prompt
 
@@ -790,7 +785,7 @@ hermes pairing list
 7. Ensures the managed Radius external directory exists on persistent storage (`RADIUS_SKILLS_DIR`), bootstraps it from `/app/vendor/radius-skills` when empty (optional), scans all upstream skill directories, writes a discovery manifest, registers the derived parent roots as Hermes `skills.external_dirs`, and optionally warns or fails if `EXPECTED_VENDORED_SKILLS` are missing.
 8. Copies bundled plugins from `plugins/*` to `${HERMES_HOME}/plugins/`.
 9. Enables every bundled plugin in both `toolsets` and `plugins.enabled`, and removes bundled plugins from any stale `plugins.disabled` entry so persisted Railway config cannot hide newly bundled tools.
-10. Links `HERMES.md`, `.hermes.md`, `AGENTS.md`, `README.md`, `skills/`, `plugins/`, and `scripts/` into `${MESSAGING_CWD}` so gateway sessions see the bundled project context immediately. The three context files are force-overwritten on each boot.
+10. Links `HERMES.md`, `.hermes.md`, `README.md`, `skills/`, `plugins/`, and `scripts/` into `${MESSAGING_CWD}` so gateway sessions see the bundled project context immediately. The two context files are force-overwritten on each boot.
 11. Copies published skills to `${HERMES_HOME}/well-known-skills/` for skill discovery endpoints.
 12. Starts the FastAPI agent server in background (binds `PORT`).
 13. Starts log forwarders for `${HERMES_HOME}/logs/agent.log` and `errors.log` unless `HERMES_FORWARD_LOG_FILES=false`. `gateway.log` is opt-in via `HERMES_FORWARD_GATEWAY_LOG=true`.

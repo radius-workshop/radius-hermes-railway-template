@@ -18,7 +18,7 @@ cp "$git_dir/index" "$tmp_index" 2>/dev/null || true
 tree=$(GIT_INDEX_FILE="$tmp_index" git add -A . && GIT_INDEX_FILE="$tmp_index" git write-tree) || exit 0
 
 # CI has no path filters, so any change runs everything. Without a merge-base,
-# check the whole tree.
+# run the checks rather than skip them.
 base=$(git merge-base HEAD origin/main 2>/dev/null) || base=""
 if [ -n "$base" ] && [ "$tree" = "$(git rev-parse "$base^{tree}")" ]; then
   exit 0
@@ -30,7 +30,7 @@ fi
 
 py=""
 for candidate in "$PWD/.venv/bin/python" python3.11 python3; do
-  if command -v "$candidate" >/dev/null && "$candidate" -c 'import fastapi, pytest' 2>/dev/null; then
+  if command -v "$candidate" >/dev/null && "$candidate" -c 'import fastapi, pytest, ruff' 2>/dev/null; then
     py=$candidate
     break
   fi
@@ -51,7 +51,8 @@ check() {
 
 check "$py" scripts/validate_release.py
 check bash -c "find . -type f -name '*.sh' -not -path './.git/*' -print0 | xargs -0 -r -n1 bash -n"
-check git diff --check "${base:-$(git hash-object -t tree /dev/null)}" "$tree"
+check git diff --check "$(git hash-object -t tree /dev/null)" "$tree"
+check "$py" -m ruff check .
 check "$py" scripts/run_tests.py
 
 if [ -n "$failures" ]; then
