@@ -338,6 +338,7 @@ def append(path: Path, record: dict) -> None:
             if path.stat().st_size + len(line.encode()) > _max_bytes():
                 os.replace(path, _rotated(path))  # keeps one previous generation
         except FileNotFoundError:
+            # Expected on the first write; O_CREAT below creates the missing ledger.
             pass
         fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as fh:
@@ -463,6 +464,7 @@ def _click_time(row: dict) -> float:
             if row.get(key):
                 return float(row[key])
         except (TypeError, ValueError):
+            # Try the next timestamp source when this value is unusable.
             pass
     try:
         return datetime.fromisoformat(str(row.get("ts_recorded"))).timestamp()
@@ -478,8 +480,8 @@ def read_events() -> tuple[list, int, int]:
     try:  # shared lock: a rotation can't happen between reading the two files
         lock_fd = os.open(path.with_name(path.name + ".lock"), os.O_RDONLY)
         fcntl.flock(lock_fd, fcntl.LOCK_SH)
-    except OSError:
-        pass
+    except OSError as exc:
+        logger.debug("[feedback-ledger] shared read lock unavailable; continuing without it: %s", exc)
     try:
         rows = _read_files(path)
     finally:
