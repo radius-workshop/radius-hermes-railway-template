@@ -32,5 +32,6 @@ a cloud session: build steps have no network there. If you change the
 - Use Python 3.11, as CI and the image do. The system `python3` in cloud
   sessions is 3.13 with no dependencies, and pip can't install into it.
 - Image inputs are pinned in the `Dockerfile` (`HERMES_GIT_REF`,
-  `RADIUS_CLI_VERSION`, `FOUNDRY_VERSION`, `LINEAR_SKILL_REF`,
-  `RADIUS_SKILLS_REF`). Bump them deliberately, one at a time.
+  the `node` stage image, `RADIUS_CLI_VERSION`, `FOUNDRY_VERSION`,
+  `LINEAR_SKILL_REF`, `RADIUS_SKILLS_REF`). Bump them deliberately, one at a
+  time.

@@ -38,14 +38,23 @@ RUN pip install --no-cache-dir -e "/opt/hermes-agent[cron,pty]" \
   && pip check
 
 
+# radius-cli needs Node.js 22 or later; Debian trixie's nodejs package is 20.
+FROM node:22.23.3-trixie-slim AS node
+
+
 FROM python:3.11-slim-trixie
 
 # radius-cli (npm, from radiustechsystems/tools) is the wallet: keystore,
 # balances, transfers, receipts, signing. Pin it so boots are reproducible.
-ARG RADIUS_CLI_VERSION=0.4.0
+ARG RADIUS_CLI_VERSION=0.5.0
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.source="https://github.com/radius-workshop/radius-hermes-railway-template" \
       org.opencontainers.image.revision="${VCS_REF}"
+
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+  && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -54,9 +63,7 @@ RUN apt-get update \
     git \
     jq \
     tini \
-    nodejs \
-    npm \
-  && node -e 'if (Number(process.versions.node.split(".")[0]) < 20) throw new Error("radius-cli requires Node.js >=20")' \
+  && node -e 'if (Number(process.versions.node.split(".")[0]) < 22) throw new Error("radius-cli requires Node.js >=22")' \
   && npm install -g "radius-cli@${RADIUS_CLI_VERSION}" \
   && rm -rf /var/lib/apt/lists/*
 
