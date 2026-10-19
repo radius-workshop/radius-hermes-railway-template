@@ -10,16 +10,17 @@ This template is worker-only: setup and configuration are done through Railway V
 
 ## Radius skills + tools bootstrap
 
-Agents created from this template automatically bootstrap the Radius skills repo snapshot into persistent external skills storage at startup:
+Agents created from this template automatically bootstrap a snapshot of the Radius skills, which live under `plugins/radius/skills` in [radiustechsystems/tools](https://github.com/radiustechsystems/tools), into persistent external skills storage at startup:
 
-- `/app/vendor/radius-skills` is cloned into the image from `https://github.com/radiustechsystems/skills.git`
+- `/app/vendor/radius-skills` is cloned into the image from `https://github.com/radiustechsystems/tools.git` at the commit pinned by the `RADIUS_SKILLS_REF` build arg
 - on first boot, `scripts/entrypoint.sh` copies that snapshot to `RADIUS_SKILLS_DIR` (default `/data/.hermes/external-skills/radius-skills`)
+- a persisted checkout of the archived `radiustechsystems/skills` repo is replaced with the image snapshot on boot; checkouts of any other repository are kept
 - Hermes `skills.external_dirs` is populated with the discovered Radius skill roots
 - the Radius `radius-cast` Hermes plugin remains enabled so the agent has deterministic Radius wallet tools
 
 This means new Railway-template agents should see both the portable skills and the tool/plugin surface:
 
-- skills: `radius-dev`, `x402`, `dripping-faucet`, `radius-agent-ops`
+- skills: `radius-dev`, `x402`, `dripping-faucet`, `sell-api`
 - tools: `radius_wallet_address`, `radius_balance`, `radius_send_sbc`, `radius_tx_status`
 
 Local verification:
@@ -372,7 +373,7 @@ Use the built-in wallet tools (`radius_wallet_address`, `radius_balance`, `radiu
 
 ## x402 payments
 
-The bundled `x402` plugin supports bounded Radius Testnet SBC payments through the installed `radius-cli` 0.4.0 `wallet pay` command. Base and mainnet paid execution are deferred. No private key is exported by this plugin.
+The bundled `x402` plugin supports bounded Radius Testnet SBC payments through the installed `radius-cli` 0.5.0 `wallet pay` command. Base and mainnet paid execution are deferred. No private key is exported by this plugin.
 
 Before using it, configure exact trusted seller hostnames in `X402_ALLOWED_HOSTS` (for example `grug402.dev`) and optionally lower `X402_MAX_PER_CALL` (default `0.01` SBC). An empty host list disables all requests, including catalog lookup and quotes. Requests require HTTPS on port 443 and public DNS addresses. Both discovery requests and the payment subprocess connect to a checked public IP while retaining hostname TLS verification; redirects cannot change the destination. Seller responses remain untrusted.
 
@@ -686,7 +687,7 @@ The `radius-wallet.md` skill is already included and tells the agent to use the 
 
 The `using-godaddy.md` skill is also included. It tells Hermes to route GoDaddy domain availability and suggestion requests to the configured GoDaddy MCP server, to use `godaddy_dns_set_records` for setting DNS records on a known GoDaddy-managed domain, and to route Agent Name Service registry requests to the local `godaddy-ans` plugin tools. GoDaddy ANS defaults to production; set `GODADDY_ANS_ENV=ote` only when OTE is explicitly required. For example, ANS registry searches should call `godaddy_ans_search` directly instead of inspecting plugin files, running Python scripts, installing packages, or reading GoDaddy API secrets in a terminal. ANS registration uses `godaddy_ans_prepare_registration` to inspect the Swagger-aligned payload and CSRs, then `godaddy_ans_register` to submit once the agent host, endpoint URLs, and domain-validation prerequisites are correct.
 
-Radius-maintained marketplace skills are seeded from `https://github.com/radiustechsystems/skills` at image build time, then managed at runtime as one persistent Hermes external directory (`RADIUS_SKILLS_DIR`, default `/data/.hermes/external-skills/radius-skills`). On boot, the template scans that directory for every `SKILL.md`, derives `skills.external_dirs`, and exposes those skills to Hermes as read-only external skills without copying them into `${HERMES_HOME}/skills/`.
+Radius-maintained marketplace skills are seeded from `https://github.com/radiustechsystems/tools` at image build time, then managed at runtime as one persistent Hermes external directory (`RADIUS_SKILLS_DIR`, default `/data/.hermes/external-skills/radius-skills`). On boot, the template scans that directory for every `SKILL.md`, derives `skills.external_dirs`, and exposes those skills to Hermes as read-only external skills without copying them into `${HERMES_HOME}/skills/`.
 
 ### Auto-updating Radius external skills
 
@@ -697,8 +698,8 @@ To enable webhook-driven updates for the managed Radius external directory:
 1. Set:
    - `RADIUS_SKILLS_AUTO_UPDATE=true`
    - `RADIUS_SKILLS_WEBHOOK_SECRET=<shared-secret>`
-   - optional: `RADIUS_SKILLS_REPO`, `RADIUS_SKILLS_BRANCH`, `RADIUS_SKILLS_GITHUB_TOKEN`
-2. Configure a GitHub webhook on the source repo:
+   - optional: `RADIUS_SKILLS_REPO` (default `radiustechsystems/tools`), `RADIUS_SKILLS_BRANCH`, `RADIUS_SKILLS_GITHUB_TOKEN`
+2. Configure a GitHub webhook on the source repo (`radiustechsystems/tools` by default; the archived `radiustechsystems/skills` no longer receives pushes):
    - URL: `https://<your-agent-domain>/webhooks/github/radius-skills`
    - Event: **Push**
    - Content type: `application/json`
@@ -707,7 +708,11 @@ To enable webhook-driven updates for the managed Radius external directory:
    - `GET /internal/skills/status` (Bearer internal API key)
    - optional manual refresh: `POST /internal/skills/sync` with `{"after":"<commit-sha>"}`.
 
-If `RADIUS_SKILLS_BRANCH` is omitted, empty, `*`, or `any`, the webhook accepts pushes from any branch under `refs/heads/*` and syncs the pushed branch. If it is set to a concrete branch such as `main`, only that branch is accepted.
+`RADIUS_SKILLS_BRANCH` defaults to `main`, and only pushes to that branch are accepted. Set it to another branch name to follow that branch instead. If it is set to empty, `*`, or `any`, the webhook accepts pushes from any branch under `refs/heads/*` and syncs the pushed branch; the tools repo has many feature branches, so avoid this outside testing.
+
+The tools repo also holds the CLI, SDK and docs, so most pushes don't change skills. Each accepted push still triggers a sync; when the skills are unchanged it leaves them as they were.
+
+If `RADIUS_SKILLS_REPO` changes, the next sync replaces the checkout with a fresh clone of the new repository instead of fetching from the old one.
 
 The webhook itself returns `202 Accepted` because sync happens asynchronously after signature validation. A successful queue response now includes the target repo/ref/SHA plus `delivery_id`, `status_path`, and whether branch handling is `pinned` or `any`. Progress and outcome are emitted to Railway logs as structured events:
 
@@ -726,18 +731,13 @@ The template also includes an opinionated ByteRover memory skill and project ins
 
 ### Context files and cross-agent compatibility
 
-Hermes supports repo context files. Per the Hermes docs, project context is loaded by priority from `.hermes.md` / `HERMES.md`, then `AGENTS.md`, then `CLAUDE.md`, then `.cursorrules`.
+Hermes loads one project context file, first match wins: `.hermes.md` / `HERMES.md`, then `AGENTS.md`, then `CLAUDE.md`, then `.cursorrules`. The deployed agent therefore reads `HERMES.md`; edit that file (and `skills/*.md`) to change its behavior.
 
-This template ships both:
+`AGENTS.md` (and `CLAUDE.md`, which imports it) are for coding agents working on this repository. They are not shipped in the image.
 
-- `HERMES.md` for Hermes-native project context
-- `AGENTS.md` for Codex/Claude-style agents that look for `AGENTS.md`
+At runtime, gateway sessions start in `MESSAGING_CWD` (`/data/workspace` by default), not `/app`. To make the bundled project context discoverable immediately, the entrypoint links `HERMES.md`, `.hermes.md`, `README.md`, `skills/`, `plugins/`, and `scripts/` into the workspace root on boot.
 
-That gives you the same core instructions across Hermes and non-Hermes coding agents while keeping `HERMES.md` as the primary Hermes context file.
-
-At runtime, gateway sessions start in `MESSAGING_CWD` (`/data/workspace` by default), not `/app`. To make the bundled project context discoverable immediately, the entrypoint links `HERMES.md`, `.hermes.md`, `AGENTS.md`, `README.md`, `skills/`, `plugins/`, and `scripts/` into the workspace root on boot.
-
-`HERMES.md`, `.hermes.md`, and `AGENTS.md` are template-owned and are force-updated on every boot so the deployed agent always uses the repo's current instructions.
+`HERMES.md` and `.hermes.md` are template-owned and are force-updated on every boot so the deployed agent always uses the repo's current instructions.
 
 ### System prompt
 
@@ -790,7 +790,7 @@ hermes pairing list
 7. Ensures the managed Radius external directory exists on persistent storage (`RADIUS_SKILLS_DIR`), bootstraps it from `/app/vendor/radius-skills` when empty (optional), scans all upstream skill directories, writes a discovery manifest, registers the derived parent roots as Hermes `skills.external_dirs`, and optionally warns or fails if `EXPECTED_VENDORED_SKILLS` are missing.
 8. Copies bundled plugins from `plugins/*` to `${HERMES_HOME}/plugins/`.
 9. Enables every bundled plugin in both `toolsets` and `plugins.enabled`, and removes bundled plugins from any stale `plugins.disabled` entry so persisted Railway config cannot hide newly bundled tools.
-10. Links `HERMES.md`, `.hermes.md`, `AGENTS.md`, `README.md`, `skills/`, `plugins/`, and `scripts/` into `${MESSAGING_CWD}` so gateway sessions see the bundled project context immediately. The three context files are force-overwritten on each boot.
+10. Links `HERMES.md`, `.hermes.md`, `README.md`, `skills/`, `plugins/`, and `scripts/` into `${MESSAGING_CWD}` so gateway sessions see the bundled project context immediately. The two context files are force-overwritten on each boot.
 11. Copies published skills to `${HERMES_HOME}/well-known-skills/` for skill discovery endpoints.
 12. Starts the FastAPI agent server in background (binds `PORT`).
 13. Starts log forwarders for `${HERMES_HOME}/logs/agent.log` and `errors.log` unless `HERMES_FORWARD_LOG_FILES=false`. `gateway.log` is opt-in via `HERMES_FORWARD_GATEWAY_LOG=true`.
