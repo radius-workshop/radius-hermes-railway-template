@@ -96,11 +96,12 @@ RUN git init /app/scripts/linear-skill \
   && npm prune --omit=dev
 
 # Bootstrap snapshot only: entrypoint copies this to RADIUS_SKILLS_DIR on /data
-# when persistent external skills storage is empty.
-ARG RADIUS_SKILLS_REF=0bd32d342d447855d54eb239921c1dd49a950a42
+# when persistent external skills storage is empty. Radius skills live under
+# plugins/radius/skills in radiustechsystems/tools.
+ARG RADIUS_SKILLS_REF=f7ccf019a1c4cdda4a408612d72dea6c209bd7d1
 RUN git init /app/vendor/radius-skills \
   && cd /app/vendor/radius-skills \
-  && git remote add origin https://github.com/radiustechsystems/skills.git \
+  && git remote add origin https://github.com/radiustechsystems/tools.git \
   && git fetch --depth 1 origin "${RADIUS_SKILLS_REF}" \
   && git checkout --detach FETCH_HEAD
 

@@ -908,18 +908,33 @@ PYEOF
 # === vendored skills: persist Radius external directory and discover skill roots ===
 RADIUS_SKILLS_DIR="${RADIUS_SKILLS_DIR:-/data/.hermes/external-skills/radius-skills}"
 RADIUS_SKILLS_BOOTSTRAP_FROM_IMAGE="${RADIUS_SKILLS_BOOTSTRAP_FROM_IMAGE:-true}"
+radius_skills_snapshot=/app/vendor/radius-skills
 mkdir -p "$(dirname "${RADIUS_SKILLS_DIR}")"
 
+# --- radius skills bootstrap begin ---
+# Radius skills moved from radiustechsystems/skills (archived) to
+# radiustechsystems/tools. Replace a persisted checkout of the archived repo with
+# the image snapshot; checkouts of any other repository are left alone.
+if [[ -f "${RADIUS_SKILLS_DIR}/.git/HEAD" ]] && is_true "${RADIUS_SKILLS_BOOTSTRAP_FROM_IMAGE}" && [[ -d "${radius_skills_snapshot}" ]]; then
+  radius_skills_origin="$(git -C "${RADIUS_SKILLS_DIR}" remote get-url origin 2>/dev/null || true)"
+  radius_skills_origin="${radius_skills_origin%/}"
+  if [[ "${radius_skills_origin%.git}" == "https://github.com/radiustechsystems/skills" ]]; then
+    echo "[bootstrap] Replacing the archived radiustechsystems/skills checkout in ${RADIUS_SKILLS_DIR} with the image snapshot."
+    rm -rf "${RADIUS_SKILLS_DIR}"
+  fi
+fi
+
 if [[ ! -f "${RADIUS_SKILLS_DIR}/.git/HEAD" ]]; then
-  if is_true "${RADIUS_SKILLS_BOOTSTRAP_FROM_IMAGE}" && [[ -d "/app/vendor/radius-skills" ]]; then
+  if is_true "${RADIUS_SKILLS_BOOTSTRAP_FROM_IMAGE}" && [[ -d "${radius_skills_snapshot}" ]]; then
     echo "[bootstrap] Bootstrapping Radius external skills from image snapshot into ${RADIUS_SKILLS_DIR}..."
     rm -rf "${RADIUS_SKILLS_DIR}"
-    cp -a /app/vendor/radius-skills "${RADIUS_SKILLS_DIR}"
+    cp -a "${radius_skills_snapshot}" "${RADIUS_SKILLS_DIR}"
   else
     echo "[bootstrap] Radius external skills directory missing and bootstrap disabled; creating empty directory at ${RADIUS_SKILLS_DIR}."
     mkdir -p "${RADIUS_SKILLS_DIR}"
   fi
 fi
+# --- radius skills bootstrap end ---
 
 VENDORED_SKILLS_SOURCE="${VENDORED_SKILLS_SOURCE:-${RADIUS_SKILLS_DIR}}"
 VENDORED_SKILLS_MANIFEST="${HERMES_HOME}/vendored-skills.json"

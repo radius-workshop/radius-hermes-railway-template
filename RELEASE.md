@@ -52,8 +52,9 @@ See [Railway token scopes](https://docs.railway.com/cli/login).
 Hermes defaults to `v2026.9.24`, compatible with the Python 3.11 image. Override
 `HERMES_GIT_REF` with a branch, tag, or full commit SHA when testing an upgrade.
 `radius-cli`, Foundry (`FOUNDRY_VERSION`), the Linear skill (`LINEAR_SKILL_REF`)
-and the Radius skills snapshot (`RADIUS_SKILLS_REF`) default to versions or commits
-pinned in the Dockerfile; override the build arg to test an upgrade.
+and the Radius skills snapshot (`RADIUS_SKILLS_REF`, a commit of
+`radiustechsystems/tools`) default to versions or commits pinned in the
+Dockerfile; override the build arg to test an upgrade.
 `/app/build-info.json` records the resolved Hermes, Linear skill, and Radius skill
 commits and installed Python package versions. CI attaches this manifest to every
 release; it contains no credentials.

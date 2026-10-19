@@ -10,16 +10,17 @@ This template is worker-only: setup and configuration are done through Railway V
 
 ## Radius skills + tools bootstrap
 
-Agents created from this template automatically bootstrap the Radius skills repo snapshot into persistent external skills storage at startup:
+Agents created from this template automatically bootstrap a snapshot of the Radius skills, which live under `plugins/radius/skills` in [radiustechsystems/tools](https://github.com/radiustechsystems/tools), into persistent external skills storage at startup:
 
-- `/app/vendor/radius-skills` is cloned into the image from `https://github.com/radiustechsystems/skills.git` at the commit pinned by the `RADIUS_SKILLS_REF` build arg
+- `/app/vendor/radius-skills` is cloned into the image from `https://github.com/radiustechsystems/tools.git` at the commit pinned by the `RADIUS_SKILLS_REF` build arg
 - on first boot, `scripts/entrypoint.sh` copies that snapshot to `RADIUS_SKILLS_DIR` (default `/data/.hermes/external-skills/radius-skills`)
+- a persisted checkout of the archived `radiustechsystems/skills` repo is replaced with the image snapshot on boot; checkouts of any other repository are kept
 - Hermes `skills.external_dirs` is populated with the discovered Radius skill roots
 - the Radius `radius-cast` Hermes plugin remains enabled so the agent has deterministic Radius wallet tools
 
 This means new Railway-template agents should see both the portable skills and the tool/plugin surface:
 
-- skills: `radius-dev`, `x402`, `dripping-faucet`, `radius-agent-ops`
+- skills: `radius-dev`, `x402`, `dripping-faucet`, `sell-api`
 - tools: `radius_wallet_address`, `radius_balance`, `radius_send_sbc`, `radius_tx_status`
 
 Local verification:
@@ -686,7 +687,7 @@ The `radius-wallet.md` skill is already included and tells the agent to use the 
 
 The `using-godaddy.md` skill is also included. It tells Hermes to route GoDaddy domain availability and suggestion requests to the configured GoDaddy MCP server, to use `godaddy_dns_set_records` for setting DNS records on a known GoDaddy-managed domain, and to route Agent Name Service registry requests to the local `godaddy-ans` plugin tools. GoDaddy ANS defaults to production; set `GODADDY_ANS_ENV=ote` only when OTE is explicitly required. For example, ANS registry searches should call `godaddy_ans_search` directly instead of inspecting plugin files, running Python scripts, installing packages, or reading GoDaddy API secrets in a terminal. ANS registration uses `godaddy_ans_prepare_registration` to inspect the Swagger-aligned payload and CSRs, then `godaddy_ans_register` to submit once the agent host, endpoint URLs, and domain-validation prerequisites are correct.
 
-Radius-maintained marketplace skills are seeded from `https://github.com/radiustechsystems/skills` at image build time, then managed at runtime as one persistent Hermes external directory (`RADIUS_SKILLS_DIR`, default `/data/.hermes/external-skills/radius-skills`). On boot, the template scans that directory for every `SKILL.md`, derives `skills.external_dirs`, and exposes those skills to Hermes as read-only external skills without copying them into `${HERMES_HOME}/skills/`.
+Radius-maintained marketplace skills are seeded from `https://github.com/radiustechsystems/tools` at image build time, then managed at runtime as one persistent Hermes external directory (`RADIUS_SKILLS_DIR`, default `/data/.hermes/external-skills/radius-skills`). On boot, the template scans that directory for every `SKILL.md`, derives `skills.external_dirs`, and exposes those skills to Hermes as read-only external skills without copying them into `${HERMES_HOME}/skills/`.
 
 ### Auto-updating Radius external skills
 
@@ -697,8 +698,8 @@ To enable webhook-driven updates for the managed Radius external directory:
 1. Set:
    - `RADIUS_SKILLS_AUTO_UPDATE=true`
    - `RADIUS_SKILLS_WEBHOOK_SECRET=<shared-secret>`
-   - optional: `RADIUS_SKILLS_REPO`, `RADIUS_SKILLS_BRANCH`, `RADIUS_SKILLS_GITHUB_TOKEN`
-2. Configure a GitHub webhook on the source repo:
+   - optional: `RADIUS_SKILLS_REPO` (default `radiustechsystems/tools`), `RADIUS_SKILLS_BRANCH`, `RADIUS_SKILLS_GITHUB_TOKEN`
+2. Configure a GitHub webhook on the source repo (`radiustechsystems/tools` by default; the archived `radiustechsystems/skills` no longer receives pushes):
    - URL: `https://<your-agent-domain>/webhooks/github/radius-skills`
    - Event: **Push**
    - Content type: `application/json`
@@ -707,7 +708,11 @@ To enable webhook-driven updates for the managed Radius external directory:
    - `GET /internal/skills/status` (Bearer internal API key)
    - optional manual refresh: `POST /internal/skills/sync` with `{"after":"<commit-sha>"}`.
 
-If `RADIUS_SKILLS_BRANCH` is omitted, empty, `*`, or `any`, the webhook accepts pushes from any branch under `refs/heads/*` and syncs the pushed branch. If it is set to a concrete branch such as `main`, only that branch is accepted.
+`RADIUS_SKILLS_BRANCH` defaults to `main`, and only pushes to that branch are accepted. Set it to another branch name to follow that branch instead. If it is set to empty, `*`, or `any`, the webhook accepts pushes from any branch under `refs/heads/*` and syncs the pushed branch; the tools repo has many feature branches, so avoid this outside testing.
+
+The tools repo also holds the CLI, SDK and docs, so most pushes don't change skills. Each accepted push still triggers a sync; when the skills are unchanged it leaves them as they were.
+
+If `RADIUS_SKILLS_REPO` changes, the next sync replaces the checkout with a fresh clone of the new repository instead of fetching from the old one.
 
 The webhook itself returns `202 Accepted` because sync happens asynchronously after signature validation. A successful queue response now includes the target repo/ref/SHA plus `delivery_id`, `status_path`, and whether branch handling is `pinned` or `any`. Progress and outcome are emitted to Railway logs as structured events:
 
