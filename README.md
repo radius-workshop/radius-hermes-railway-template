@@ -313,7 +313,7 @@ SLACK_REACTION_TRIGGERS=true      # a reaction on the bot's own message becomes 
 |---|---|---|
 | `SLACK_STREAMING` | `display.platforms.slack.streaming` | Turns streaming on for Slack only, not Telegram or Discord. It needs the `assistant:write` scope and Slack's Agents & AI Apps feature. Without them, Hermes falls back to editing the message as it streams. Native streaming is skipped when `unfurl_links` or `unfurl_media` is set. **Known issue:** with the pinned Hermes (v2026.9.24), a natively streamed reply can appear twice, the streamed copy and then a second message with the Block Kit table and feedback buttons, and the "is working" indicator never clears. Hermes posts the final reply again whenever its text isn't an exact continuation of the stream, and doesn't close the stream. Hermes v0.22.0 fixes this. Until the template moves to it, leave this off or set it to `false`. The boot log warns while it is on. |
 | `SLACK_RICH_BLOCKS` | `slack.rich_blocks` | Applies only to sending, so the app doesn't need reinstalling. A plain-text fallback is always sent. Hermes converts the agent's markdown: headers, lists, one pipe table, `---` dividers and `>` quotes render natively, and fenced code becomes a code block. The agent can't send its own Block Kit JSON or buttons; JSON in a reply shows as a code block. A reply over Slack's 50 blocks or 39,000 characters is sent as plain text. While it's on (and `slack.markdown_blocks` isn't), the entrypoint also writes `platform_hints.slack` so the agent knows tables render, because Hermes' built-in Slack hint says they don't. A `platform_hints.slack` you wrote or edited yourself is kept. |
-| `SLACK_FEEDBACK_BUTTONS` | `slack.feedback_buttons` | Hermes only writes clicks to the gateway log (`Feedback button clicked`); it doesn't store them anywhere. They are missing on replies that exceed Slack's 50-block limit. |
+| `SLACK_FEEDBACK_BUTTONS` | `slack.feedback_buttons` | Hermes itself only writes clicks to the gateway log (`Feedback button clicked`). The bundled `feedback-ledger` plugin also stores them; see [Feedback ledger](#feedback-ledger). They are missing on replies that exceed Slack's 50-block limit. |
 | `SLACK_NATIVE_TASK_CARDS` | `slack.native_task_cards` | Cards need a thread. Explicitly turning tool progress off also turns the cards off (`HERMES_TOOL_PROGRESS_MODE=off`, or `display.tool_progress: off` in `config.yaml`); the boot log warns when that happens. |
 | `SLACK_SUGGESTED_PROMPTS` | `slack.suggested_prompts` | `default`, or JSON: `[{"title":"Check my wallet","message":"What is my SBC balance?"}]` or `{"title":"Try:","prompts":[...]}`. Slack shows up to 4, in the agent DM only. |
 | `SLACK_LIVE_STATUS` | `display.platforms.slack.live_status` | `full` previews tool arguments such as file paths and commands. Use `verb` in shared channels. |
@@ -384,6 +384,69 @@ Use `x402_catalog` to inspect demo metadata, then `x402_request` with `dry_run: 
 A successful HTTP response describes delivery. `settlement_reported` requires a matching CLI payment report and transaction hash; on-chain reconciliation remains unverified. `payment_unknown` or a pending ledger entry may represent a charge: inspect transaction status before retrying. `x402_benchmark` runs at most 20 sequential requests through the same controls, reserves a fixed per-call share of its maximum 0.05 SBC run budget, and stops on unknown outcomes. There is no cumulative wallet spending limit. Use a dedicated testnet wallet and restrict who can invoke payment tools; opening a workspace bot also opens its enabled wallet tools.
 
 Try: *"Show me three Radius Testnet x402 demo APIs"*, *"Quote this approved endpoint without paying"*, *"Show the x402 ledger"*.
+
+## Feedback ledger
+
+The bundled `feedback-ledger` plugin stores each 👍/👎 click on an agent reply in Slack (`SLACK_FEEDBACK_BUTTONS=true`) in `${HERMES_HOME}/feedback/ledger.jsonl`, and the agent reads it back with the `feedback_ledger` tool. Hermes still acks the click and logs `Feedback button clicked` as before; capture is added alongside it.
+
+**How a click is captured.** At v2026.9.24 Hermes registers its own `hermes_feedback` action listener before any plugin listener, and slack_bolt runs only the first matching listener. So the plugin uses the public `register_platform_handler("slack", ...)` plugin API to add a slack_bolt global middleware. Global middleware sees every request before listeners run. The middleware checks for a `feedback_buttons` click, hands the payload to a worker thread and always passes the request on. Parsing, redaction, the session lookup and the disk write run in that thread, so they can't delay Slack's 3-second ack. If anything fails, the click is still acked, an `ERROR [feedback-ledger] could not record feedback click` line is logged, and the tool's `capture.write_failures` counter goes up. Capture never stops the gateway.
+
+**Record.** One JSON object per click, appended under an exclusive lock and fsynced, using the same pattern as the x402 ledger. Fields can be added in later versions; readers should ignore fields they don't know.
+
+| Field | Meaning |
+|---|---|
+| `schema_version`, `source` | `1`, `"slack"` |
+| `event_id` | Hash of workspace, channel, message ts, user, Slack `action_ts` and value. Used as the dedupe key. |
+| `ts_recorded`, `action_ts` | When the plugin saw the click (ISO-8601 UTC) and Slack's click timestamp. |
+| `team_id`, `user_team_id` | Slack workspace, plus the clicker's own workspace when it differs (Slack Connect). |
+| `user`, `user_name` | Slack user ID and the Slack username from the payload, both as Slack reported them. |
+| `channel`, `thread_ts` | Where the rated reply is. |
+| `message_ts`, `message_timestamp` | The rated reply's Slack ts, and the same time in ISO-8601 UTC. |
+| `message` | First `FEEDBACK_LEDGER_EXCERPT_CHARS` characters (default 500) of the rated reply. Secret-looking strings are redacted first, using Hermes' redactor plus token, JWT, PEM and private-key patterns; transaction hashes are kept. `null` when the excerpt length is 0. |
+| `message_sha256`, `message_length`, `message_truncated` | Hash of the redacted reply text, the full reply's length, and whether the excerpt is cut. |
+| `rating` | `good` or `bad`. |
+| `session_id`, `session_start_timestamp`, `session_match` | The Hermes session that produced the reply and when it started (ISO-8601 UTC; across a compression continuation, the start of the first session). See below. |
+
+**Sessions.** The click payload has no session ID. The plugin reads `${HERMES_HOME}/state.db` read-only and looks for Hermes' Slack sessions for that channel, and for that thread if the reply is in one, that were live when the reply was posted. If one of those sessions has an assistant message stored within two minutes of the reply's ts, the closest one wins (`session_match: "reply_time"`). Otherwise, if every candidate belongs to one user, the newest session is used (`"thread"` or `"channel"`). Several people's sessions in one thread with no timing match give `"ambiguous"`. No session gives `"not_found"`, and an unreadable database gives `"unavailable"`. In those three cases both session fields are `null`. `reply_time` is a heuristic: it picks the closest stored assistant message. A streamed turn that runs longer than two minutes can fall outside the window and end up `ambiguous`.
+
+**Duplicates, changes of mind and retention.** A Slack redelivery of the same click has the same `event_id`. It is skipped in memory, and the reader skips it again after a restart. Clicking 👍 and then 👎 stores two events. Summaries count only the latest click per user and reply, ordered by Slack's click time, and report it under `changed_mind`. Un-selecting a button isn't recorded as a retraction. When the file would pass `FEEDBACK_LEDGER_MAX_BYTES` (default 5 MB), it is renamed to `ledger.jsonl.1` and a new file is started. Only that one previous file is kept, so older feedback is deleted. `summary.oldest_retained` shows how far back the data goes. A click still being written during a redeploy can be lost.
+
+**The tool.** `feedback_ledger({since, limit, rating, user, channel, session_id, message_ts, raw, include_text})`. `since` is an ISO-8601 time or an age such as `24h` or `7d`.
+
+- It always returns `summary`: good and bad counts from each user's latest rating, `changed_mind`, raters, rated replies, a per-day trend over the last 31 days with data, and `oldest_retained`.
+- Entries are the latest rating per user and reply, newest first. `raw: true` returns every click event instead.
+- Reply excerpts are left out unless `include_text: true`.
+- What a caller can see depends on where the tool runs (`caller_scope`):
+  - Local operator surfaces (CLI, TUI, desktop) see everything.
+  - A Slack session sees excerpts only from replies rated in its own channel; others come back as `message_withheld`. That way a DM reply isn't quoted into a shared channel.
+  - Every other context (A2A and API-server callers, cron, other chat platforms, or no session context) gets counts, ratings and timestamps, with no excerpts and no user IDs or names.
+- Set `FEEDBACK_LEDGER_TEXT_SCOPE=all` to lift these limits. They are a convenience filter, not access control: an agent with file or terminal tools can read the ledger file directly.
+- Excerpts and usernames are untrusted data. A reply can quote user or web content, so the output is marked with a `notice` and `untrusted_fields`.
+- `capture` reports this process's counters (`clicks_seen`, `recorded`, `duplicates`, `write_failures`, `last_write_error`). After a deploy where you've clicked a button, `clicks_seen: 0` means capture isn't wired.
+
+**Variables.**
+
+```
+FEEDBACK_LEDGER=true                  # default on; false stops storing clicks (the tool can still read old rows)
+FEEDBACK_LEDGER_EXCERPT_CHARS=500     # 0-2000; 0 stores only hash and length
+FEEDBACK_LEDGER_MAX_BYTES=5000000     # 65536-20000000; rotate past this size; one previous file is kept
+FEEDBACK_LEDGER_TEXT_SCOPE=channel    # channel | all
+FEEDBACK_LEDGER_PATH=                 # default ${HERMES_HOME}/feedback/ledger.jsonl
+```
+
+Capture is on by default. The buttons are already shown in production, and people who click them expect the feedback to count. `state.db` on the same volume already holds full transcripts, so the ledger only adds a bounded, redacted excerpt plus Slack user IDs. Turn it off with `FEEDBACK_LEDGER=false`, or keep ratings without text with `FEEDBACK_LEDGER_EXCERPT_CHARS=0`.
+
+**Reading it by hand on Railway.**
+
+```bash
+railway ssh --service <service>       # then, inside the container:
+tail -n 20 /data/.hermes/feedback/ledger.jsonl
+jq -r '[.message_timestamp, .user, .rating, .session_match] | @tsv' /data/.hermes/feedback/ledger.jsonl
+```
+
+**Limits.** The ledger is local, best-effort and not tamper-proof. Ratings are what Slack reported for the clicking user. Capture depends on Hermes' `hermes_feedback` action ID and `positive`/`negative` values and on `register_platform_handler`. CI's image smoke check (`scripts/smoke_image.py`) fails if those change when Hermes is upgraded. `tests/test_feedback_ledger.py` also has contract tests against the real Slack adapter, but they run only where Hermes is importable (not in CI's test job). If Hermes drops the plugin API, the plugin logs a warning and the tool still works. If it renames the action, `capture.clicks_seen` stays at 0.
+
+Try: *"Show recent feedback"*, *"What are people unhappy about this week? Include the reply text"*, *"Show the feedback ledger"*.
 
 ## Paid A2A (x402 seller)
 
