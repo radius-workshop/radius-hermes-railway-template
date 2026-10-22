@@ -1,0 +1,5 @@
+# Pyflakes only: undefined names, unused imports and variables. Style is not enforced.
+target-version = "py311"
+
+[lint]
+select = ["F"]

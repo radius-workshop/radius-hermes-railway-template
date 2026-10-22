@@ -168,15 +168,19 @@ class GoDaddyRuntimeDiscoveryTests(unittest.TestCase):
         self.assertEqual(result["query"]["matched"], 1)
 
     def test_always_loaded_context_names_both_godaddy_surfaces(self) -> None:
-        hermes_context = (REPO_ROOT / "HERMES.md").read_text(encoding="utf-8")
-        agents_context = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        # Hermes loads only the first context file it finds, and HERMES.md wins.
+        content = (REPO_ROOT / "HERMES.md").read_text(encoding="utf-8")
 
-        for content in (hermes_context, agents_context):
-            self.assertIn("GoDaddy MCP", content)
-            self.assertIn("godaddy-ans", content)
-            self.assertIn("godaddy_ans_search", content)
-            self.assertIn("Swagger-aligned", content)
-            self.assertNotIn("known-broken", content)
+        for name in (
+            "GoDaddy MCP",
+            "godaddy-ans",
+            "godaddy_ans_search",
+            "godaddy_ans_prepare_registration",
+            "godaddy_ans_register",
+            "godaddy_dns_set_records",
+        ):
+            self.assertIn(name, content)
+        self.assertNotIn("known-broken", content)
 
     def test_entrypoint_installs_godaddy_skill_in_directory_layout_and_checks_runtime(self) -> None:
         entrypoint = (REPO_ROOT / "scripts" / "entrypoint.sh").read_text(encoding="utf-8")

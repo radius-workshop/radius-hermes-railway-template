@@ -648,7 +648,7 @@ def _is_true(value: str | None) -> bool:
 
 
 RADIUS_SKILLS_AUTO_UPDATE = _is_true(os.environ.get("RADIUS_SKILLS_AUTO_UPDATE", "false"))
-RADIUS_SKILLS_REPO = os.environ.get("RADIUS_SKILLS_REPO", "radiustechsystems/skills")
+RADIUS_SKILLS_REPO = os.environ.get("RADIUS_SKILLS_REPO", "radiustechsystems/tools")
 RADIUS_SKILLS_BRANCH = str(os.environ.get("RADIUS_SKILLS_BRANCH", "main") or "").strip()
 if RADIUS_SKILLS_BRANCH in {"*", "any"}:
     RADIUS_SKILLS_BRANCH = ""
@@ -980,18 +980,38 @@ def _run_git(cmd: list[str], timeout_seconds: int) -> subprocess.CompletedProces
         raise RuntimeError("git command timed out") from None
 
 
+def _radius_skills_clone_url() -> str:
+    return f"https://github.com/{RADIUS_SKILLS_REPO}.git"
+
+
+def _git_origin_url(repo_dir: Path) -> str | None:
+    try:
+        result = _run_git(["git", "-C", str(repo_dir), "remote", "get-url", "origin"], RADIUS_SKILLS_SYNC_TIMEOUT_SECONDS)
+    except RuntimeError:
+        return None
+    return result.stdout.strip()
+
+
+def _same_git_remote(a: str | None, b: str) -> bool:
+    if a is None:
+        return False
+    return a.rstrip("/").removesuffix(".git") == b.rstrip("/").removesuffix(".git")
+
+
 def _sync_radius_skills_repo(after_sha: str, branch_name: str) -> None:
     repo_dir = Path(RADIUS_SKILLS_DIR)
     repo_dir.parent.mkdir(parents=True, exist_ok=True)
     RADIUS_SKILLS_STAGING_ROOT.mkdir(parents=True, exist_ok=True)
 
-    clone_url = f"https://github.com/{RADIUS_SKILLS_REPO}.git"
+    clone_url = _radius_skills_clone_url()
 
-    if not (repo_dir / ".git").exists():
+    # A checkout of another repository (such as the archived
+    # radiustechsystems/skills) is replaced rather than fetched from its origin.
+    if not (repo_dir / ".git").exists() or not _same_git_remote(_git_origin_url(repo_dir), clone_url):
         log_event(
             logger,
             logging.INFO,
-            "Radius skills repo not present; cloning repository",
+            "Radius skills repo missing or tracking another repository; cloning",
             event="skills.sync.repo.clone",
             repo=RADIUS_SKILLS_REPO,
             branch=branch_name,

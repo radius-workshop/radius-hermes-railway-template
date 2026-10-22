@@ -43,4 +43,20 @@ with tempfile.TemporaryDirectory(prefix="radius-hermes-smoke-") as home:
             assert health.status_code == 200, "local token rejected"
             assert health.json()["version"] == VERSION
 
+# plugins/feedback-ledger captures Slack 👍/👎 clicks through these pinned Hermes details. Check them
+# in a clean interpreter (outside /app, whose plugins/ directory would shadow Hermes' package).
+import subprocess
+
+FEEDBACK_CONTRACT = """
+from hermes_cli.plugins import PluginContext
+from plugins.platforms.slack.adapter import SlackAdapter
+assert callable(getattr(PluginContext, "register_platform_handler", None)), "register_platform_handler missing"
+element = SlackAdapter._feedback_block(None)["elements"][0]
+assert element["type"] == "feedback_buttons" and element["action_id"] == "hermes_feedback", element
+assert element["positive_button"]["value"] == "positive", element
+assert element["negative_button"]["value"] == "negative", element
+"""
+contract = subprocess.run([sys.executable, "-c", FEEDBACK_CONTRACT], cwd="/", capture_output=True, text=True)
+assert contract.returncode == 0, "Hermes Slack feedback contract changed; update plugins/feedback-ledger:\n" + contract.stderr
+
 print(f"Template {VERSION}: discovery, stable fixture identity, local auth and A2A denial verified")

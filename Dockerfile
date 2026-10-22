@@ -38,14 +38,23 @@ RUN pip install --no-cache-dir -e "/opt/hermes-agent[cron,pty]" \
   && pip check
 
 
+# radius-cli needs Node.js 22 or later; Debian trixie's nodejs package is 20.
+FROM node:22.23.3-trixie-slim AS node
+
+
 FROM python:3.11-slim-trixie
 
 # radius-cli (npm, from radiustechsystems/tools) is the wallet: keystore,
 # balances, transfers, receipts, signing. Pin it so boots are reproducible.
-ARG RADIUS_CLI_VERSION=0.4.0
+ARG RADIUS_CLI_VERSION=0.5.0
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.source="https://github.com/radius-workshop/radius-hermes-railway-template" \
       org.opencontainers.image.revision="${VCS_REF}"
+
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+  && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -54,16 +63,15 @@ RUN apt-get update \
     git \
     jq \
     tini \
-    nodejs \
-    npm \
-  && node -e 'if (Number(process.versions.node.split(".")[0]) < 20) throw new Error("radius-cli requires Node.js >=20")' \
+  && node -e 'if (Number(process.versions.node.split(".")[0]) < 22) throw new Error("radius-cli requires Node.js >=22")' \
   && npm install -g "radius-cli@${RADIUS_CLI_VERSION}" \
   && rm -rf /var/lib/apt/lists/*
 
 # Install Foundry to a stable path that remains available after HOME is remapped.
+ARG FOUNDRY_VERSION=v1.8.5
 ENV FOUNDRY_DIR=/opt/foundry
 RUN curl -fsSL https://foundry.paradigm.xyz | bash \
-  && /opt/foundry/bin/foundryup
+  && /opt/foundry/bin/foundryup --install "${FOUNDRY_VERSION}"
 
 # Install ByteRover before HOME is remapped to /data so it lands in /root/.local/bin
 RUN curl -fsSL https://byterover.dev/install.sh | sh
@@ -83,9 +91,13 @@ RUN sed -i 's/\r$//' /app/scripts/entrypoint.sh && chmod +x /app/scripts/entrypo
 
 COPY scripts/godaddy /app/scripts/godaddy
 
-# Install and build linear-claude-skill (still Node.js)
-RUN git clone --depth 1 https://github.com/radius-workshop/linear-claude-skill /app/scripts/linear-skill \
+# Install and build linear-claude-skill (still Node.js) at a pinned commit.
+ARG LINEAR_SKILL_REF=d3c9b9ee12a46fe01ac766747385d55ee0e08e0a
+RUN git init /app/scripts/linear-skill \
   && cd /app/scripts/linear-skill \
+  && git remote add origin https://github.com/radius-workshop/linear-claude-skill \
+  && git fetch --depth 1 origin "${LINEAR_SKILL_REF}" \
+  && git checkout --detach FETCH_HEAD \
   && npm install --no-fund --no-audit \
   && npm run build \
   && npm prune --omit=dev
@@ -97,14 +109,19 @@ RUN cd /app/scripts/cf_x402_proxy && npm ci --omit=dev --no-fund --no-audit
 COPY scripts/cf_x402_proxy/lib.mjs scripts/cf_x402_proxy/proxy.mjs scripts/cf_x402_proxy/approve-permit2.mjs /app/scripts/cf_x402_proxy/
 
 # Bootstrap snapshot only: entrypoint copies this to RADIUS_SKILLS_DIR on /data
-# when persistent external skills storage is empty.
-RUN git clone --depth 1 https://github.com/radiustechsystems/skills.git /app/vendor/radius-skills
+# when persistent external skills storage is empty. Radius skills live under
+# plugins/radius/skills in radiustechsystems/tools.
+ARG RADIUS_SKILLS_REF=f7ccf019a1c4cdda4a408612d72dea6c209bd7d1
+RUN git init /app/vendor/radius-skills \
+  && cd /app/vendor/radius-skills \
+  && git remote add origin https://github.com/radiustechsystems/tools.git \
+  && git fetch --depth 1 origin "${RADIUS_SKILLS_REF}" \
+  && git checkout --detach FETCH_HEAD
 
 COPY scripts/agent_server /app/scripts/agent_server
 COPY erc8004_registry /app/erc8004_registry
 
 COPY HERMES.md /app/HERMES.md
-COPY AGENTS.md /app/AGENTS.md
 COPY README.md /app/README.md
 
 COPY skills /app/skills
