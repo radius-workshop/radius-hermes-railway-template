@@ -215,6 +215,7 @@ Set at least one inference provider:
 | `OPENROUTER_API_KEY` | OpenRouter API key |
 | `OPENAI_API_KEY` + `OPENAI_BASE_URL` | OpenAI-compatible provider |
 | `ANTHROPIC_API_KEY` | Anthropic direct API |
+| `RADIUS_INFERENCE_PROVIDER=cloudflare-x402` + `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN` | Cloudflare AI Gateway, paid per call in Base USDC over x402 ([setup](#cloudflare-inference-paid-per-call-over-x402-beta)) |
 
 Set at least one messaging platform:
 
@@ -353,6 +354,65 @@ LLM_MODEL=openai/gpt-5.4-nano
 ```
 
 Use any model ID supported by your provider. OpenRouter model IDs look like `openai/gpt-5.4-nano` or `openai/gpt-4o`.
+
+### Cloudflare inference, paid per call over x402 (beta)
+
+Hermes can use [Cloudflare AI Gateway Machine Payments](https://developers.cloudflare.com/ai-gateway/features/machine-payments/) as its model provider. With this provider, each LLM call is paid from a wallet in USDC on Base using the x402 `upto` scheme. There is no API-key billing. Cloudflare authorizes a per-call maximum and settles the actual cost.
+
+Hermes needs a `base_url` and a key, but Cloudflare's paid endpoint (`/ai/run`) is not OpenAI-compatible. When the provider is selected, the container therefore starts a small local proxy (`scripts/cf_x402_proxy`, built on `radius-sdk`) on `127.0.0.1:8650`. The proxy:
+
+- translates chat completions to and from `/ai/run`;
+- always sends `Payment-Method: x402`;
+- pays each 402 challenge;
+- records every attempt in the x402 ledger (`x402_ledger` shows these rows as `requested_by: cf-x402-proxy`).
+
+The entrypoint points Hermes' main model at the proxy.
+
+**Switching is configuration-only:**
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `RADIUS_INFERENCE_PROVIDER` | unset | `cloudflare-x402` selects this provider; unset or `default` keeps the existing provider (OpenRouter etc.). Unset deployments are unchanged. |
+| `CLOUDFLARE_ACCOUNT_ID` | required | Cloudflare account ID. Machine Payments requires a US-based account with a card on file. |
+| `CLOUDFLARE_API_TOKEN` | required | API token with the **Workers AI** permission. It is used only by the proxy and is not written to the Hermes env file. |
+| `CF_X402_MODEL` | `z-ai/glm-4.7-flash` | One of the eligible models: `z-ai/glm-4.7-flash`, `google/gemma-4-26b-a4b-it`, `openai/gpt-oss-20b`, `alibaba/qwen3.8-27b`. |
+| `CF_X402_PRIVATE_KEY` | agent wallet | Paying wallet key (recommended: a dedicated wallet holding only what you are willing to spend). Defaults to the agent's own radius-cli wallet (`RADIUS_PRIVATE_KEY`, the same address on Base). |
+| `CF_X402_MAX_PER_REQUEST` | `0.15` | Refuse any call whose authorized maximum exceeds this many USDC. |
+| `CF_X402_DAILY_BUDGET` | `2` | Rolling 24-hour USDC budget. It counts settled amounts, plus the authorized maximum for calls in flight or with unknown outcomes. |
+| `CF_X402_MAX_TOKENS` | `8192` | `max_tokens` sent to Cloudflare, which also sizes the authorized maximum. Requests asking for more are clamped. |
+| `CF_X402_CONTEXT_LENGTH` | unset | Context window reported to Hermes for compression. Set it for your model. |
+| `CF_X402_TIMEOUT_SECONDS` | `120` | Per-call timeout. A timeout after the payment was sent is recorded as `payment_unknown` and never retried. |
+| `CF_X402_BASE_RPC_URL` | `https://mainnet.base.org` | Base RPC used to read the Permit2 allowance before each payment. |
+| `CF_X402_EXPECTED_PAY_TO` | unset | Optional pin: refuse offers to any other `payTo`. |
+| `CF_X402_MAX_CONCURRENCY` | `2` | Paid calls in flight at once. |
+
+**One-time wallet setup on Base mainnet.** The proxy never sends transactions and never grants allowances:
+
+1. Fund the paying wallet with USDC on Base, for example a few USDC. Also send a little Base ETH (about 0.0005 ETH) to pay gas for one approval transaction.
+2. Grant Permit2 a **bounded** USDC allowance. Run this from `railway ssh`, or locally with the same key:
+   ```sh
+   cd /app/scripts/cf_x402_proxy
+   # Dedicated wallet: CF_X402_PRIVATE_KEY is already in the environment. For the agent wallet:
+   # export RADIUS_PRIVATE_KEY="$(grep '^RADIUS_PRIVATE_KEY=' /data/.hermes/.env | cut -d= -f2)"
+   node approve-permit2.mjs status          # ETH, USDC, current Permit2 allowance
+   node approve-permit2.mjs approve 5       # dry run: prints the plan
+   node approve-permit2.mjs approve 5 --yes # sends USDC.approve(Permit2, 5 USDC)
+   ```
+   USDC lowers this allowance by every amount Permit2 moves, so the allowance is also a lifetime spend ceiling. When it runs out, calls fail with `approval_required` until you approve again. Unlimited approvals are not offered. Revoke with `approve 0 --yes`.
+3. Set the variables above and redeploy. The boot log shows `[cf-x402] listening ... payer=0x...` and one `[cf-x402] <id> ... outcome=settlement_reported settled=... tx=0x...` line per call.
+
+**Switching back:** unset `RADIUS_INFERENCE_PROVIDER`, or set it to `default`, and redeploy. The previous `model:` value, or `LLM_MODEL` if set, is restored. The original provider's keys (for example `OPENROUTER_API_KEY`) can stay set while Cloudflare is selected.
+
+**Safety notes and limits:**
+
+- **Every Hermes model call is paid,** including auxiliary calls such as compression, titles and background review, which use the main model. Retries of an identical request within two minutes reuse the earlier result instead of paying again.
+- **Calls billed to the account stop the proxy.** If Cloudflare answers without an x402 challenge, the call was billed to the Cloudflare account. The proxy returns that one answer, then refuses all calls until restart (`/health` reports 503).
+- **Only the payment itself is signed.** The proxy signs only the x402 payment authorization (a Permit2 witness transfer to the x402 upto proxy, or an EIP-3009 transfer), each capped at `CF_X402_MAX_PER_REQUEST`. It refuses gas-sponsored approval permits and transactions.
+- **Refusals stop the turn.** The proxy returns HTTP 402 when it refuses a call: over the per-request cap, over the budget, or with too small an allowance. Nothing is paid. Hermes treats 402 as a billing error and does not retry it. If you configured Hermes `fallback_providers`, Hermes switches to them instead, and those providers bill normally.
+- **The local proxy key is not secret from the agent.** It is generated once at `${HERMES_HOME}/.cf_x402_proxy_key` and written to `config.yaml` as `model.api_key`, so the agent can read it. Any value of `RADIUS_INFERENCE_PROVIDER` other than unset, `default` or `cloudflare-x402` stops the boot.
+- **Responses are not streamed.** The proxy calls Cloudflare without streaming and replays the finished answer as an SSE stream when Hermes asks for one. This keeps the settlement receipt attached to the response.
+- **The agent can bypass the proxy.** The agent has a terminal and runs as the same user. It can read secrets from the process environment and call Cloudflare or the wallet directly, so treat the in-proxy limits as guard rails. The real ceilings are the wallet balance, the Permit2 allowance and the Cloudflare token: use a dedicated wallet and a token without other billing behind it.
+- **Some Cloudflare behavior is unverified (beta).** The response shape of `/ai/run` for these models, and tool-calling fidelity, have not yet been verified against the live service. Run the live test in the PR before relying on it.
 
 ## Radius wallet
 

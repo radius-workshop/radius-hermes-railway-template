@@ -98,6 +98,11 @@ cleanup() {
     kill "$AGENT_PID" 2>/dev/null || true
   fi
 
+  if [[ -n "${CF_X402_PID:-}" ]]; then
+    kill "$CF_X402_PID" 2>/dev/null || true
+    pkill -f "cf_x402_proxy/proxy.mjs" 2>/dev/null || true
+  fi
+
   wait 2>/dev/null || true
   exit "$exit_code"
 }
@@ -128,6 +133,15 @@ validate_platforms() {
 }
 
 has_valid_provider_config() {
+  # Cloudflare AI Gateway paid per call over x402 (Base USDC) through the local cf_x402_proxy.
+  if [[ "${RADIUS_INFERENCE_PROVIDER:-}" == "cloudflare-x402" ]]; then
+    if [[ -n "${CLOUDFLARE_ACCOUNT_ID:-}" && -n "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+      return 0
+    fi
+    echo "[bootstrap] ERROR: RADIUS_INFERENCE_PROVIDER=cloudflare-x402 needs CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN." >&2
+    return 1
+  fi
+
   if [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
     return 0
   fi
@@ -151,8 +165,16 @@ append_if_set() {
   fi
 }
 
+case "${RADIUS_INFERENCE_PROVIDER:-}" in
+  ""|default|cloudflare-x402) ;;
+  *)
+    echo "[bootstrap] ERROR: RADIUS_INFERENCE_PROVIDER must be unset, 'default' or 'cloudflare-x402' (got '${RADIUS_INFERENCE_PROVIDER}')." >&2
+    exit 1
+    ;;
+esac
+
 if ! has_valid_provider_config; then
-  echo "[bootstrap] ERROR: Configure a provider: OPENROUTER_API_KEY, or OPENAI_BASE_URL+OPENAI_API_KEY, or ANTHROPIC_API_KEY." >&2
+  echo "[bootstrap] ERROR: Configure a provider: OPENROUTER_API_KEY, or OPENAI_BASE_URL+OPENAI_API_KEY, or ANTHROPIC_API_KEY, or RADIUS_INFERENCE_PROVIDER=cloudflare-x402 with CLOUDFLARE_ACCOUNT_ID+CLOUDFLARE_API_TOKEN." >&2
   exit 1
 fi
 
@@ -289,14 +311,96 @@ PYEOF
   fi
 fi
 
-# Ensure model is set in config.yaml (handles existing installs and model changes)
+# Ensure model is set in config.yaml (handles existing installs and model changes).
+# Only a one-line `model: <name>`: a `model:` mapping (the cloudflare-x402 provider block below,
+# or one an operator wrote) is left alone, since rewriting its first line would break the YAML.
 if [[ -n "${LLM_MODEL:-}" ]]; then
-  if grep -q "^model:" "$CONFIG_FILE" 2>/dev/null; then
-    sed -i "s|^model:.*|model: ${LLM_MODEL}|" "$CONFIG_FILE"
-  else
+  if grep -Eq "^model:[[:space:]]*[^[:space:]#]" "$CONFIG_FILE" 2>/dev/null; then
+    sed -i -E "s|^model:[[:space:]]*[^[:space:]#].*|model: ${LLM_MODEL}|" "$CONFIG_FILE"
+  elif ! grep -q "^model:" "$CONFIG_FILE" 2>/dev/null; then
     sed -i "1s|^|model: ${LLM_MODEL}\n|" "$CONFIG_FILE"
   fi
 fi
+
+# === Inference provider: Cloudflare AI Gateway over x402, re-applied on every boot ===
+# RADIUS_INFERENCE_PROVIDER=cloudflare-x402 points Hermes' main model at the local cf_x402_proxy
+# (127.0.0.1), which pays Cloudflare per call in Base USDC. The model value it replaces is saved
+# and restored when the variable is unset or set to "default", so switching back is config-only.
+CF_X402_PORT="${CF_X402_PORT:-8650}"
+CF_X402_PROXY_KEY_FILE="${HERMES_HOME}/.cf_x402_proxy_key"
+if [[ "${RADIUS_INFERENCE_PROVIDER:-}" == "cloudflare-x402" ]]; then
+  if [[ ! -s "$CF_X402_PROXY_KEY_FILE" ]]; then
+    (umask 077 && python3 -c 'import secrets; print(secrets.token_hex(32))' > "$CF_X402_PROXY_KEY_FILE")
+  fi
+  export CF_X402_PROXY_KEY="$(cat "$CF_X402_PROXY_KEY_FILE")"
+  export CF_X402_PORT
+fi
+echo "[bootstrap] Applying inference provider (${RADIUS_INFERENCE_PROVIDER:-default}) to config.yaml..."
+python3 - <<'PYEOF'
+import json
+import os
+import sys
+from pathlib import Path
+
+import yaml
+
+home = Path(os.environ["HERMES_HOME"])
+cfg_file = home / "config.yaml"
+state_file = home / ".inference-provider-managed.json"
+selected = os.environ.get("RADIUS_INFERENCE_PROVIDER", "").strip() == "cloudflare-x402"
+base_url = f"http://127.0.0.1:{os.environ.get('CF_X402_PORT', '8650')}/v1"
+
+try:
+    cfg = yaml.safe_load(cfg_file.read_text()) or {}
+except FileNotFoundError:
+    cfg = {}
+except Exception as exc:
+    # Never rewrite a config.yaml that could not be read; Hermes reports it on start.
+    print(f"[bootstrap] ERROR: could not read config.yaml ({exc}); inference provider not applied.", file=sys.stderr)
+    sys.exit(1 if selected else 0)
+if not isinstance(cfg, dict):
+    print("[bootstrap] ERROR: config.yaml is not a mapping; inference provider not applied.", file=sys.stderr)
+    sys.exit(1 if selected else 0)
+state = None
+if state_file.exists():
+    try:
+        state = json.loads(state_file.read_text())
+    except Exception:
+        state = None
+
+
+def ours(model):
+    return isinstance(model, dict) and model.get("provider") == "custom" and model.get("base_url") == base_url
+
+
+if selected:
+    model = {
+        "provider": "custom",
+        "default": os.environ.get("CF_X402_MODEL", "").strip() or "z-ai/glm-4.7-flash",
+        "base_url": base_url,
+        "api_key": os.environ["CF_X402_PROXY_KEY"],
+    }
+    ctx = os.environ.get("CF_X402_CONTEXT_LENGTH", "").strip()
+    if ctx.isdigit():
+        model["context_length"] = int(ctx)
+    if state is None:
+        # Remember what to restore on switch-back (the operator's provider, e.g. an OpenRouter model id).
+        previous = cfg.get("model")
+        state = {"provider": "cloudflare-x402", "previous_model": None if ours(previous) else previous}
+        state_file.write_text(json.dumps(state))
+    if cfg.get("model") != model:
+        cfg["model"] = model
+        cfg_file.write_text(yaml.dump(cfg, default_flow_style=False, allow_unicode=True, sort_keys=False))
+    print(f"[bootstrap] Hermes main model -> cloudflare-x402 proxy ({model['default']} at {base_url}).")
+elif state is not None:
+    if ours(cfg.get("model")):
+        llm_model = os.environ.get("LLM_MODEL", "").strip()
+        restored = llm_model or state.get("previous_model") or "openai/gpt-5.4-nano"
+        cfg["model"] = restored
+        cfg_file.write_text(yaml.dump(cfg, default_flow_style=False, allow_unicode=True, sort_keys=False))
+        print(f"[bootstrap] Hermes main model restored from cloudflare-x402 to {restored if isinstance(restored, str) else 'the previous model block'}.")
+    state_file.unlink()
+PYEOF
 
 if [[ ! -f "$INIT_MARKER" ]]; then
   date -u +"%Y-%m-%dT%H:%M:%SZ" > "$INIT_MARKER"
@@ -1381,6 +1485,47 @@ for db_path in _candidate_paths():
         if conn is not None:
             conn.close()
 PYEOF
+
+# === cf_x402_proxy: local OpenAI-compatible endpoint paying Cloudflare per call (x402, Base USDC) ===
+CF_X402_DIR="${CF_X402_DIR:-/app/scripts/cf_x402_proxy}"
+if [[ "${RADIUS_INFERENCE_PROVIDER:-}" == "cloudflare-x402" ]]; then
+  # Fail the boot on a bad configuration instead of starting an agent whose every turn fails.
+  if ! node "${CF_X402_DIR}/proxy.mjs" --check; then
+    echo "[bootstrap] ERROR: cloudflare-x402 proxy configuration is invalid (see above)." >&2
+    exit 1
+  fi
+  echo "[bootstrap] Starting cloudflare-x402 proxy on 127.0.0.1:${CF_X402_PORT}..."
+  (
+    backoff=2
+    while true; do
+      node "${CF_X402_DIR}/proxy.mjs" && code=0 || code=$?
+      if [[ "$code" -eq 2 ]]; then
+        echo "[cf-x402] ERROR: configuration rejected; not restarting." >&2
+        exit 2
+      fi
+      echo "[cf-x402] WARNING: proxy exited (${code}); restarting in ${backoff}s." >&2
+      sleep "$backoff"
+      backoff=$(( backoff < 60 ? backoff * 2 : 60 ))
+    done
+  ) &
+  CF_X402_PID=$!
+  cf_x402_ready=false
+  for _ in $(seq 1 30); do
+    if curl -sf "http://127.0.0.1:${CF_X402_PORT}/health" >/dev/null 2>&1; then
+      cf_x402_ready=true
+      echo "[bootstrap] cloudflare-x402 proxy ready."
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$cf_x402_ready" != true ]]; then
+    echo "[bootstrap] WARNING: cloudflare-x402 proxy is not answering on 127.0.0.1:${CF_X402_PORT}; model calls will fail until it does (see [cf-x402] lines)." >&2
+  fi
+  # Only the proxy needs these; keep them out of the agent's and gateway's environment.
+  # (Advisory only: same-user processes can still read /proc/1/environ. The real caps are the
+  # wallet balance, the bounded Permit2 allowance and the Cloudflare token's scope; see README.)
+  unset CLOUDFLARE_API_TOKEN CF_X402_PRIVATE_KEY CF_X402_PROXY_KEY
+fi
 
 echo "[bootstrap] Starting agent server..."
 python3 /app/scripts/agent_server/main.py &

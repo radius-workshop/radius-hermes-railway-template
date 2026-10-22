@@ -102,6 +102,12 @@ RUN git init /app/scripts/linear-skill \
   && npm run build \
   && npm prune --omit=dev
 
+# Optional Cloudflare AI Gateway provider paid per call over x402 (RADIUS_INFERENCE_PROVIDER=cloudflare-x402):
+# a local OpenAI-compatible proxy on radius-sdk, installed from its lockfile.
+COPY scripts/cf_x402_proxy/package.json scripts/cf_x402_proxy/package-lock.json /app/scripts/cf_x402_proxy/
+RUN cd /app/scripts/cf_x402_proxy && npm ci --omit=dev --no-fund --no-audit
+COPY scripts/cf_x402_proxy/lib.mjs scripts/cf_x402_proxy/proxy.mjs scripts/cf_x402_proxy/approve-permit2.mjs /app/scripts/cf_x402_proxy/
+
 # Bootstrap snapshot only: entrypoint copies this to RADIUS_SKILLS_DIR on /data
 # when persistent external skills storage is empty. Radius skills live under
 # plugins/radius/skills in radiustechsystems/tools.
