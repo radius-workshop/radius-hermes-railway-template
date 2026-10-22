@@ -1,0 +1,7 @@
+name: feedback-ledger
+version: "1.0.0"
+description: "Persist Slack 👍/👎 feedback clicks on agent replies to a local ledger and read them back"
+provides_tools:
+  - feedback_ledger
+toolsets:
+  - feedback-ledger

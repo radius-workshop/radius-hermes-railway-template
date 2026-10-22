@@ -931,6 +931,18 @@ def slack_flag(key):
     return str(raw).strip().lower() in TRUE
 
 
+# Hermes v2026.9.24 posts a natively streamed Slack reply a second time when
+# the final text isn't an exact continuation of the stream, and never closes
+# the stream, so "is working" stays up. Fixed upstream in Hermes v0.22.0.
+# Hermes skips native streaming when an unfurl key is set.
+unfurl_set = any(
+    isinstance(section, dict) and section.get(key) is not None
+    for section in (slack_cfg, slack_extra)
+    for key in ("unfurl_links", "unfurl_media")
+)
+if get_path(cfg, SLACK_DISPLAY + ("streaming",)) is True and not unfurl_set:
+    warn("Slack streaming in this Hermes version can post each reply twice and leave an "
+         "'is working' indicator; set SLACK_STREAMING=false until Hermes is upgraded to v0.22.0 or later.")
 if slack_flag("feedback_buttons") and not (slack_flag("rich_blocks") or slack_flag("markdown_blocks")):
     warn("Slack feedback buttons need Block Kit replies; set SLACK_RICH_BLOCKS=true or they are not shown.")
 if slack_flag("native_task_cards"):
@@ -947,6 +959,48 @@ if slack_flag("native_task_cards"):
     if progress is not None and str(progress).strip().lower() in {"off", "false"}:
         warn("Slack task cards are off while tool progress is explicitly off; unset HERMES_TOOL_PROGRESS_MODE / display.tool_progress or use new/all.")
 
+# Hermes' built-in Slack prompt hint says "tables are NOT supported" whether or
+# not rich_blocks is on. When it is, append the formatting the renderer really
+# supports. Any platform_hints.slack this block didn't write (or that an
+# operator has since edited) is kept.
+HINT_KEY = "platform_hints.slack"
+HINT_PATH = ("platform_hints", "slack")
+HINT_PREFIX = "Block Kit replies are on for this agent:"
+BLOCKS_HINT = (
+    HINT_PREFIX + " your markdown is rendered as Slack Block Kit, so "
+    "#/## headers, - and 1. lists (nesting allowed), one pipe table per reply (up to 5 columns), "
+    "--- dividers and > quotes display natively. This replaces the note above that tables are "
+    "not supported. Keep a reply under about 20 blocks (each header, paragraph, list, table, "
+    "divider or quote is one block); past Slack's 50-block limit the whole reply falls back to "
+    "plain text. You write markdown only: you cannot send Block Kit JSON, blocks or attachments "
+    "payloads, colored sidebars or custom buttons, and a JSON payload in a reply shows up as a "
+    "code block. For a card or themed layout, use the slack-card skill."
+)
+# markdown_blocks (Slack's native markdown block) takes precedence in Hermes and
+# has different limits, so the note is only for the rich_blocks renderer.
+blocks_on = slack_flag("rich_blocks") and not slack_flag("markdown_blocks")
+current_hint = get_path(cfg, HINT_PATH)
+hint_managed = (
+    HINT_KEY in managed
+    and isinstance(current_hint, dict)
+    and set(current_hint) == {"append"}
+    and str(current_hint["append"]).startswith(HINT_PREFIX)
+)
+if not hint_managed:
+    managed.discard(HINT_KEY)
+if hint_managed or current_hint is None:
+    if blocks_on:
+        set_path(cfg, HINT_PATH, {"append": BLOCKS_HINT})
+        managed.add(HINT_KEY)
+        if not hint_managed:
+            print(f"[bootstrap] {HINT_KEY} = Block Kit formatting note")
+    elif hint_managed:
+        remove_path(cfg, HINT_PATH)
+        managed.discard(HINT_KEY)
+        print(f"[bootstrap] {HINT_KEY} removed (Block Kit replies are off)")
+elif blocks_on:
+    print(f"[bootstrap] Keeping the existing {HINT_KEY}; it should say that tables render in Slack.")
+
 if json.dumps(cfg, sort_keys=True, default=str) != original:
     tmp_file = cfg_file.with_name(cfg_file.name + ".slack-tmp")
     with tmp_file.open("w") as f:
@@ -958,18 +1012,33 @@ PYEOF
 # === vendored skills: persist Radius external directory and discover skill roots ===
 RADIUS_SKILLS_DIR="${RADIUS_SKILLS_DIR:-/data/.hermes/external-skills/radius-skills}"
 RADIUS_SKILLS_BOOTSTRAP_FROM_IMAGE="${RADIUS_SKILLS_BOOTSTRAP_FROM_IMAGE:-true}"
+radius_skills_snapshot=/app/vendor/radius-skills
 mkdir -p "$(dirname "${RADIUS_SKILLS_DIR}")"
 
+# --- radius skills bootstrap begin ---
+# Radius skills moved from radiustechsystems/skills (archived) to
+# radiustechsystems/tools. Replace a persisted checkout of the archived repo with
+# the image snapshot; checkouts of any other repository are left alone.
+if [[ -f "${RADIUS_SKILLS_DIR}/.git/HEAD" ]] && is_true "${RADIUS_SKILLS_BOOTSTRAP_FROM_IMAGE}" && [[ -d "${radius_skills_snapshot}" ]]; then
+  radius_skills_origin="$(git -C "${RADIUS_SKILLS_DIR}" remote get-url origin 2>/dev/null || true)"
+  radius_skills_origin="${radius_skills_origin%/}"
+  if [[ "${radius_skills_origin%.git}" == "https://github.com/radiustechsystems/skills" ]]; then
+    echo "[bootstrap] Replacing the archived radiustechsystems/skills checkout in ${RADIUS_SKILLS_DIR} with the image snapshot."
+    rm -rf "${RADIUS_SKILLS_DIR}"
+  fi
+fi
+
 if [[ ! -f "${RADIUS_SKILLS_DIR}/.git/HEAD" ]]; then
-  if is_true "${RADIUS_SKILLS_BOOTSTRAP_FROM_IMAGE}" && [[ -d "/app/vendor/radius-skills" ]]; then
+  if is_true "${RADIUS_SKILLS_BOOTSTRAP_FROM_IMAGE}" && [[ -d "${radius_skills_snapshot}" ]]; then
     echo "[bootstrap] Bootstrapping Radius external skills from image snapshot into ${RADIUS_SKILLS_DIR}..."
     rm -rf "${RADIUS_SKILLS_DIR}"
-    cp -a /app/vendor/radius-skills "${RADIUS_SKILLS_DIR}"
+    cp -a "${radius_skills_snapshot}" "${RADIUS_SKILLS_DIR}"
   else
     echo "[bootstrap] Radius external skills directory missing and bootstrap disabled; creating empty directory at ${RADIUS_SKILLS_DIR}."
     mkdir -p "${RADIUS_SKILLS_DIR}"
   fi
 fi
+# --- radius skills bootstrap end ---
 
 VENDORED_SKILLS_SOURCE="${VENDORED_SKILLS_SOURCE:-${RADIUS_SKILLS_DIR}}"
 VENDORED_SKILLS_MANIFEST="${HERMES_HOME}/vendored-skills.json"
@@ -1285,7 +1354,11 @@ link_into_workspace() {
 
 link_into_workspace /app/HERMES.md "${MESSAGING_CWD}/HERMES.md" true
 link_into_workspace /app/HERMES.md "${MESSAGING_CWD}/.hermes.md" true
-link_into_workspace /app/AGENTS.md "${MESSAGING_CWD}/AGENTS.md" true
+# Older images also linked a runtime AGENTS.md. Hermes loads only the first
+# context file it finds and HERMES.md wins, so it was never read; drop the link.
+if [[ "$(readlink "${MESSAGING_CWD}/AGENTS.md" 2>/dev/null)" == "/app/AGENTS.md" ]]; then
+  rm -f "${MESSAGING_CWD}/AGENTS.md"
+fi
 link_into_workspace /app/README.md "${MESSAGING_CWD}/README.md"
 link_into_workspace "$SKILLS_DIR" "${MESSAGING_CWD}/skills"
 link_into_workspace "$PLUGINS_DIR" "${MESSAGING_CWD}/plugins"
