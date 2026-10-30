@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# The same image runs the egress proxy service: it holds the real secrets and
+# needs none of the agent bootstrap below. See README "Egress proxy".
+if [[ "${HERMES_SERVICE_ROLE:-agent}" == "egress" ]]; then
+  exec python3 /app/scripts/egress/iron_egress.py proxy
+fi
+
 export HERMES_HOME="${HERMES_HOME:-/data/.hermes}"
 export HOME="${HOME:-/data}"
 export MESSAGING_CWD="${MESSAGING_CWD:-/data/workspace}"
@@ -151,6 +157,45 @@ append_if_set() {
   fi
 }
 
+# === Egress proxy: swap managed secrets for proxy tokens ===
+# With EGRESS_PROXY_URL set, the secrets in EGRESS_SECRETS live only on the
+# egress service. This service gets deterministic proxy tokens under the usual
+# names, routes outbound HTTP(S) through iron-proxy and trusts its CA, so the
+# real values never reach this container or ${HERMES_HOME}/.env.
+EGRESS_ENV_KEYS=()
+if [[ -n "${EGRESS_PROXY_URL:-}" ]]; then
+  egress_exports="$(mktemp)"
+  if ! python3 /app/scripts/egress/iron_egress.py client-env "$egress_exports"; then
+    rm -f "$egress_exports"
+    echo "[bootstrap] ERROR: Egress proxy setup failed; refusing to start with secrets unprotected." >&2
+    exit 1
+  fi
+  # shellcheck source=/dev/null
+  source "$egress_exports"
+  while IFS= read -r line; do
+    key="${line#export }"
+    EGRESS_ENV_KEYS+=("${key%%=*}")
+  done <"$egress_exports"
+  rm -f "$egress_exports"
+  unset egress_exports
+  echo "[bootstrap] Egress proxy: outbound traffic via ${EGRESS_PROXY_URL}; injected secrets: ${EGRESS_SECRETS}."
+  if ! python3 - <<'PYEOF'
+import os, socket, sys, time
+from urllib.parse import urlsplit
+url = urlsplit(os.environ["EGRESS_PROXY_URL"])
+for attempt in range(10):
+    try:
+        socket.create_connection((url.hostname, url.port or 9090), timeout=3).close()
+        sys.exit(0)
+    except OSError:
+        time.sleep(3)
+sys.exit(1)
+PYEOF
+  then
+    echo "[bootstrap] WARNING: Egress proxy ${EGRESS_PROXY_URL} is not reachable yet; outbound calls fail until it is." >&2
+  fi
+fi
+
 if ! has_valid_provider_config; then
   echo "[bootstrap] ERROR: Configure a provider: OPENROUTER_API_KEY, or OPENAI_BASE_URL+OPENAI_API_KEY, or ANTHROPIC_API_KEY." >&2
   exit 1
@@ -223,6 +268,14 @@ for key in \
   HERMES_API_KEY HERMES_URL A2A_BRIDGE_MODEL HERMES_TIMEOUT A2A_MODE A2A_PUBLIC_URL A2A_FILE_SERVE_PATHS
 do
   append_if_set "$key"
+done
+
+# Proxy and CA settings so Hermes CLI sessions route the same way. Tokens are
+# already covered above; real values never reach this service.
+for key in "${EGRESS_ENV_KEYS[@]}"; do
+  if ! grep -q "^${key}=" "$ENV_FILE"; then
+    append_if_set "$key"
+  fi
 done
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
@@ -398,12 +451,11 @@ if [[ ! -f "$RADIUS_WALLET_MARKER" ]]; then
       fi
     fi
 
+    # Exported to the process only, as on warm boots: the keystore is the
+    # source of truth and the key is never written to ${ENV_FILE}.
     radius_key="$(radius_export_private_key)"
     if [[ -n "$radius_key" ]]; then
       export RADIUS_PRIVATE_KEY="$radius_key"
-      if ! grep -q "^RADIUS_PRIVATE_KEY=" "$ENV_FILE" 2>/dev/null; then
-        echo "RADIUS_PRIVATE_KEY=${RADIUS_PRIVATE_KEY}" >> "$ENV_FILE"
-      fi
     fi
 
     # Optional faucet funding for first boot.

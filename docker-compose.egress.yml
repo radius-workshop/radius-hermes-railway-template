@@ -1,0 +1,23 @@
+# Local egress proxy: docker compose -f docker-compose.yml -f docker-compose.egress.yml up
+#
+# .env holds the shared egress settings (EGRESS_SECRETS, EGRESS_TOKEN_SEED,
+# EGRESS_CA_CERT) and no managed secrets. .env.egress holds the real secrets
+# and EGRESS_CA_KEY and is only given to the egress container.
+services:
+  egress:
+    build:
+      context: .
+      args:
+        HERMES_GIT_REF: ${HERMES_GIT_REF:-v2026.9.24}
+    env_file:
+      - .env
+      - .env.egress
+    environment:
+      HERMES_SERVICE_ROLE: egress
+    restart: unless-stopped
+
+  hermes:
+    environment:
+      EGRESS_PROXY_URL: http://egress:9090
+    depends_on:
+      - egress
