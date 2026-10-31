@@ -1,0 +1,39 @@
+{{- include "hermes.validate" . }}
+{{- $data := deepCopy (default dict .Values.agent.config) }}
+{{- $_ := set $data "PORT" (toString .Values.agent.port) }}
+{{- with (include "hermes.publicUrl" .) }}
+{{- $_ := set $data "PUBLIC_URL" . }}
+{{- end }}
+{{- if .Values.egress.enabled }}
+{{- $data = merge $data (default dict .Values.egress.sharedConfig) }}
+{{- $_ := set $data "EGRESS_PROXY_URL" (include "hermes.egressUrl" .) }}
+{{- $_ := set $data "EGRESS_SECRETS" (join "," .Values.egress.secrets) }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "hermes.fullname" . }}
+  labels:
+    {{- include "hermes.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent
+data:
+  {{- include "hermes.envData" $data | trim | nindent 2 }}
+{{- if .Values.egress.enabled }}
+{{- $egress := merge (deepCopy (default dict .Values.egress.config)) (default dict .Values.egress.sharedConfig) }}
+{{- $_ := set $egress "HERMES_SERVICE_ROLE" "egress" }}
+{{- $_ := set $egress "EGRESS_SECRETS" (join "," .Values.egress.secrets) }}
+{{- $_ := set $egress "EGRESS_PORT" (toString .Values.egress.port) }}
+{{- with .Values.egress.listenHost }}
+{{- $_ := set $egress "EGRESS_LISTEN_HOST" . }}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "hermes.egressName" . }}
+  labels:
+    {{- include "hermes.labels" . | nindent 4 }}
+    app.kubernetes.io/component: egress
+data:
+  {{- include "hermes.envData" $egress | trim | nindent 2 }}
+{{- end }}

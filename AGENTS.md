@@ -24,6 +24,10 @@ a cloud session: build steps have no network there. If you change the
 `Dockerfile`, `scripts/entrypoint.sh`, the requirements files or
 `scripts/smoke_image.py`, say so in the PR and rely on CI for that job.
 
+The Helm chart is in `deploy/helm/hermes-agent`. `tests/test_helm_chart.py`
+renders it when `helm` is installed. CI's `container` job also runs
+`scripts/test_helm_chart.sh`, which installs the chart on a kind cluster.
+
 ## Rules
 
 - This file is for agents working on the repo. The deployed Hermes agent reads

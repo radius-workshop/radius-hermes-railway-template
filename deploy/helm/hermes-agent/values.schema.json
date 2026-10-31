@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "definitions": {
+    "env": {
+      "type": "object",
+      "additionalProperties": { "type": ["string", "number", "boolean", "null"] }
+    },
+    "list": { "type": "array" },
+    "map": { "type": "object" },
+    "podSecurity": {
+      "type": "object",
+      "properties": {
+        "runAsNonRoot": { "type": "boolean" },
+        "runAsUser": { "type": "integer" },
+        "runAsGroup": { "type": "integer" },
+        "fsGroup": { "type": "integer" }
+      }
+    }
+  },
+  "properties": {
+    "global": { "type": "object" },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string" },
+        "digest": { "type": "string", "pattern": "^(|sha256:[0-9a-f]{64})$" },
+        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "imagePullSecrets": { "$ref": "#/definitions/list" },
+    "nameOverride": { "type": "string" },
+    "fullnameOverride": { "type": "string" },
+    "publicUrl": { "type": "string", "pattern": "^(|https?://[^/]+.*)$" },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "existingSecret": { "type": "string" },
+        "config": { "$ref": "#/definitions/env" },
+        "extraEnv": { "$ref": "#/definitions/list" },
+        "extraEnvFrom": { "$ref": "#/definitions/list" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "resources": { "$ref": "#/definitions/map" },
+        "tmpSizeLimit": { "type": "string" },
+        "runtimeClassName": { "type": "string" },
+        "priorityClassName": { "type": "string" },
+        "podAnnotations": { "$ref": "#/definitions/map" },
+        "podLabels": { "$ref": "#/definitions/map" },
+        "nodeSelector": { "$ref": "#/definitions/map" },
+        "tolerations": { "$ref": "#/definitions/list" },
+        "affinity": { "$ref": "#/definitions/map" },
+        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 0 },
+        "podSecurityContext": { "$ref": "#/definitions/podSecurity" },
+        "securityContext": { "$ref": "#/definitions/map" },
+        "startupProbe": { "type": ["object", "null"] },
+        "livenessProbe": { "type": ["object", "null"] },
+        "readinessProbe": { "type": ["object", "null"] },
+        "extraVolumes": { "$ref": "#/definitions/list" },
+        "extraVolumeMounts": { "$ref": "#/definitions/list" },
+        "initContainers": { "$ref": "#/definitions/list" },
+        "extraContainers": { "$ref": "#/definitions/list" }
+      }
+    },
+    "persistence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "existingClaim": { "type": "string" },
+        "storageClass": { "type": "string" },
+        "accessModes": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "size": { "type": "string" },
+        "annotations": { "$ref": "#/definitions/map" }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": { "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "annotations": { "$ref": "#/definitions/map" }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "className": { "type": "string" },
+        "annotations": { "$ref": "#/definitions/map" },
+        "host": { "type": "string" },
+        "path": { "type": "string" },
+        "pathType": { "enum": ["Prefix", "Exact", "ImplementationSpecific"] },
+        "tlsSecretName": { "type": "string" }
+      }
+    },
+    "egress": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "existingSecret": { "type": "string" },
+        "secrets": { "type": "array", "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" } },
+        "config": { "$ref": "#/definitions/env" },
+        "sharedConfig": { "$ref": "#/definitions/env" },
+        "replicas": { "type": "integer", "minimum": 1 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65534 },
+        "listenHost": { "type": "string" },
+        "resources": { "$ref": "#/definitions/map" },
+        "runtimeClassName": { "type": "string" },
+        "priorityClassName": { "type": "string" },
+        "podAnnotations": { "$ref": "#/definitions/map" },
+        "podLabels": { "$ref": "#/definitions/map" },
+        "nodeSelector": { "$ref": "#/definitions/map" },
+        "tolerations": { "$ref": "#/definitions/list" },
+        "affinity": { "$ref": "#/definitions/map" },
+        "podSecurityContext": { "$ref": "#/definitions/podSecurity" },
+        "securityContext": { "$ref": "#/definitions/map" },
+        "extraEnv": { "$ref": "#/definitions/list" },
+        "extraVolumes": { "$ref": "#/definitions/list" },
+        "extraVolumeMounts": { "$ref": "#/definitions/list" }
+      }
+    },
+    "secrets": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": { "type": "boolean" },
+        "agent": { "$ref": "#/definitions/env" },
+        "egress": { "$ref": "#/definitions/env" }
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string" },
+        "annotations": { "$ref": "#/definitions/map" },
+        "automountServiceAccountToken": { "type": "boolean" }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "ingressFrom": { "$ref": "#/definitions/list" },
+        "agentDirectEgress": { "type": "boolean" },
+        "dns": {
+          "type": "object",
+          "properties": {
+            "namespaceSelector": { "$ref": "#/definitions/map" },
+            "podSelector": { "$ref": "#/definitions/map" }
+          }
+        },
+        "privateCidrs": { "type": "array", "items": { "type": "string" } },
+        "extraAgentEgress": { "$ref": "#/definitions/list" },
+        "extraEgressProxyEgress": { "$ref": "#/definitions/list" }
+      }
+    },
+    "tests": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "enabled": { "type": "boolean" } }
+    },
+    "extraObjects": { "type": "array", "items": { "type": ["object", "string"] } }
+  }
+}
