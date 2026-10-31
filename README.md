@@ -348,7 +348,7 @@ A variable replaces any value written into `config.yaml` by hand, and removing t
 
 ### Opening the bot to a whole workspace
 
-The agent has shell and file tools and runs as root, and `/data/.hermes/.env` holds the wallet key and API keys. Before allowing everyone (`SLACK_ALLOW_ALL_USERS=true`), turn those tools off. The wallet, x402, A2A, and ERC-8004 tools are plugins and keep working:
+The agent has shell and file tools (it runs as uid 10001, not root), and `/data/.hermes/.env` holds the wallet key and API keys. Before allowing everyone (`SLACK_ALLOW_ALL_USERS=true`), turn those tools off. The wallet, x402, A2A, and ERC-8004 tools are plugins and keep working:
 
 ```
 HERMES_DISABLED_TOOLSETS=terminal,file,code_execution,delegation,cronjob

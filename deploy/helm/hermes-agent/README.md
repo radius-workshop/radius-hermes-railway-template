@@ -54,8 +54,8 @@ These work on every cluster and pass the `restricted` Pod Security Standard:
 - no ServiceAccount token, no service-link environment variables
 - real secrets only in Secrets; with the egress proxy, provider keys exist only in the egress pod
 
-The image still runs as root by default so Railway's root-owned volumes keep
-working. The chart sets the UID.
+The image itself runs as uid 10001 (`USER 10001:10001`); nothing in it runs as
+root. The chart sets the same UID explicitly so `runAsNonRoot` can be verified.
 
 ## Configuration
 
@@ -129,7 +129,7 @@ instead. Each row needs values only, not a fork:
 
 ## Moving from Railway
 
-1. Copy `/data` from the Railway service (for example `tar` over `railway ssh`) into the PVC. One way is to install with `persistence.existingClaim` pointing at a PVC you've restored. The wallet keystore under `/data/.hermes/.radius-cli` is the agent's on-chain identity, so copy it intact. Files owned by root are fine: `fsGroupChangePolicy: OnRootMismatch` hands them to gid 10001 on first mount, where the storage driver supports `fsGroup`.
+1. Copy `/data` from the Railway service (for example `tar` over `railway ssh`) into the PVC. One way is to install with `persistence.existingClaim` pointing at a PVC you've restored. The wallet keystore under `/data/.hermes/.radius-cli` is the agent's on-chain identity, so copy it intact. Files owned by root are fine: `fsGroupChangePolicy: OnRootMismatch` hands them to gid 10001 on first mount, where the storage driver supports `fsGroup`. Otherwise `chown -R 10001:10001` them before mounting.
 2. Keep the same public domain. The `did:web` identity is derived from `PUBLIC_URL`, and peers trust that DID through `TRUSTED_DIDS`.
 3. Move Railway Variables: credentials into the Secret, everything else into `agent.config`. Don't set `PORT`, `PUBLIC_URL`, `EGRESS_PROXY_URL` or `EGRESS_SECRETS`, because the chart manages them.
 4. Stop the Railway service before starting the chart, so two gateways never run at once.

@@ -11,6 +11,17 @@ export HERMES_HOME="${HERMES_HOME:-/data/.hermes}"
 export HOME="${HOME:-/data}"
 export MESSAGING_CWD="${MESSAGING_CWD:-/data/workspace}"
 
+# The image runs as uid 10001, never root, so the data volume must be writable
+# by that user. Fail with a fix instead of a later "Permission denied".
+data_root="$(dirname "${HERMES_HOME}")"
+if ! mkdir -p "${HERMES_HOME}" 2>/dev/null || [[ ! -w "${HERMES_HOME}" ]]; then
+  echo "[bootstrap] ERROR: ${HERMES_HOME} is not writable by uid $(id -u). The container runs as uid 10001," >&2
+  echo "[bootstrap] ERROR: so ${data_root} must be owned by or writable for uid/gid 10001: on Kubernetes set" >&2
+  echo "[bootstrap] ERROR: fsGroup 10001 (the Helm chart does); for Docker, chown the volume to 10001:10001." >&2
+  exit 1
+fi
+unset data_root
+
 INIT_MARKER="${HERMES_HOME}/.initialized"
 ENV_FILE="${HERMES_HOME}/.env"
 CONFIG_FILE="${HERMES_HOME}/config.yaml"
