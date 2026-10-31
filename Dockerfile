@@ -94,10 +94,12 @@ RUN curl -fsSL https://foundry.paradigm.xyz | bash \
   && /opt/foundry/bin/foundryup --install "${FOUNDRY_VERSION}"
 
 # Install ByteRover before HOME is remapped to /data so it lands in /root/.local/bin.
-# /root is made traversable (not listable) so a non-root UID can run it.
+# /root is made traversable (not listable) so a non-root UID can run it. The
+# install's exit status is not checked (no pipefail), so tolerate a missing
+# /root/.local rather than fail the build differently from before.
 RUN curl -fsSL https://byterover.dev/install.sh | sh \
   && chmod 0711 /root \
-  && chmod -R go+rX /root/.local
+  && if [ -d /root/.local ]; then chmod -R go+rX /root/.local; fi
 
 # Railway runs the image as root (its volumes are root-owned). Kubernetes runs it
 # as this UID with fsGroup on /data; see deploy/helm/hermes-agent.
