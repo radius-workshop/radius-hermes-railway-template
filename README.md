@@ -178,6 +178,26 @@ If `LINEAR_API_KEY` is set, these are useful immediately:
 - *"Create a Linear issue for improving Railway observability."*
 - *"Summarize open issues related to A2A or logging."*
 
+## Kubernetes (Helm)
+
+The same image also runs on any Kubernetes cluster through the chart in
+[deploy/helm/hermes-agent](deploy/helm/hermes-agent/README.md). The chart
+deploys a single-replica StatefulSet with a persistent `/data` volume, an
+optional egress proxy, an optional Ingress and optional NetworkPolicies. It
+uses core Kubernetes objects only. Pods run as uid 10001 with a read-only root
+filesystem and pass the `restricted` Pod Security Standard. Credentials come
+from a Secret you provide, so any secret manager works.
+
+```sh
+kubectl create secret generic hermes-agent \
+  --from-literal=OPENROUTER_API_KEY=... --from-literal=TELEGRAM_BOT_TOKEN=...
+helm install hermes deploy/helm/hermes-agent -f deploy/helm/hermes-agent/examples/minimal.yaml \
+  --set image.repository=<registry>/radius-hermes --set image.tag=<tag>
+```
+
+`scripts/test_helm_chart.sh` installs the chart on a local kind cluster and
+checks it end to end.
+
 ## Railway deploy instructions
 
 In Railway Template Composer:

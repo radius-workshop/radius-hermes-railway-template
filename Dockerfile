@@ -93,8 +93,17 @@ ENV FOUNDRY_DIR=/opt/foundry
 RUN curl -fsSL https://foundry.paradigm.xyz | bash \
   && /opt/foundry/bin/foundryup --install "${FOUNDRY_VERSION}"
 
-# Install ByteRover before HOME is remapped to /data so it lands in /root/.local/bin
-RUN curl -fsSL https://byterover.dev/install.sh | sh
+# Install ByteRover before HOME is remapped to /data so it lands in /root/.local/bin.
+# /root is made traversable (not listable) so a non-root UID can run it.
+RUN curl -fsSL https://byterover.dev/install.sh | sh \
+  && chmod 0711 /root \
+  && chmod -R go+rX /root/.local
+
+# Railway runs the image as root (its volumes are root-owned). Kubernetes runs it
+# as this UID with fsGroup on /data; see deploy/helm/hermes-agent.
+RUN groupadd --system --gid 10001 hermes \
+  && useradd --system --uid 10001 --gid 10001 --home-dir /data --no-create-home \
+    --shell /usr/sbin/nologin hermes
 
 ENV PATH="/root/.local/bin:/opt/foundry/bin:/opt/venv/bin:${PATH}" \
   PYTHONUNBUFFERED=1 \
