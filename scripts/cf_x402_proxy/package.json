@@ -1,0 +1,18 @@
+{
+  "name": "cf-x402-proxy",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local OpenAI-compatible proxy that pays Cloudflare AI Gateway inference per call over x402 (Base USDC) with radius-sdk",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node proxy.mjs",
+    "test": "node --test --test-timeout=30000 test/*.test.mjs"
+  },
+  "dependencies": {
+    "radius-sdk": "0.6.0",
+    "viem": "2.56.8"
+  }
+}
