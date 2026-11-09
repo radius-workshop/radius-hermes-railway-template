@@ -59,4 +59,35 @@ assert element["negative_button"]["value"] == "negative", element
 contract = subprocess.run([sys.executable, "-c", FEEDBACK_CONTRACT], cwd="/", capture_output=True, text=True)
 assert contract.returncode == 0, "Hermes Slack feedback contract changed; update plugins/feedback-ledger:\n" + contract.stderr
 
-print(f"Template {VERSION}: discovery, stable fixture identity, local auth and A2A denial verified")
+# The egress role's rendered config must load in the bundled iron-proxy.
+import socket
+import time
+
+sys.path.insert(0, "/app/scripts/egress")
+import iron_egress
+
+with tempfile.TemporaryDirectory(prefix="radius-hermes-egress-") as state:
+    cert, key = iron_egress.generate_ca()
+    proxy_env = {
+        "PATH": os.environ["PATH"], "HERMES_SERVICE_ROLE": "egress", "EGRESS_STATE_DIR": state,
+        "EGRESS_TOKEN_SEED": "smoke-" * 8, "EGRESS_CA_CERT": cert, "EGRESS_CA_KEY": key,
+        "EGRESS_SECRETS": "OPENROUTER_API_KEY,SLACK_BOT_TOKEN,SLACK_APP_TOKEN,TELEGRAM_BOT_TOKEN",
+        "OPENROUTER_API_KEY": "fixture", "SLACK_BOT_TOKEN": "fixture", "SLACK_APP_TOKEN": "fixture",
+        "TELEGRAM_BOT_TOKEN": "fixture", "EGRESS_LISTEN_HOST": "127.0.0.1",
+    }
+    proc = subprocess.Popen(["/app/scripts/entrypoint.sh"], env=proxy_env)
+    try:
+        for _ in range(50):
+            assert proc.poll() is None, "iron-proxy exited; rendered config rejected"
+            try:
+                socket.create_connection(("127.0.0.1", iron_egress.DEFAULT_PORT), timeout=0.5).close()
+                break
+            except OSError:
+                time.sleep(0.2)
+        else:
+            raise AssertionError("iron-proxy did not listen on the tunnel port")
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+print(f"Template {VERSION}: discovery, stable fixture identity, local auth, A2A denial, Slack feedback contract and egress proxy verified")

@@ -1,0 +1,10 @@
+# Config-as-code for the egress proxy service. In that service's Settings,
+# set "Railway Config File" to /railway.egress.toml. It runs the same image
+# as the agent, starts iron-proxy instead of Hermes, and needs no volume and
+# no public domain: the agent reaches it over the private network.
+[build]
+builder = "dockerfile"
+
+[deploy]
+startCommand = "python3 /app/scripts/egress/iron_egress.py proxy"
+restartPolicyType = "always"

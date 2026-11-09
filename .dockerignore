@@ -1,6 +1,7 @@
 .git
 .gitignore
 railway.toml
+railway.egress.toml
 node_modules
 venv
 .venv
