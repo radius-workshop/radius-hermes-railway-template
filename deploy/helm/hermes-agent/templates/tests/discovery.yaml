@@ -1,0 +1,58 @@
+{{- if .Values.tests.enabled }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "hermes.fullname" . }}-test-discovery
+  labels:
+    {{- include "hermes.labels" . | nindent 4 }}
+    {{- include "hermes.selectorLabels" (dict "root" . "component" "test") | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: discovery
+      # The agent image already has Python; no extra image to pull or trust.
+      image: {{ include "hermes.image" . }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: [ALL]
+      env:
+        - name: BASE
+          value: {{ printf "http://%s:%d" (include "hermes.fullname" .) (int .Values.service.port) | quote }}
+      command:
+        - python3
+        - -c
+        - |
+          import json, os, urllib.request
+          base = os.environ["BASE"]
+          def get(path):
+              with urllib.request.urlopen(base + path, timeout=10) as r:
+                  assert r.status == 200, (path, r.status)
+                  return json.load(r)
+          assert get("/livez")["status"] == "ok"
+          card = get("/.well-known/agent-card.json")
+          assert card.get("name") and card.get("version"), card
+          did = get("/.well-known/did.json")
+          assert did["id"].startswith("did:web:"), did
+          print("ok:", card["name"], card["version"], did["id"])
+      resources:
+        requests: { cpu: 10m, memory: 32Mi }
+        limits: { memory: 128Mi }
+{{- end }}

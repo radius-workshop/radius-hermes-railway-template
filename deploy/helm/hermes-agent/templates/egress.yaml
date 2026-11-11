@@ -1,0 +1,124 @@
+{{- if .Values.egress.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "hermes.egressName" . }}
+  labels:
+    {{- include "hermes.labels" . | nindent 4 }}
+    app.kubernetes.io/component: egress
+spec:
+  replicas: {{ .Values.egress.replicas }}
+  selector:
+    matchLabels:
+      {{- include "hermes.selectorLabels" (dict "root" . "component" "egress") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "hermes.labels" . | nindent 8 }}
+        {{- include "hermes.selectorLabels" (dict "root" . "component" "egress") | nindent 8 }}
+        {{- with .Values.egress.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if .Values.secrets.create }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.egress.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "hermes.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      enableServiceLinks: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.egress.runtimeClassName }}
+      runtimeClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.egress.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.egress.podSecurityContext | nindent 8 }}
+      containers:
+        - name: egress
+          image: {{ include "hermes.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.egress.securityContext | nindent 12 }}
+          ports:
+            - name: connect
+              containerPort: {{ .Values.egress.port }}
+              protocol: TCP
+            - name: http-forward
+              containerPort: {{ add1 .Values.egress.port }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "hermes.egressName" . }}
+            - secretRef:
+                name: {{ include "hermes.egressSecretName" . }}
+          {{- with .Values.egress.extraEnv }}
+          env:
+            {{- tpl (toYaml .) $ | nindent 12 }}
+          {{- end }}
+          readinessProbe:
+            tcpSocket:
+              port: connect
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: connect
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.egress.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- with .Values.egress.extraVolumeMounts }}
+            {{- tpl (toYaml .) $ | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        {{- with .Values.egress.extraVolumes }}
+        {{- tpl (toYaml .) $ | nindent 8 }}
+        {{- end }}
+      {{- with .Values.egress.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.egress.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.egress.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "hermes.egressName" . }}
+  labels:
+    {{- include "hermes.labels" . | nindent 4 }}
+    app.kubernetes.io/component: egress
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "hermes.selectorLabels" (dict "root" . "component" "egress") | nindent 4 }}
+  ports:
+    - name: connect
+      port: {{ .Values.egress.port }}
+      targetPort: connect
+      protocol: TCP
+    - name: http-forward
+      port: {{ add1 .Values.egress.port }}
+      targetPort: http-forward
+      protocol: TCP
+{{- end }}

@@ -1,0 +1,215 @@
+# Default values for hermes-agent. Every key is documented in README.md.
+#
+# The chart never holds real secrets by default: point agent.existingSecret
+# (and egress.existingSecret) at Secrets you create however you like —
+# kubectl, Sealed Secrets, External Secrets, Vault, a cloud CSI driver.
+
+image:
+  repository: ghcr.io/radius-workshop/radius-hermes-railway-template
+  # Defaults to the chart's appVersion.
+  tag: ""
+  # sha256:... — when set, the image is pulled by digest and tag is ignored.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# PUBLIC_URL: the agent's public base URL. The did:web identity, agent card and
+# discovery links derive from it. Empty: https://<ingress.host> when the ingress
+# is enabled, otherwise the app falls back to http://localhost:<port>.
+publicUrl: ""
+
+agent:
+  # Secret loaded with envFrom: provider keys, bot tokens, JWT_API_KEY, ...
+  # Required unless secrets.create is true.
+  existingSecret: ""
+  # Non-secret settings, rendered into a ConfigMap and loaded with envFrom.
+  # Keys with empty values are dropped (Hermes fails on empty integer vars).
+  config: {}
+  #  TELEGRAM_ALLOWED_USERS: "123456789"
+  #  LLM_MODEL: openai/gpt-5.4-nano
+  extraEnv: []
+  extraEnvFrom: []
+  port: 3000
+  resources:
+    requests:
+      cpu: 250m
+      memory: 1Gi
+      ephemeral-storage: 1Gi
+    limits:
+      memory: 4Gi
+      ephemeral-storage: 4Gi
+  # Size of the /tmp emptyDir (the root filesystem is read-only).
+  tmpSizeLimit: 1Gi
+  # e.g. gvisor or kata, where the cluster provides them.
+  runtimeClassName: ""
+  priorityClassName: ""
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  terminationGracePeriodSeconds: 60
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+  # First boot creates the wallet, requests a faucet drip and scans skills
+  # before the HTTP server starts, so allow up to 10 minutes.
+  startupProbe:
+    httpGet: { path: /livez, port: http }
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 120
+  livenessProbe:
+    httpGet: { path: /livez, port: http }
+    periodSeconds: 20
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readinessProbe:
+    httpGet: { path: /livez, port: http }
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  extraVolumes: []
+  extraVolumeMounts: []
+  initContainers: []
+  extraContainers: []
+
+persistence:
+  # Without persistence, the wallet, identity and Hermes state are lost on
+  # every restart. Keep this on outside throwaway tests.
+  enabled: true
+  # Use an existing PVC, e.g. one restored from a Railway /data backup.
+  existingClaim: ""
+  storageClass: ""
+  accessModes: [ReadWriteOnce]
+  size: 10Gi
+  annotations: {}
+
+service:
+  type: ClusterIP
+  port: 3000
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: ""
+  path: /
+  pathType: Prefix
+  # Name of the TLS Secret for host (e.g. created by cert-manager). Empty: no TLS block.
+  tlsSecretName: ""
+
+# Egress proxy with secret injection (iron-proxy): see README.md "Egress proxy".
+egress:
+  enabled: false
+  # Secret holding EGRESS_TOKEN_SEED, EGRESS_CA_CERT, EGRESS_CA_KEY and the real
+  # value of every name in egress.secrets. Required when enabled, unless
+  # secrets.create is true. The agent's Secret holds EGRESS_TOKEN_SEED and
+  # EGRESS_CA_CERT only.
+  existingSecret: ""
+  # Names whose real values live only in the egress pod (EGRESS_SECRETS).
+  secrets: []
+  #  - OPENROUTER_API_KEY
+  #  - SLACK_BOT_TOKEN
+  #  - SLACK_APP_TOKEN
+  # Non-secret egress settings, e.g. EGRESS_ALLOWED_HOSTS, EGRESS_ALLOWLIST_WARN_ONLY.
+  config: {}
+  # Settings shared by both pods, e.g. EGRESS_CUSTOM_SECRETS or EGRESS_HOSTS_<NAME>.
+  sharedConfig: {}
+  replicas: 1
+  port: 9090
+  # iron-proxy listen address; [::] is dual-stack. Use 0.0.0.0 on IPv4-only nodes.
+  listenHost: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+  runtimeClassName: ""
+  priorityClassName: ""
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
+
+# For local testing only: render the Secrets from these maps. Values end up in
+# Helm's release history in the cluster; use existingSecret everywhere else.
+secrets:
+  create: false
+  agent: {}
+  egress: {}
+
+serviceAccount:
+  # One ServiceAccount shared by both pods. Add workload-identity annotations
+  # here (GKE, EKS IRSA, Azure).
+  create: true
+  name: ""
+  annotations: {}
+  # The app never calls the Kubernetes API.
+  automountServiceAccountToken: false
+
+# Standard NetworkPolicy objects. Off by default because not every CNI enforces
+# them; any CNI that does (Calico, Cilium, kindnet, ...) uses these as-is.
+networkPolicy:
+  enabled: false
+  # Peers allowed to reach the agent's HTTP port. Empty: any source (port-restricted).
+  # e.g. [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: ingress-nginx}}}]
+  ingressFrom: []
+  # Let the agent connect directly to public internet addresses (private,
+  # link-local and metadata ranges excluded). Needed for Discord and for Radius
+  # RPC, faucet and x402 traffic, which bypass the egress proxy. Set false with
+  # the egress proxy on to force everything else through it.
+  agentDirectEgress: true
+  # Pods running cluster DNS.
+  dns:
+    namespaceSelector: {}
+    podSelector:
+      matchLabels:
+        k8s-app: kube-dns
+  # CIDRs excluded from "public internet" egress rules.
+  privateCidrs:
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - 100.64.0.0/10
+    - 169.254.0.0/16
+  extraAgentEgress: []
+  extraEgressProxyEgress: []
+
+tests:
+  # helm test: checks /livez and the agent card from inside the cluster.
+  enabled: true
+
+# Extra manifests rendered with tpl, e.g. an ExternalSecret, SealedSecret,
+# SecretProviderClass, HTTPRoute or VolumeSnapshot. Strings or maps.
+extraObjects: []

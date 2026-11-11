@@ -93,8 +93,22 @@ ENV FOUNDRY_DIR=/opt/foundry
 RUN curl -fsSL https://foundry.paradigm.xyz | bash \
   && /opt/foundry/bin/foundryup --install "${FOUNDRY_VERSION}"
 
-# Install ByteRover before HOME is remapped to /data so it lands in /root/.local/bin
-RUN curl -fsSL https://byterover.dev/install.sh | sh
+# Install ByteRover before HOME is remapped to /data so it lands in /root/.local/bin.
+# /root is made traversable (not listable) so a non-root UID can run it. The
+# install's exit status is not checked (no pipefail), so tolerate a missing
+# /root/.local rather than fail the build differently from before.
+RUN curl -fsSL https://byterover.dev/install.sh | sh \
+  && chmod 0711 /root \
+  && if [ -d /root/.local ]; then chmod -R go+rX /root/.local; fi
+
+# The container runs as this unprivileged user, never root. /data is created
+# owned by it so new Docker volumes inherit that ownership; a volume mounted
+# root-owned must be handed to uid 10001 (Kubernetes: fsGroup).
+RUN groupadd --system --gid 10001 hermes \
+  && useradd --system --uid 10001 --gid 10001 --home-dir /data --no-create-home \
+    --shell /usr/sbin/nologin hermes \
+  && mkdir -p /data \
+  && chown 10001:10001 /data
 
 ENV PATH="/root/.local/bin:/opt/foundry/bin:/opt/venv/bin:${PATH}" \
   PYTHONUNBUFFERED=1 \
@@ -147,6 +161,8 @@ COPY scripts/build_info.py /app/scripts/build_info.py
 COPY scripts/smoke_image.py /app/scripts/smoke_image.py
 RUN python /app/scripts/build_info.py --revision "${VCS_REF}" \
   --radius-cli-version "${RADIUS_CLI_VERSION}" > /app/build-info.json
+
+USER 10001:10001
 
 ENTRYPOINT ["tini", "--"]
 CMD ["/app/scripts/entrypoint.sh"]

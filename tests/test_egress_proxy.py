@@ -105,6 +105,7 @@ class AgentSideTests(unittest.TestCase):
         self.assertEqual(exports["HTTP_PROXY"], "http://egress.railway.internal:9091")
         self.assertEqual(exports["https_proxy"], exports["HTTPS_PROXY"])
         self.assertIn(".railway.internal", exports["NO_PROXY"].split(","))
+        self.assertIn(".svc.cluster.local", exports["NO_PROXY"].split(","))
         self.assertIn(".radiustech.xyz", exports["NO_PROXY"].split(","))
         bundle = Path(exports["SSL_CERT_FILE"]).read_text()
         self.assertTrue(bundle.rstrip().endswith(_ca_pair()[0].strip()))
