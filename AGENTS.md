@@ -36,6 +36,6 @@ renders it when `helm` is installed. CI's `container` job also runs
 - Use Python 3.11, as CI and the image do. The system `python3` in cloud
   sessions is 3.13 with no dependencies, and pip can't install into it.
 - Image inputs are pinned in the `Dockerfile` (`HERMES_GIT_REF`,
-  the `node` stage image, `RADIUS_CLI_VERSION`, `FOUNDRY_VERSION`,
+  the `node` stage image, `RADIUS_CLI_VERSION`, `SBC_CLI_VERSION`, `FOUNDRY_VERSION`,
   `LINEAR_SKILL_REF`, `RADIUS_SKILLS_REF`). Bump them deliberately, one at a
   time.

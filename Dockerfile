@@ -67,6 +67,14 @@ RUN apt-get update \
   && npm install -g "radius-cli@${RADIUS_CLI_VERSION}" \
   && rm -rf /var/lib/apt/lists/*
 
+# sbc (npm @stablecoin.xyz/cli, from stablecoinxyz/sbc-cli) is the SBC Agent
+# Stack CLI: SBC Agent Payments and the Swap API. It is separate from the
+# radius-cli wallet and does nothing until an operator supplies SBC_* keys.
+# Dependency install scripts only build optional native websocket addons.
+ARG SBC_CLI_VERSION=0.5.0
+RUN npm install -g --ignore-scripts --no-fund --no-audit "@stablecoin.xyz/cli@${SBC_CLI_VERSION}" \
+  && test "$(sbc --version)" = "${SBC_CLI_VERSION}"
+
 # iron-proxy (ironsh/iron-proxy) powers the optional egress service
 # (HERMES_SERVICE_ROLE=egress). Same pin as Hermes' `hermes egress`; the
 # tarball is checked against the release's SHA-256 before extraction.
@@ -160,7 +168,8 @@ COPY plugins /app/plugins
 COPY scripts/build_info.py /app/scripts/build_info.py
 COPY scripts/smoke_image.py /app/scripts/smoke_image.py
 RUN python /app/scripts/build_info.py --revision "${VCS_REF}" \
-  --radius-cli-version "${RADIUS_CLI_VERSION}" > /app/build-info.json
+  --radius-cli-version "${RADIUS_CLI_VERSION}" \
+  --sbc-cli-version "${SBC_CLI_VERSION}" > /app/build-info.json
 
 USER 10001:10001
 
