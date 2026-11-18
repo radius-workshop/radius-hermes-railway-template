@@ -38,7 +38,7 @@ The tests run the real boot discovery and config registration against isolated f
 - Persistent Hermes state on a Railway volume at `/data`
 - Telegram, Discord, or Slack support (at least one required)
 - Built-in Radius Testnet wallet (instantiated via radius-cli on first boot, auto-funded via faucet)
-- [SBC Agent Stack CLI](https://github.com/stablecoinxyz/sbc-cli) (`sbc`, npm `@stablecoin.xyz/cli`) preinstalled for SBC Agent Payments and the Swap API; inactive until you set `SBC_*` keys
+- [SBC Agent Stack CLI](https://github.com/stablecoinxyz/sbc-cli) (`sbc`, npm `@stablecoin.xyz/cli`) preinstalled and signing with the same Radius wallet, so the agent can quote, swap and bridge SBC with no setup
 - Agent discovery layer served at `/.well-known/*` — ERC 8004 registration, Cloudflare agent skills discovery, and A2A agent card
 - Agent-to-agent (A2A) communication with two execution modes: direct (inline `message/send` + `message/stream`) and delegated (webhook-backed async submission)
 - Persistent cryptographic identity derived from the radius-cli wallet keystore; exported key material is used for JWT and on-chain signing paths
@@ -746,20 +746,29 @@ Safe update workflow: dry-run the intended specialized tool, inspect the diff, s
 
 The radius-cli keystore is stored under `${RADIUS_HOME}` with restricted permissions and persists across redeploys via the Railway volume.
 
-### SBC CLI variables (all optional)
+### SBC CLI (`sbc`)
 
-The image also ships `sbc`, the [SBC Agent Stack CLI](https://github.com/stablecoinxyz/sbc-cli) (npm `@stablecoin.xyz/cli`, pinned with the `SBC_CLI_VERSION` build arg). It talks to [SBC Agent Payments](https://agents.stablecoin.xyz) and the SBC Swap API. It has its own account and wallet, separate from the radius-cli wallet, and does nothing until you give it a key. The variables below are the common ones; the CLI's README lists the rest.
+The image also ships `sbc`, the [SBC Agent Stack CLI](https://github.com/stablecoinxyz/sbc-cli) (npm `@stablecoin.xyz/cli`, pinned with the `SBC_CLI_VERSION` build arg). It works on the first deploy with no variables set: `sbc` signs with the agent's Radius wallet.
+
+- **Same wallet.** `sbc` reads the radius-cli keystore in `${RADIUS_HOME}` directly, so `sbc key show` prints the address `radius-cli wallet address` does. The key is not copied or put in the environment. This covers the Swap API commands: `sbc swap`, `sbc swap quote`, `sbc swap balance`, `sbc swap routes` and `sbc gas`, on Radius and Base.
+- **Same network.** With the default `RADIUS_NETWORK=testnet`, `sbc` uses the testnet Swap API (Radius Testnet, Base Sepolia). With `RADIUS_NETWORK=mainnet` it uses mainnet, where the CLI refuses to sign unattended until you set `SBC_SWAP_ALLOW_MAINNET=1`, and then caps spending at 100 USD per swap and 500 USD per day unless you set other caps.
+- **Agent Payments is separate.** `sbc balance`, `sbc pay`, `sbc send`, `sbc agent …` and `sbc endpoint …` use a managed wallet on [SBC Agent Payments](https://agents.stablecoin.xyz), not the Radius wallet. They need `SBC_AGENT_KEY` or `SBC_USER_KEY` from that dashboard.
+
+Ask the agent, for example: *"Run `sbc key show`"*, *"What are my sbc swap balances?"* or *"Quote swapping 1 SBC from Radius to Base with sbc"*.
+
+All of these are optional. The CLI's README lists the rest.
 
 | Variable | Description |
 |---|---|
+| `SBC_USE_RADIUS_WALLET` | Set to `false` to stop `sbc` from using the Radius wallet and network. Default: enabled. |
+| `SBC_EVM_KEYSTORE` / `SBC_EVM_KEY_FILE` / `SBC_EVM_PRIVATE_KEY` | A different signing wallet for `sbc`. Setting one replaces the Radius wallet. |
+| `SBC_SWAP_NET` | `testnet` or `mainnet` for Swap API commands. Default: follows `RADIUS_NETWORK`. |
+| `SBC_SWAP_ALLOW_MAINNET` | `1` lets the agent sign mainnet swaps unattended. Leave unset unless you intend that. |
+| `SBC_SWAP_MAX_PER_SWAP` / `SBC_SWAP_MAX_DAILY` | USD caps per swap and per rolling 24 hours. They apply on testnet too once set. |
 | `SBC_AGENT_KEY` | Agent API key (`sk_live_…`) for `sbc balance`, `sbc pay` and `sbc send`. |
 | `SBC_USER_KEY` | User API key (`sk_user_…`) for `sbc agent …`, `sbc endpoint …` and `sbc transactions`. |
-| `SBC_EVM_KEYSTORE` / `SBC_EVM_KEYSTORE_PASSWORD_FILE` | Encrypted keystore and password file for `sbc swap` and `sbc gas` on Base and Radius. |
-| `SBC_SWAP_NET` | `testnet` makes testnet the default for Swap API commands. |
-| `SBC_SWAP_ALLOW_MAINNET` | `1` lets the agent sign mainnet swaps unattended. Leave unset unless you intend that. |
-| `SBC_SWAP_MAX_PER_SWAP` / `SBC_SWAP_MAX_DAILY` | USD caps per swap and per rolling 24 hours. |
 
-Keys saved with `sbc login` and the swap ledger live under `/data/.sbc`, so they persist on the Railway volume. With the egress proxy, `SBC_*` keys stay on the agent service: like radius-cli, `sbc` connects directly.
+The swap ledger and any keys saved with `sbc login` live under `/data/.sbc`, on the Railway volume. With the egress proxy, `SBC_*` keys stay on the agent service: like radius-cli, `sbc` connects directly. If you gave the radius-cli keystore a password, also set `SBC_EVM_KEYSTORE_PASSWORD_FILE`; `sbc` cannot unlock it otherwise.
 
 ### Wallet commands (via chat)
 

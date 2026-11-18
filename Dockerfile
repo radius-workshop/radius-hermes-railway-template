@@ -66,12 +66,14 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 # sbc (npm @stablecoin.xyz/cli, from stablecoinxyz/sbc-cli) is the SBC Agent
-# Stack CLI: SBC Agent Payments and the Swap API. It is separate from the
-# radius-cli wallet and does nothing until an operator supplies SBC_* keys.
+# Stack CLI: the Swap API with the agent's own wallet, and SBC Agent Payments.
+# npm's `sbc` link is removed: scripts/sbc-wrapper.sh is installed as `sbc`
+# below and points the CLI at the radius-cli wallet.
 # Dependency install scripts only build optional native websocket addons.
 ARG SBC_CLI_VERSION=0.5.0
 RUN npm install -g --ignore-scripts --no-fund --no-audit "@stablecoin.xyz/cli@${SBC_CLI_VERSION}" \
-  && test "$(sbc --version)" = "${SBC_CLI_VERSION}"
+  && rm /usr/local/bin/sbc \
+  && test "$(node /usr/local/lib/node_modules/@stablecoin.xyz/cli/dist/index.js --version)" = "${SBC_CLI_VERSION}"
 
 # iron-proxy (ironsh/iron-proxy) powers the optional egress service
 # (HERMES_SERVICE_ROLE=egress). Same pin as Hermes' `hermes egress`; the
@@ -120,6 +122,8 @@ WORKDIR /app
 COPY VERSION /app/VERSION
 COPY scripts/entrypoint.sh /app/scripts/entrypoint.sh
 RUN sed -i 's/\r$//' /app/scripts/entrypoint.sh && chmod +x /app/scripts/entrypoint.sh
+COPY scripts/sbc-wrapper.sh /usr/local/bin/sbc
+RUN sed -i 's/\r$//' /usr/local/bin/sbc && chmod 755 /usr/local/bin/sbc
 
 COPY scripts/godaddy /app/scripts/godaddy
 COPY scripts/egress /app/scripts/egress
