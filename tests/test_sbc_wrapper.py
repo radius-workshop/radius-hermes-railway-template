@@ -1,6 +1,5 @@
 """The `sbc` wrapper points the SBC CLI at the agent's Radius wallet by default
 and never overrides what the operator set."""
-import json
 import os
 from pathlib import Path
 import subprocess
@@ -26,9 +25,10 @@ class SbcWrapperTests(unittest.TestCase):
         )
         self.stub.chmod(0o755)
 
-    def wallet(self, passwordless=True):
+    def wallet(self, locked=False):
         (self.home / "keystore.json").write_text('{"version": 3}')
-        (self.home / "config.json").write_text(json.dumps({"passwordless": passwordless}))
+        # radius-cli marks a keystore that has no password; no secret is stored here.
+        (self.home / "config.json").write_text("{}" if locked else '{"passwordless": true}')
 
     def run_wrapper(self, *args, **env):
         result = subprocess.run(
@@ -68,7 +68,7 @@ class SbcWrapperTests(unittest.TestCase):
         self.assertEqual(seen["SBC_SWAP_NET"], "mainnet")
 
     def test_password_protected_keystore_stays_locked(self):
-        self.wallet(passwordless=False)
+        self.wallet(locked=True)
         seen = self.run_wrapper()
         self.assertIn("SBC_EVM_KEYSTORE", seen)
         self.assertNotIn("SBC_EVM_KEYSTORE_PASSWORD_FILE", seen)
