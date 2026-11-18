@@ -224,6 +224,9 @@ mkdir -p "${RADIUS_HOME}"
 export RADIUS_HOME
 # radius-cli defaults to mainnet; this template defaults to testnet.
 export RADIUS_NETWORK="${RADIUS_NETWORK:-testnet}"
+# Recorded for the `sbc` wrapper, which follows the wallet's network in shells
+# that do not inherit this environment.
+printf '%s\n' "$RADIUS_NETWORK" > "${RADIUS_HOME}/network" || true
 # radius-cli treats an empty override as set, so drop blank ones.
 for key in RADIUS_RPC_URL RADIUS_SBC_ADDRESS; do
   val="${!key:-}"
