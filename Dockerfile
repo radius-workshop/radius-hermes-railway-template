@@ -104,11 +104,13 @@ RUN curl -fsSL https://foundry.paradigm.xyz | bash \
   && /opt/foundry/bin/foundryup --install "${FOUNDRY_VERSION}"
 
 # Install ByteRover before HOME is remapped to /data so it lands in /root/.local/bin.
-# /root is made traversable (not listable) so a non-root UID can run it. The
-# install's exit status is not checked (no pipefail), so tolerate a missing
-# /root/.local rather than fail the build differently from before.
-RUN curl -fsSL https://byterover.dev/install.sh | sh \
-  && chmod 0711 /root \
+# /root is made traversable (not listable) so a non-root UID can run it.
+# ByteRover is optional, and its installer is an unpinned third-party script:
+# when it fails (a download error, or the URL serving something that is not a
+# script) the build warns and goes on without `brv`.
+RUN { curl -fsSL https://byterover.dev/install.sh | sh; } \
+    || echo "WARNING: ByteRover install failed; this image has no brv" >&2; \
+  chmod 0711 /root \
   && if [ -d /root/.local ]; then chmod -R go+rX /root/.local; fi
 
 # The container runs as this unprivileged user, never root. /data is created
