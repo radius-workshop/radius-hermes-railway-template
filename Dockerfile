@@ -67,6 +67,16 @@ RUN apt-get update \
   && npm install -g "radius-cli@${RADIUS_CLI_VERSION}" \
   && rm -rf /var/lib/apt/lists/*
 
+# sbc (npm @stablecoin.xyz/cli, from stablecoinxyz/sbc-cli) is the SBC Agent
+# Stack CLI: the Swap API with the agent's own wallet, and SBC Agent Payments.
+# npm's `sbc` link is removed: scripts/sbc-wrapper.sh is installed as `sbc`
+# below and points the CLI at the radius-cli wallet.
+# Dependency install scripts only build optional native websocket addons.
+ARG SBC_CLI_VERSION=0.5.0
+RUN npm install -g --ignore-scripts --no-fund --no-audit "@stablecoin.xyz/cli@${SBC_CLI_VERSION}" \
+  && rm /usr/local/bin/sbc \
+  && test "$(node /usr/local/lib/node_modules/@stablecoin.xyz/cli/dist/index.js --version)" = "${SBC_CLI_VERSION}"
+
 # iron-proxy (ironsh/iron-proxy) powers the optional egress service
 # (HERMES_SERVICE_ROLE=egress). Same pin as Hermes' `hermes egress`; the
 # tarball is checked against the release's SHA-256 before extraction.
@@ -94,11 +104,13 @@ RUN curl -fsSL https://foundry.paradigm.xyz | bash \
   && /opt/foundry/bin/foundryup --install "${FOUNDRY_VERSION}"
 
 # Install ByteRover before HOME is remapped to /data so it lands in /root/.local/bin.
-# /root is made traversable (not listable) so a non-root UID can run it. The
-# install's exit status is not checked (no pipefail), so tolerate a missing
-# /root/.local rather than fail the build differently from before.
-RUN curl -fsSL https://byterover.dev/install.sh | sh \
-  && chmod 0711 /root \
+# /root is made traversable (not listable) so a non-root UID can run it.
+# ByteRover is optional, and its installer is an unpinned third-party script:
+# when it fails (a download error, or the URL serving something that is not a
+# script) the build warns and goes on without `brv`.
+RUN { curl -fsSL https://byterover.dev/install.sh | sh; } \
+    || echo "WARNING: ByteRover install failed; this image has no brv" >&2; \
+  chmod 0711 /root \
   && if [ -d /root/.local ]; then chmod -R go+rX /root/.local; fi
 
 # The container runs as this unprivileged user, never root. /data is created
@@ -122,6 +134,8 @@ WORKDIR /app
 COPY VERSION /app/VERSION
 COPY scripts/entrypoint.sh /app/scripts/entrypoint.sh
 RUN sed -i 's/\r$//' /app/scripts/entrypoint.sh && chmod +x /app/scripts/entrypoint.sh
+COPY scripts/sbc-wrapper.sh /usr/local/bin/sbc
+RUN sed -i 's/\r$//' /usr/local/bin/sbc && chmod 755 /usr/local/bin/sbc
 
 COPY scripts/godaddy /app/scripts/godaddy
 COPY scripts/egress /app/scripts/egress
@@ -160,7 +174,8 @@ COPY plugins /app/plugins
 COPY scripts/build_info.py /app/scripts/build_info.py
 COPY scripts/smoke_image.py /app/scripts/smoke_image.py
 RUN python /app/scripts/build_info.py --revision "${VCS_REF}" \
-  --radius-cli-version "${RADIUS_CLI_VERSION}" > /app/build-info.json
+  --radius-cli-version "${RADIUS_CLI_VERSION}" \
+  --sbc-cli-version "${SBC_CLI_VERSION}" > /app/build-info.json
 
 USER 10001:10001
 

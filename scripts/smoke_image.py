@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Check the built HTTP server with an isolated, unfunded fixture identity."""
+import json
 import os
 from pathlib import Path
 import sys
@@ -58,6 +59,12 @@ assert element["negative_button"]["value"] == "negative", element
 """
 contract = subprocess.run([sys.executable, "-c", FEEDBACK_CONTRACT], cwd="/", capture_output=True, text=True)
 assert contract.returncode == 0, "Hermes Slack feedback contract changed; update plugins/feedback-ledger:\n" + contract.stderr
+
+# `sbc` is the wrapper around the pinned SBC CLI; it must start as the runtime user.
+build_info = json.loads(Path("/app/build-info.json").read_text())
+sbc_version = subprocess.run(["sbc", "--version"], capture_output=True, text=True)
+assert sbc_version.returncode == 0, "sbc did not start:\n" + sbc_version.stderr
+assert sbc_version.stdout.strip() == build_info["sbc_cli_version"], sbc_version.stdout
 
 # The egress role's rendered config must load in the bundled iron-proxy.
 import socket
