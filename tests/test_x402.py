@@ -63,6 +63,43 @@ class PaymentBoundaryTests(unittest.TestCase):
             self.assertEqual(x.x402_request({**self.params, 'max_amount': '1'})['outcome'], 'refused')
             pay.assert_not_called()
 
+    def test_no_operator_cap_uses_exact_quote_without_a_hidden_ceiling(self):
+        atomic = str(2**256 - 1)
+        expected = x.Decimal(atomic[:-6] + '.' + atomic[-6:])
+        for setting in [None, '', 'unlimited']:
+            with self.subTest(setting=setting), patch.dict(os.environ), \
+                    patch.object(x, '_send', return_value=response(offers=[offer(amount=atomic)])), \
+                    patch.object(x, '_pay_radius_cli', return_value={'status': 200}) as pay:
+                if setting is None:
+                    os.environ.pop('X402_MAX_PER_CALL', None)
+                else:
+                    os.environ['X402_MAX_PER_CALL'] = setting
+                result = x.x402_request(self.params)
+                self.assertEqual(result['outcome'], 'payment_unknown')
+                pay.assert_called_once()
+                self.assertEqual(pay.call_args.args[4], expected)
+                self.assertEqual(result['amount_atomic'], atomic)
+
+    def test_request_limit_still_applies_without_operator_cap(self):
+        with patch.dict(os.environ, {'X402_MAX_PER_CALL': 'unlimited'}), \
+                patch.object(x, '_send', return_value=response(offers=[offer(amount='20000')])), \
+                patch.object(x, '_pay_radius_cli') as pay:
+            result = x.x402_request({**self.params, 'max_amount': '0.01'})
+        self.assertEqual(result['outcome'], 'refused')
+        pay.assert_not_called()
+
+    def test_unlimited_wallet_status_reports_no_cap(self):
+        with patch.dict(os.environ, {'X402_MAX_PER_CALL': 'unlimited'}), \
+                patch.object(x, '_run_radius_cli', return_value={}):
+            self.assertIsNone(x.x402_wallet_status({})['max_per_call'])
+
+    def test_benchmark_keeps_its_requested_budget_without_operator_cap(self):
+        with patch.dict(os.environ, {'X402_MAX_PER_CALL': 'unlimited'}), \
+                patch('template_x402.benchmark.x402_request', return_value={'outcome': 'settlement_reported'}) as request:
+            result = x402_benchmark({'url': self.params['url'], 'calls': 2, 'budget': '0.04'})
+        self.assertEqual(result['authorization_bound_sbc'], '0.040000')
+        self.assertEqual(request.call_args.args[0]['max_amount'], '0.020000')
+
     def test_mainnet_base_and_malformed_challenges_never_sign(self):
         bad = [offer(network='eip155:723487'), offer(network='eip155:84532'), offer(asset='0x'+'2'*40),
                offer(amount='-1'), offer(amount='0'), offer(amount='1.5'), offer(amount=100), offer(amount=str(2**256)),
@@ -108,6 +145,39 @@ class PaymentBoundaryTests(unittest.TestCase):
         self.assertEqual(connect.call_args.args[0], ('8.8.4.4', 443))
         context.wrap_socket.assert_called_once_with(wire, server_hostname='seller.example')
 
+    def test_public_host_mode_quotes_unlisted_sellers_without_signing(self):
+        with patch.dict(os.environ, {'X402_ALLOWED_HOSTS': '*'}), \
+                patch.object(x, '_send', return_value=response()) as send, \
+                patch.object(x, '_pay_radius_cli') as pay:
+            result = x.x402_request({'url': 'https://new-seller.example/paid', 'dry_run': True})
+        self.assertEqual(result['outcome'], 'quoted')
+        send.assert_called_once()
+        pay.assert_not_called()
+
+    def test_public_host_mode_preserves_payment_cap(self):
+        with patch.dict(os.environ, {'X402_ALLOWED_HOSTS': '*'}), \
+                patch.object(x, '_send', return_value=response(offers=[offer(amount='20000')])), \
+                patch.object(x, '_pay_radius_cli') as pay:
+            result = x.x402_request({'url': 'https://new-seller.example/paid', 'max_amount': '1'})
+        self.assertEqual(result['outcome'], 'refused')
+        pay.assert_not_called()
+
+    def test_public_host_mode_still_rejects_unsafe_urls_and_addresses(self):
+        with patch.dict(os.environ, {'X402_ALLOWED_HOSTS': '*'}):
+            for url in ['http://new-seller.example/', 'https://new-seller.example:8443/',
+                        'https://user:pass@new-seller.example/', 'https://new-seller.example/#fragment']:
+                with self.subTest(url=url), patch.object(x, '_send') as send:
+                    self.assertEqual(x.x402_request({'url': url})['outcome'], 'error')
+                    send.assert_not_called()
+            for addresses in [['127.0.0.1'], ['10.0.0.1'], ['169.254.169.254'],
+                              ['::1'], ['fd12::1'], ['8.8.8.8', '10.0.0.1']]:
+                resolved = [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (ip, 443)) for ip in addresses]
+                with self.subTest(addresses=addresses), \
+                        patch.object(socket, 'getaddrinfo', return_value=resolved), \
+                        patch.object(x, '_send') as send:
+                    self.assertEqual(x.x402_request({'url': 'https://new-seller.example/'})['outcome'], 'error')
+                    send.assert_not_called()
+
     def test_dry_run_and_bad_body_or_headers_do_not_sign(self):
         for extra in [{'dry_run': 'true'}, {'body': '@/data/.hermes/.env'}, {'body': '-'}, {'headers': {'Host': 'localhost'}}, {'headers': {'x': 'a\r\nb'}}]:
             with self.subTest(extra=extra), patch.object(x, '_send') as send:
@@ -141,7 +211,9 @@ class PaymentBoundaryTests(unittest.TestCase):
                    'amountWei': '100', 'payTo': offer()['payTo'], 'txHash': '0x'+'a'*64}
         bad_receipt = x.base64.b64encode(json.dumps({'success': False}).encode()).decode()
         for changes in ({'cli_exit_code': 1}, {'payment': {**payment, 'paid': False}},
-                        {'headers': {'payment-response': bad_receipt}}):
+                        {'headers': {'payment-response': bad_receipt}},
+                        {'headers': {'payment-response': 'malformed'}},
+                        {'headers': {'X-Payment-Response': bad_receipt}}):
             result = {'status': 200, 'payment': payment, 'cli_exit_code': 0, **changes}
             with self.subTest(changes=changes), patch.object(x, '_send', return_value=response()), \
                     patch.object(x, '_pay_radius_cli', return_value=result):
@@ -279,6 +351,129 @@ class PaymentBoundaryTests(unittest.TestCase):
         self.assertNotIn('--approve-permit2', args)
         self.assertNotIn('-y', args)
         self.assertEqual(run.call_args.kwargs['expected_offer'], offer())
+
+    def test_all_four_networks_quote_and_reconcile_the_selected_asset(self):
+        with patch.dict(os.environ, {'X402_PAID_NETWORKS': ','.join(x.NETWORKS), 'X402_MAX_PER_CALL': 'unlimited'}):
+            for name, network in x.NETWORKS.items():
+                selected = offer(network=network['network'], asset=network['asset'], amount='2000000')
+                payment = {'paid': True, 'network': network['network'], 'protocol': 'x402', 'scheme': 'exact',
+                           'asset': network['asset'], 'amountWei': '2000000', 'payTo': selected['payTo'],
+                           'txHash': '0x'+'a'*64}
+                with self.subTest(network=name), patch.object(x, '_send', return_value=response(offers=[selected])), \
+                        patch.object(x, '_pay_radius_cli', return_value={'status': 200, 'payment': payment, 'cli_exit_code': 0}) as pay:
+                    quoted = x.x402_request({**self.params, 'network': name, 'dry_run': True})
+                    self.assertEqual(quoted['outcome'], 'quoted')
+                    self.assertEqual(quoted['asset_symbol'], network['symbol'])
+                    self.assertEqual(quoted['amount'], '2')
+                    pay.assert_not_called()
+                    result = x.x402_request({**self.params, 'network': network['network']})
+                    self.assertEqual(result['outcome'], 'settlement_reported')
+                    self.assertEqual(result['network'], network['network'])
+                    self.assertEqual(result['asset'], network['asset'])
+                    self.assertEqual(result['explorer_url'], network['explorer']+'/tx/'+payment['txHash'])
+                    self.assertEqual(pay.call_args.args[4], x.Decimal('2'))
+                for mutation in [{'network': 'eip155:1'}, {'asset': '0x'+'9'*40}, {'amountWei': '2000001'}]:
+                    with self.subTest(network=name, mutation=mutation), patch.object(x, '_send', return_value=response(offers=[selected])), \
+                            patch.object(x, '_pay_radius_cli', return_value={'status': 200, 'payment': {**payment, **mutation}, 'cli_exit_code': 0}):
+                        self.assertEqual(x.x402_request(self.params)['outcome'], 'payment_unknown')
+
+    def test_network_pin_and_supported_offer_selection(self):
+        base = offer(network=x.NETWORKS['base-mainnet']['network'], asset=x.NETWORKS['base-mainnet']['asset'])
+        with patch.dict(os.environ, {'X402_PAID_NETWORKS': ','.join(x.NETWORKS)}):
+            challenge = {'accepts': [offer(network='eip155:1'), base, offer()]}
+            self.assertEqual(x._pick_requirement(challenge), base)
+            self.assertEqual(x._pick_requirement(challenge, 'radius-testnet'), offer())
+            bad_asset = {**base, 'asset': x.NETWORKS['base-sepolia']['asset']}
+            self.assertEqual(x._pick_requirement({'accepts': [bad_asset, base]}), base)
+            with self.assertRaises(x.X402Error):
+                x._pick_requirement({'accepts': [bad_asset]})
+            with self.assertRaises(x.X402Error):
+                x._pick_requirement({'accepts': [base]}, 'radius-mainnet')
+            self.assertEqual(x._network_name('base-testnet'), 'base-sepolia')
+
+    def test_settlement_receipt_must_match_selected_network_and_transaction(self):
+        spec = x.NETWORKS['base-mainnet']
+        selected = offer(network=spec['network'], asset=spec['asset'])
+        tx = '0x'+'a'*64
+        payment = {'paid': True, 'network': spec['network'], 'protocol': 'x402', 'scheme': 'exact',
+                   'asset': spec['asset'], 'amountWei': '100', 'payTo': selected['payTo'], 'txHash': tx}
+        receipt = {'success': True, 'network': spec['network'], 'transaction': tx}
+        for change in [{}, {'network': x.NETWORK}, {'transaction': '0x'+'b'*64}, {'network': None}]:
+            encoded = base64.b64encode(json.dumps({**receipt, **change}).encode()).decode()
+            result = {'status': 200, 'payment': payment, 'cli_exit_code': 0, 'headers': {'payment-response': encoded}}
+            with self.subTest(change=change), patch.dict(os.environ, {'X402_PAID_NETWORKS': 'base-mainnet'}), \
+                    patch.object(x, '_send', return_value=response(offers=[selected])), patch.object(x, '_pay_radius_cli', return_value=result):
+                entry = x.x402_request(self.params)
+                self.assertEqual(entry['outcome'], 'payment_unknown' if change else 'settlement_reported')
+
+    def test_catalog_filters_network_or_facilitator_metadata(self):
+        catalog = Mock(status_code=200)
+        catalog.json.return_value = {'scenarios': [
+            {'id': 'radius', 'facilitator': 'radius-testnet', 'compliant': True},
+            {'id': 'base', 'network': 'eip155:8453', 'compliant': True}]}
+        with patch.dict(os.environ, {'X402_PAID_NETWORKS': ','.join(x.NETWORKS)}), patch.object(x, '_send', return_value=catalog):
+            for name, expected in [('radius-testnet', 'radius'), ('base-mainnet', 'base')]:
+                self.assertEqual([s['id'] for s in x.x402_catalog({'network': name})['scenarios']], [expected])
+
+    def test_disabled_or_invalid_networks_fail_before_network_or_signing(self):
+        for settings, preferred in [('', None), ('unknown', None), ('radius-testnet', 'base-mainnet'),
+                                    ('radius-testnet', 'eip155:723487')]:
+            with self.subTest(settings=settings, preferred=preferred), patch.dict(os.environ, {'X402_PAID_NETWORKS': settings}), \
+                    patch.object(x, '_send') as send, patch.object(x, '_pay_radius_cli') as pay:
+                self.assertEqual(x.x402_request({**self.params, 'network': preferred})['outcome'], 'error')
+                send.assert_not_called()
+                pay.assert_not_called()
+
+    def test_cli_routes_each_network_to_correct_environment_and_family(self):
+        with patch.dict(os.environ, {'X402_PAID_NETWORKS': ','.join(x.NETWORKS)}):
+            for name, network in x.NETWORKS.items():
+                selected = offer(network=network['network'], asset=network['asset'])
+                with self.subTest(network=name), patch.object(x, '_run_radius_cli', return_value={}) as run:
+                    x._pay_radius_cli('GET', self.params['url'], {}, None, x.Decimal('0.0001'), selected)
+                    args = run.call_args.args[0]
+                    self.assertEqual(args[args.index('--network')+1], network['environment'])
+                    self.assertEqual(args[args.index('--networks')+1], network['family'])
+                    self.assertEqual(args[args.index('--threshold')+1], '0.0001')
+                    if network['family'] == 'radius':
+                        self.assertEqual(args[args.index('--rpc-url')+1], network['rpc'])
+                        self.assertEqual(args[args.index('--sbc')+1], network['asset'])
+                    else:
+                        self.assertNotIn('--rpc-url', args)
+                    self.assertNotIn('--approve-permit2', args)
+                    self.assertEqual(run.call_args.kwargs['expected_offer'], selected)
+
+    def test_subprocess_forces_base_rpc_overrides(self):
+        with patch.dict(os.environ, {'RADIUS_BASE_RPC_URL': 'http://127.0.0.1', 'RADIUS_BASE_SEPOLIA_RPC_URL': 'https://evil.example'}), \
+                patch.object(x.shutil, 'which', return_value='/usr/bin/radius-cli'), \
+                patch.object(x.subprocess, 'run', return_value=Mock(stdout='{}', returncode=0)) as run:
+            x._run_radius_cli(['wallet', 'address'])
+        env = run.call_args.kwargs['env']
+        self.assertEqual(env['RADIUS_BASE_RPC_URL'], 'https://mainnet.base.org')
+        self.assertEqual(env['RADIUS_BASE_SEPOLIA_RPC_URL'], 'https://sepolia.base.org')
+
+    def test_multinetwork_status_and_tool_schemas_match_enabled_policy(self):
+        with patch.dict(os.environ, {'X402_PAID_NETWORKS': ','.join(x.NETWORKS), 'X402_MAX_PER_CALL': 'unlimited'}), \
+                patch.object(x, '_run_radius_cli', return_value={}):
+            status = x.x402_wallet_status({})
+        self.assertIsNone(status['network'])
+        self.assertIsNone(status['max_per_call'])
+        self.assertTrue(status['mainnet_enabled'])
+        self.assertEqual(status['paid_networks'], list(x.NETWORKS))
+        self.assertEqual({n['network'] for n in status['networks']}, {n['network'] for n in x.NETWORKS.values()})
+        ctx = Mock()
+        x.register(ctx)
+        definitions = {call.kwargs['name']: call.kwargs['schema'] for call in ctx.register_tool.call_args_list}
+        for tool in ['x402_request', 'x402_catalog', 'x402_benchmark']:
+            self.assertIn('base-mainnet', definitions[tool]['parameters']['properties']['network']['enum'])
+
+    def test_base_benchmark_forwards_network_and_reports_usdc_budget(self):
+        with patch.dict(os.environ, {'X402_PAID_NETWORKS': 'base-mainnet', 'X402_MAX_PER_CALL': 'unlimited'}), \
+                patch('template_x402.benchmark.x402_request', return_value={'outcome': 'settlement_reported'}) as request:
+            result = x402_benchmark({'url': self.params['url'], 'calls': 2, 'budget': '0.04', 'network': 'base-mainnet'})
+        self.assertEqual(request.call_args.args[0]['network'], 'base-mainnet')
+        self.assertEqual(result['asset_symbol'], 'USDC')
+        self.assertEqual(result['authorization_bound'], '0.040000')
+        self.assertNotIn('authorization_bound_sbc', result)
 
     @unittest.skipUnless(NODE, 'Node runtime required for CLI fetch guard test')
     def test_node_guard_blocks_redirects_changed_urls_and_private_dns(self):

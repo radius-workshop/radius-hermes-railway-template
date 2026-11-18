@@ -1,6 +1,6 @@
 name: x402
 version: "1.0.0"
-description: "Bounded Radius Testnet x402 requests through radius-cli with a persistent attempt ledger"
+description: "Policy-controlled Radius and Base x402 requests through radius-cli with a persistent attempt ledger"
 provides_tools:
   - x402_catalog
   - x402_request

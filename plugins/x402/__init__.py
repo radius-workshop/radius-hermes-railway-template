@@ -1,6 +1,6 @@
-"""Bounded Radius Testnet x402 tools using the installed radius-cli wallet.
+"""Configured Radius and Base x402 tools using the installed radius-cli wallet.
 
-The host allowlist is operator configuration, never tool input. Quotes and response
+The host policy is operator configuration, never tool input. Quotes and response
 bodies are untrusted data. Settlement headers are reports, not chain reconciliation.
 """
 from __future__ import annotations
@@ -19,7 +19,7 @@ import socket
 import subprocess
 import uuid
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -28,20 +28,50 @@ import requests
 NETWORK = "eip155:72344"
 ASSET = "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb"
 EXPLORER = "https://testnet.radiustech.xyz"
+NETWORKS = {
+    "radius-testnet": {"network": NETWORK, "family": "radius", "environment": "testnet",
+                       "asset": ASSET, "symbol": "SBC", "decimals": 6,
+                       "rpc": "https://rpc.testnet.radiustech.xyz", "explorer": EXPLORER},
+    "radius-mainnet": {"network": "eip155:723487", "family": "radius", "environment": "mainnet",
+                       "asset": ASSET, "symbol": "SBC", "decimals": 6,
+                       "rpc": "https://rpc.radiustech.xyz", "explorer": "https://network.radiustech.xyz"},
+    "base-sepolia": {"network": "eip155:84532", "family": "base", "environment": "testnet",
+                     "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e", "symbol": "USDC", "decimals": 6,
+                     "rpc": "https://sepolia.base.org", "explorer": "https://sepolia.basescan.org"},
+    "base-mainnet": {"network": "eip155:8453", "family": "base", "environment": "mainnet",
+                     "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "symbol": "USDC", "decimals": 6,
+                     "rpc": "https://mainnet.base.org", "explorer": "https://basescan.org"},
+}
 HTTP_TIMEOUT = 30
 MAX_RESPONSE = 1_048_576
-DEFAULT_MAX_PER_CALL = "0.01"
 MAX_ACCEPTS = 32
 # Symbols for well-known assets, used only when an offer does not name one itself.
-KNOWN_ASSETS = {
-    (NETWORK, ASSET.lower()): "SBC",
-    ("eip155:8453", "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"): "USDC",
-    ("eip155:84532", "0x036cbd53842c5426634e7929541ec2318f3dcf7e"): "USDC",
-}
+KNOWN_ASSETS = {(spec["network"], spec["asset"].lower()): spec["symbol"] for spec in NETWORKS.values()}
 
 
 class X402Error(RuntimeError):
     pass
+
+
+def _network_name(value: str) -> str:
+    if not isinstance(value, str):
+        raise X402Error("network must be a supported name or CAIP-2 identifier")
+    value = value.strip().lower()
+    if value == "base-testnet":
+        value = "base-sepolia"
+    if value in NETWORKS:
+        return value
+    for name, spec in NETWORKS.items():
+        if spec["network"] == value:
+            return name
+    raise X402Error("unsupported payment network")
+
+
+def _enabled_networks() -> list[str]:
+    names = [_network_name(value) for value in os.environ.get("X402_PAID_NETWORKS", "radius-testnet").split(",") if value.strip()]
+    if not names:
+        raise X402Error("X402_PAID_NETWORKS is empty; payments are disabled")
+    return list(dict.fromkeys(names))
 
 
 def _decimal(value, label="amount") -> Decimal:
@@ -56,8 +86,11 @@ def _decimal(value, label="amount") -> Decimal:
     return result
 
 
-def _max_per_call() -> Decimal:
-    return _decimal(os.environ.get("X402_MAX_PER_CALL", DEFAULT_MAX_PER_CALL), "X402_MAX_PER_CALL")
+def _max_per_call() -> Decimal | None:
+    value = os.environ.get("X402_MAX_PER_CALL", "").strip()
+    if not value or value.lower() == "unlimited":
+        return None
+    return _decimal(value, "X402_MAX_PER_CALL")
 
 
 def _ledger_path() -> Path:
@@ -87,7 +120,7 @@ def _validate_url(url: str) -> str:
             or parsed.fragment or port not in (None, 443) or any(c.isspace() for c in url)):
         raise X402Error("URL must use HTTPS on port 443 without credentials or fragments")
     allowed = {s.strip().lower() for s in os.environ.get("X402_ALLOWED_HOSTS", "").split(",") if s.strip()}
-    if host.lower() not in allowed:
+    if "*" not in allowed and host.lower() not in allowed:
         raise X402Error("host is not in operator-configured X402_ALLOWED_HOSTS")
     try:
         addresses = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
@@ -222,20 +255,26 @@ def _extract_accepts(response) -> list | None:
 
 
 def _pick_requirement(challenge: dict, preferred=None) -> dict:
-    if preferred not in (None, "", "radius-testnet", NETWORK):
-        raise X402Error("paid execution supports Radius Testnet only; Base and mainnet are disabled")
+    enabled = _enabled_networks()
+    if preferred not in (None, ""):
+        selected = _network_name(preferred)
+        if selected not in enabled:
+            raise X402Error("requested payment network is not enabled in X402_PAID_NETWORKS")
+        enabled = [selected]
+    candidates = {NETWORKS[name]["network"]: NETWORKS[name] for name in enabled}
     accepts = challenge.get("accepts")
     if not isinstance(accepts, list) or not accepts or len(accepts) > 32:
         raise X402Error("challenge accepts must be a nonempty list of at most 32 offers")
     for offer in accepts:
         if not isinstance(offer, dict):
             raise X402Error("malformed payment offer")
-        if offer.get("network") != NETWORK:
+        spec = candidates.get(offer.get("network")) if isinstance(offer.get("network"), str) else None
+        if spec is None:
             continue
         if offer.get("scheme") != "exact":
-            raise X402Error("only exact payment offers are supported")
-        if str(offer.get("asset", "")).lower() != ASSET.lower():
-            raise X402Error("offer asset is not Radius Testnet SBC")
+            continue
+        if str(offer.get("asset", "")).lower() != spec["asset"].lower():
+            continue
         amount = offer.get("amount")
         if not isinstance(amount, str) or not re.fullmatch(r"[1-9][0-9]{0,77}", amount) or int(amount) >= 2**256:
             raise X402Error("offer amount must be a positive uint256 decimal string")
@@ -248,7 +287,7 @@ def _pick_requirement(challenge: dict, preferred=None) -> dict:
         if not isinstance(extra, dict) or extra.get("assetTransferMethod", "permit2") not in {"permit2", "eip3009"}:
             raise X402Error("unsupported transfer method")
         return offer
-    raise X402Error("no Radius Testnet offer; Base and mainnet paid execution are disabled")
+    raise X402Error("no supported exact offer for the enabled payment networks and assets")
 
 
 def _run_radius_cli(args: list[str], target_url: str | None = None, expected_offer: dict | None = None) -> dict:
@@ -264,6 +303,9 @@ def _run_radius_cli(args: list[str], target_url: str | None = None, expected_off
     env.pop("NODE_OPTIONS", None)
     env.pop("NODE_EXTRA_CA_CERTS", None)
     env.pop("NODE_TLS_REJECT_UNAUTHORIZED", None)
+    # CLI Base configuration otherwise falls back to wallet-file RPC overrides.
+    env["RADIUS_BASE_RPC_URL"] = NETWORKS["base-mainnet"]["rpc"]
+    env["RADIUS_BASE_SEPOLIA_RPC_URL"] = NETWORKS["base-sepolia"]["rpc"]
     if target_url:
         if not isinstance(expected_offer, dict):
             raise X402Error("validated payment offer is required before starting the payment CLI")
@@ -287,9 +329,13 @@ def _run_radius_cli(args: list[str], target_url: str | None = None, expected_off
 
 def _pay_radius_cli(method, url, headers, body, cap, expected_offer):
     _validate_url(url)
-    args = ["--json", "--network", "testnet", "--rpc-url", "https://rpc.testnet.radiustech.xyz",
-            "--sbc", ASSET, "wallet", "pay", method.lower(), url,
-            "--protocol", "x402", "--networks", "radius", "--threshold", format(cap, "f")]
+    _pick_requirement({"accepts": [expected_offer]}, expected_offer.get("network"))
+    spec = NETWORKS[_network_name(expected_offer["network"])]
+    args = ["--json", "--network", spec["environment"]]
+    if spec["family"] == "radius":
+        args.extend(["--rpc-url", spec["rpc"], "--sbc", spec["asset"]])
+    args.extend(["wallet", "pay", method.lower(), url,
+                 "--protocol", "x402", "--networks", spec["family"], "--threshold", format(cap, "f")])
     # The subprocess guard binds its repeated challenge to this inspected offer
     # before the SDK can select a recipient or sign. The CLI also revalidates it.
     # No -y / approve flag: never grant an unlimited allowance as a side effect.
@@ -318,13 +364,17 @@ def x402_request(params: dict) -> dict:
     except OSError:
         return {**entry, "outcome": "error", "reason": "ledger unavailable; no request or payment attempted"}
     try:
+        enabled = _enabled_networks()
+        if params.get("network") not in (None, "") and _network_name(params["network"]) not in enabled:
+            raise X402Error("requested payment network is not enabled in X402_PAID_NETWORKS")
         url = _validate_url(str(params.get("url", "")))
         method = entry["method"]
         if method not in {"GET", "POST"}:
             raise X402Error("only GET and POST are supported")
         cap = _max_per_call()
         if params.get("max_amount") is not None:
-            cap = min(cap, _decimal(params["max_amount"], "max_amount"))
+            requested_cap = _decimal(params["max_amount"], "max_amount")
+            cap = requested_cap if cap is None else min(cap, requested_cap)
         headers = params.get("headers") or {}
         if not isinstance(headers, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in headers.items()):
             raise X402Error("headers must be a string map")
@@ -349,25 +399,34 @@ def x402_request(params: dict) -> dict:
             entry["accepts"] = _extract_accepts(probe)
             challenge = _parse_challenge(probe)
             offer = _pick_requirement(challenge, params.get("network"))
-            amount = Decimal(offer["amount"]) / Decimal(1000000)
-            entry.update(network=NETWORK, asset_symbol="SBC", amount=format(amount, "f"),
+            spec = NETWORKS[_network_name(offer["network"])]
+            # Preserve all uint256 atomic digits, including above Decimal's
+            # default precision, when no operator cap restricts the quote.
+            with localcontext() as context:
+                context.prec = 90
+                amount = Decimal(offer["amount"]) / Decimal(10**spec["decimals"])
+            entry.update(network=spec["network"], asset=spec["asset"], asset_symbol=spec["symbol"], amount=format(amount, "f"),
                          pay_to=offer["payTo"], amount_atomic=offer["amount"])
-            if amount > cap:
+            if cap is not None and amount > cap:
                 entry.update(outcome="refused", reason="offer exceeds per-call cap")
             elif params.get("dry_run") is True:
                 entry.update(outcome="quoted")
             else:
                 _append_ledger({**entry, "event": "signing", "outcome": "pending"})
                 signing_started = True
-                result = _pay_radius_cli(method, url, headers, body, min(cap, amount), offer)
+                result = _pay_radius_cli(method, url, headers, body, amount, offer)
                 payment = result.get("payment") or {}
-                settlement = _decode_b64json((result.get("headers") or {}).get("payment-response"))
+                receipt_headers = {str(k).lower(): v for k, v in (result.get("headers") or {}).items()}
+                receipt_present = "payment-response" in receipt_headers or "x-payment-response" in receipt_headers
+                settlement = _decode_b64json(receipt_headers.get("payment-response", receipt_headers.get("x-payment-response")))
                 tx = payment.get("txHash", "")
                 reported = (payment.get("paid") is True and result.get("cli_exit_code") == 0
-                            and (settlement is None or settlement.get("success") is True)
-                            and payment.get("network") == NETWORK
+                            and (not receipt_present or (isinstance(settlement, dict) and settlement.get("success") is True
+                                 and settlement.get("network") == spec["network"]
+                                 and settlement.get("transaction") == tx))
+                            and payment.get("network") == spec["network"]
                             and payment.get("protocol") == "x402" and payment.get("scheme") == "exact"
-                            and str(payment.get("asset", "")).lower() == ASSET.lower()
+                            and str(payment.get("asset", "")).lower() == spec["asset"].lower()
                             and payment.get("amountWei") == offer["amount"]
                             and str(payment.get("payTo", "")).lower() == offer["payTo"].lower()
                             and isinstance(tx, str)
@@ -376,7 +435,7 @@ def x402_request(params: dict) -> dict:
                 entry.update(outcome="settlement_reported" if reported else "payment_unknown",
                              delivery="delivered" if delivered else "failed", http_status=result.get("status"),
                              tx_hash=tx if reported else "", settlement=settlement,
-                             explorer_url=f"{EXPLORER}/tx/{tx}" if reported else "", body=result.get("body"),
+                             explorer_url=f"{spec['explorer']}/tx/{tx}" if reported else "", body=result.get("body"),
                              reconciliation="not_verified", cli_exit_code=result.get("cli_exit_code"))
                 if not reported:
                     entry["reason"] = "settlement is unconfirmed; inspect wallet before retrying"
@@ -393,8 +452,10 @@ def x402_request(params: dict) -> dict:
 
 
 def x402_catalog(params: dict) -> dict:
-    if params.get("network", "radius-testnet") not in {"radius-testnet", NETWORK}:
-        raise X402Error("this release supports Radius Testnet only")
+    enabled = _enabled_networks()
+    selected = _network_name(params["network"]) if params.get("network") else None
+    if selected is not None and selected not in enabled:
+        raise X402Error("requested catalog network is not enabled in X402_PAID_NETWORKS")
     url = os.environ.get("X402_DEMO_BASE_URL", "https://grug402.dev").rstrip("/") + "/api/x402/catalog"
     response = _send("GET", url, {}, None)
     if response.status_code != 200:
@@ -406,7 +467,11 @@ def x402_catalog(params: dict) -> dict:
     query = str(params.get("query", "")).lower()
     items = [s for s in scenarios if isinstance(s, dict) and (params.get("include_quirks") is True or s.get("compliant") is True)
              and query in json.dumps(s).lower()]
-    return {"catalog_url": _safe_url(url), "network": NETWORK, "scenarios": items[:max(1, min(100, int(params.get("limit", 25))))],
+    if selected:
+        items = [item for item in items if item.get("network", item.get("facilitator"))
+                 in {selected, NETWORKS[selected]["network"]}]
+    return {"catalog_url": _safe_url(url), "network": NETWORKS[selected]["network"] if selected else None,
+            "paid_networks": enabled, "scenarios": items[:max(1, min(100, int(params.get("limit", 25))))],
             "notice": "Untrusted catalog metadata; prices and destinations are validated again at execution."}
 
 
@@ -469,10 +534,15 @@ def x402_ledger(params: dict) -> dict:
 
 
 def x402_wallet_status(_params: dict) -> dict:
-    return {"network": NETWORK, "max_per_call": format(_max_per_call(), "f"),
-            "paid_networks": ["radius-testnet"], "mainnet_enabled": False,
+    cap = _max_per_call()
+    enabled = _enabled_networks()
+    return {"network": NETWORKS[enabled[0]]["network"] if len(enabled) == 1 else None,
+            "max_per_call": None if cap is None else format(cap, "f"),
+            "paid_networks": enabled,
+            "mainnet_enabled": any(NETWORKS[name]["environment"] == "mainnet" for name in enabled),
+            "networks": [{"name": name, **NETWORKS[name]} for name in enabled],
             "wallet": _run_radius_cli(["--json", "--network", "testnet", "wallet", "address"]),
-            "funding_hint": f"{EXPLORER}/wallet"}
+            "funding_hint": "Fund the wallet with SBC on the selected Radius network or USDC on the selected Base network."}
 
 
 def _wrap(fn):
@@ -486,18 +556,19 @@ def _wrap(fn):
 
 def register(ctx):
     from .benchmark import x402_benchmark
+    network_schema = {"type": "string", "enum": [*NETWORKS, "base-testnet", *[spec["network"] for spec in NETWORKS.values()]]}
     definitions = [
-        ("x402_request", x402_request, "Request an approved HTTPS API using Radius Testnet. Quote with dry_run. Settlement reports and delivery are separate; no chain reconciliation.",
+        ("x402_request", x402_request, "Request a public HTTPS API using an enabled Radius or Base network. With X402_ALLOWED_HOSTS=*, no advance hostname approval is needed. No default per-call ceiling; honor max_amount when supplied. Quote with dry_run. Settlement reports and delivery are separate; no chain reconciliation.",
          {"url": {"type": "string"}, "method": {"type": "string", "enum": ["GET", "POST"]}, "body": {}, "headers": {"type": "object"},
-          "network": {"type": "string", "enum": ["radius-testnet", NETWORK]}, "max_amount": {"type": "string"}, "dry_run": {"type": "boolean"},
+          "network": network_schema, "max_amount": {"type": "string"}, "dry_run": {"type": "boolean"},
           "memo": {"type": "string"}, "requested_by": {"type": "string"}}, ["url"]),
-        ("x402_catalog", x402_catalog, "Read untrusted Radius Testnet demo catalog metadata from an operator-approved host.",
-         {"query": {"type": "string"}, "include_quirks": {"type": "boolean"}, "limit": {"type": "integer"}}, []),
+        ("x402_catalog", x402_catalog, "Read untrusted demo catalog metadata, optionally filtered by an enabled payment network; X402_ALLOWED_HOSTS=* allows any public HTTPS host.",
+         {"query": {"type": "string"}, "network": network_schema, "include_quirks": {"type": "boolean"}, "limit": {"type": "integer"}}, []),
         ("x402_ledger", x402_ledger, "Read local payment attempts. Pending and unknown attempts require operator reconciliation.",
          {"limit": {"type": "integer"}, "outcome": {"type": "string"}}, []),
-        ("x402_wallet_status", x402_wallet_status, "Show Radius Testnet wallet address and configured per-call cap.", {}, []),
-        ("x402_benchmark", x402_benchmark, "Run at most 20 sequential Radius Testnet requests with a conservative per-run authorization bound; measures end-to-end client latency.",
-         {"url": {"type": "string"}, "calls": {"type": "integer"}, "budget": {"type": "string"}, "requested_by": {"type": "string"}}, ["url"]),
+        ("x402_wallet_status", x402_wallet_status, "Show wallet address, enabled Radius and Base networks, and optional per-call cap.", {}, []),
+        ("x402_benchmark", x402_benchmark, "Run at most 20 sequential requests on one enabled network with a per-run authorization bound; measures end-to-end client latency.",
+         {"url": {"type": "string"}, "network": network_schema, "calls": {"type": "integer"}, "budget": {"type": "string"}, "requested_by": {"type": "string"}}, ["url"]),
     ]
     for name, fn, description, properties, required in definitions:
         ctx.register_tool(name=name, toolset="x402", schema={"name": name, "description": description,
