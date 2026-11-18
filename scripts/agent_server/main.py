@@ -2195,15 +2195,6 @@ def _build_agent_graph_payload() -> dict[str, Any]:
             tags=["Webhook", "A2A"],
             metadata={"source": "runtime", "tools": []},
         )
-    if os.environ.get("BYTEROVER_API_KEY") or _is_true(os.environ.get("BYTEROVER_LOCAL")):
-        add_capability(
-            "memory",
-            "ByteRover Memory",
-            "Structured long-term memory is configured for durable project and wallet context.",
-            status="enabled",
-            tags=["Memory"],
-            metadata={"source": "runtime", "tools": []},
-        )
 
     surface_specs = [
         (

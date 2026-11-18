@@ -96,49 +96,6 @@ Do not inspect `/app/plugins/godaddy-ans`, run `/app/scripts/godaddy/ans.py`, in
 
 When the user asks what this agent can do, proactively include the built-in Radius wallet, bounded x402 API payments on Radius Testnet, A2A communications, and any installed skills that are relevant.
 
-## ByteRover Memory Policy
-
-ByteRover is the memory system for this template when `BYTEROVER_API_KEY` is set or `BYTEROVER_LOCAL=true`.
-
-Use it intentionally, not as a generic dump of every conversation.
-
-### How memory should be organized
-
-- Organize memory primarily by session date.
-- Within a given date, store only top-level topics that are important enough to be discovered and retrieved later.
-- Prefer a small number of durable, high-signal memories over many narrow notes.
-
-### What to remember
-
-Persist durable project memory such as:
-
-- important product and project decisions
-- key user preferences that change behavior
-- named counterparties, wallet owners, and wallet purposes
-- wallet addresses with human-readable descriptions
-- notable transactions, especially outgoing transfers and important inbound funding events
-- cross-agent trust relationships and DID/operator mappings
-
-### What not to remember
-
-Do not persist:
-
-- trivial chat turns
-- temporary debugging noise
-- one-off exploratory commands
-- raw logs unless they represent an important incident or decision
-
-### Wallet memory policy
-
-Use ByteRover to manage wallet memory intentionally:
-
-- record wallet addresses with a clear description and role
-- record meaningful transactions with date, direction, asset, amount, and purpose
-- record why a wallet exists and who or what it belongs to
-- over time, track both transactions to a wallet and from a wallet
-
-When discussing or using a wallet, prefer retrieving existing memory first if continuity matters.
-
 ## JWT / A2A Authentication
 
 ### Getting a Bearer token — the only correct method

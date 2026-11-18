@@ -89,7 +89,7 @@ That clears the persisted Railway volume paths used by Hermes before deploying:
 - `/data/workspace`
 - `/data/.claude`
 
-This resets agent memory, sessions, pairing state, ByteRover state, workspace files, and the persisted Radius wallet.
+This resets agent memory, sessions, pairing state, workspace files, and the persisted Radius wallet.
 
 ## Example prompts
 
@@ -869,12 +869,6 @@ The webhook itself returns `202 Accepted` because sync happens asynchronously af
 - `skills.sync` for final success/error
 
 `GET /internal/skills/status` also exposes the latest delivery id, seen ref/SHAs, active ref, sync start/completion times, last result, manifest root list, and skill counts.
-
-The template also includes an opinionated ByteRover memory skill and project instructions. When ByteRover is enabled, the intended usage is:
-
-- organize memory by session date
-- save only top-level, durable topics
-- track wallet addresses, descriptions, and important transactions as structured long-term memory
 
 ### Context files and cross-agent compatibility
 

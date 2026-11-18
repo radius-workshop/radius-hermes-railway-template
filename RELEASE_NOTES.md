@@ -30,6 +30,10 @@ trusted A2A communication, optional KYA signed claims, and Slack app setup.
 - **Operate from a known revision.** Manual Railway deployment supports explicit
   projects, environments and services. Bootstrap tests run offline against the
   actual skill registration code and bundled wallet tools.
+- **ByteRover is removed.** The image no longer installs the ByteRover CLI, and
+  `BYTEROVER_API_KEY` and `BYTEROVER_LOCAL` are ignored. On first boot after an
+  upgrade, an existing volume's `memory.provider: byterover` is reset to Hermes'
+  built-in memory. Memories already stored in ByteRover are not migrated.
 
 Telegram, Discord and Slack chat are supported. Optional Discord voice-channel
 support is excluded to avoid an unsafe dependency constraint.
