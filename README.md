@@ -396,6 +396,27 @@ agent service (tokens only) ──HTTPS_PROXY──▶ egress service (real secr
 
 ### Set it up on Railway
 
+To check an existing setup, run `python3.11 scripts/egress/doctor.py doctor`. It
+reads the variables of the linked Railway project's agent and egress services and
+reports what is missing, mismatched or misplaced, without printing any value. It
+offers numbered choices when a project has several services; pass `--project`,
+`--environment`, `--agent` and `--egress` to name them, and `--json` for a report
+a script can read. It checks configuration only: it doesn't test provider
+authentication or the deployed proxy path.
+
+To set or rotate a real credential on the egress service, run this in your own
+terminal:
+
+```sh
+python3.11 scripts/egress/set_credential.py \
+  --project YOUR_PROJECT_ID --environment production --service egress \
+  --name OPENROUTER_API_KEY
+```
+
+It asks you to confirm the service, reads the value with hidden input, and passes
+it to `railway variable set` on stdin, so the value never appears on screen, in
+shell history or in command-line arguments. It doesn't trigger a deployment.
+
 1. Generate the CA and seed locally: `python3 scripts/egress/iron_egress.py gen-ca`. The output is ready for Railway's raw variable editor. Keep `EGRESS_CA_KEY` off the agent service.
 2. Add a second service from this repo, named `egress`. In its Settings, set **Railway Config File** to `/railway.egress.toml`. Give it no volume and no public domain.
 3. On **both** services (shared variables work well): `EGRESS_SECRETS`, `EGRESS_TOKEN_SEED`, `EGRESS_CA_CERT`.
