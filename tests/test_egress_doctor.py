@@ -56,7 +56,7 @@ class RecoveryGuideTests(unittest.TestCase):
         agent, proxy = fixtures()
         agent.update(OPENROUTER_API_KEY="raw-agent-secret", EGRESS_CA_KEY="raw-ca-secret", EGRESS_ENFORCE="false")
         codes = {item["code"] for item in setup.diagnose(agent, proxy)}
-        self.assertTrue({"real_credential_on_agent", "ca_key_on_agent", "enforcement_disabled"} <= codes)
+        self.assertLessEqual({"real_credential_on_agent", "ca_key_on_agent", "enforcement_disabled"}, codes)
 
     def test_expected_proxy_token_is_accepted_only_on_agent(self):
         agent, proxy = fixtures()
