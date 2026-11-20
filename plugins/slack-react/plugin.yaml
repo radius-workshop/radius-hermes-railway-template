@@ -1,0 +1,7 @@
+name: slack-react
+version: "1.0.0"
+description: "Add or remove an emoji reaction, including workspace custom emoji, on a message in the current Slack conversation"
+provides_tools:
+  - slack_react
+toolsets:
+  - slack-react

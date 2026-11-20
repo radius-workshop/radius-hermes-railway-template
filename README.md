@@ -469,6 +469,16 @@ A successful HTTP response describes delivery. `settlement_reported` requires a 
 
 Try: *"Show me three Radius Testnet x402 demo APIs"*, *"Quote this approved endpoint without paying"*, *"Show the x402 ledger"*.
 
+## Slack reactions
+
+The bundled `slack-react` plugin gives the agent a `slack_react` tool, so it can react to a message when asked: `slack_react({emoji, target, message_ts, remove})`. `emoji` is a name, with or without colons, and workspace custom emoji work the same way as standard ones.
+
+Hermes at v2026.9.24 only reacts by itself: 👀 while it works on a message addressed to it, then ✅ or ❌. Its `send_message` tool has a `react` action, but the Slack adapter doesn't implement it. The plugin uses the public `register_platform_handler("slack", ...)` plugin API to keep a reference to the connected Slack app, and calls Slack's `reactions.add` and `reactions.remove` with it.
+
+- **Scope.** The channel always comes from the session, so the agent can only react in the conversation the current turn came from. `target` is `message` (the message that started the turn, the default) or `thread_parent`. `message_ts` names another message in the same conversation.
+- **Permissions.** It needs the `reactions:write` bot scope, which `slack/manifest.json` already has. No setting turns it on; `SLACK_REACTIONS=false` only turns off Hermes' automatic 👀/✅/❌.
+- **Limits.** Thread context that Hermes gives the agent has no timestamps, so for an older message the agent has to ask for a link. The agent can't list the workspace's custom emoji (that needs `emoji:read`), so a wrong name comes back as `invalid_name`. It can only remove its own reactions.
+
 ## Feedback ledger
 
 The bundled `feedback-ledger` plugin stores each 👍/👎 click on an agent reply in Slack (`SLACK_FEEDBACK_BUTTONS=true`) in `${HERMES_HOME}/feedback/ledger.jsonl`, and the agent reads it back with the `feedback_ledger` tool. Hermes still acks the click and logs `Feedback button clicked` as before; capture is added alongside it.
