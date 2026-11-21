@@ -56,6 +56,7 @@ ACTION_REFRESH = "slack_home_refresh"
 ACTION_FUND = "slack_home_fund"
 ACTION_PAYMENTS = "slack_home_payments"
 ACTION_WALLET = "slack_home_wallet"  # the overflow menu beside the wallet address
+VIEW_ADDRESS = "slack_home_address"  # callback id of the modals that hold the address in a text field
 ACTION_LINK = re.compile(r"slack_home_link_\w+")  # link buttons still send a click that needs an ack
 
 RPC_TIMEOUT = 6
@@ -70,7 +71,7 @@ OUTCOMES = {
 }
 
 # The live Slack app and the snapshot cache. Process-local, like the gateway itself.
-_live: dict = {"app": None, "adapter": None, "loop": None, "dispatch": None, "tables": True}
+_live: dict = {"app": None, "adapter": None, "loop": None, "dispatch": None, "tables": True, "views": False}
 _cache: dict = {"snapshot": None, "address": None}
 _cache_lock = threading.Lock()
 _dm_channels: dict = {}  # Slack user id -> their DM channel with the app, for the authorization check
@@ -329,21 +330,29 @@ def _button(text: str, action_id: str, *, url: str | None = None, primary: bool 
 
 
 def short_endpoint(url, limit: int = 40) -> str:
-    """``host/path`` with long hex ids cut to ``0x1234…`` and, if still long, the middle of the path dropped."""
+    """``host/path`` without ``www.``, long hex ids cut to ``0x1234…`` and, if still long, the start of the
+    path dropped. The end of a path is kept because it is what tells two calls to one seller apart."""
     try:
         parsed = urlsplit(str(url or ""))
-        host = parsed.hostname or ""
+        host = (parsed.hostname or "").removeprefix("www.")
     except ValueError:
         host = ""
     if not host:
         return "unknown endpoint"
     path = re.sub(r"0x([0-9a-fA-F]{4})[0-9a-fA-F]{5,}", "0x\\1…", parsed.path if parsed.path != "/" else "")
     text = " ".join((host + path).split())
-    if len(text) > limit and path.count("/") > 1:
-        text = " ".join(f"{host}/…/{path.rsplit('/', 1)[1]}".split())
+    parts = " ".join(path.split()).strip("/").split("/")
+    if len(text) > limit and len(parts) > 1:
+        kept: list[str] = []
+        for part in reversed(parts[1:]):
+            if len("/".join([host, "…", part, *kept])) > limit:
+                break
+            kept.insert(0, part)
+        if kept:
+            text = "/".join([host, "…", *kept])
     if len(text) > limit:
         text = text[: limit - 1] + "…"
-    return text or "unknown endpoint"
+    return text
 
 
 def _paid(row: dict, spec: dict) -> str:
@@ -481,7 +490,9 @@ def build_home(snapshot: dict, *, team_id: str = "", app_id: str = "", now: date
     if len(rows) > HOME_ROWS:
         caption += f" · showing {HOME_ROWS} of {len(rows)}"
     blocks.append(_context(caption))
-    actions = [_button("All payments", ACTION_PAYMENTS)] if rows else []
+    # The modal holds MODAL_ROWS payments, so the button only says "All" when that is all of them.
+    more = f"Latest {MODAL_ROWS} payments" if len(rows) > MODAL_ROWS else "All payments"
+    actions = [_button(more, ACTION_PAYMENTS)] if rows else []
     ask = messages_tab_url(team_id, app_id)
     if ask:
         actions.append(_button("Ask the agent", "slack_home_link_ask", url=ask))
@@ -518,30 +529,48 @@ def build_limited_home(*, team_id: str = "", app_id: str = "") -> dict:
     return {"type": "home", "blocks": blocks}
 
 
-def _modal(title: str, blocks: list[dict]) -> dict:
-    return {"type": "modal", "title": {"type": "plain_text", "text": title},
+def _modal(title: str, blocks: list[dict], *, callback_id: str | None = None) -> dict:
+    view = {"type": "modal", "title": {"type": "plain_text", "text": title},
             "close": {"type": "plain_text", "text": "Close"}, "blocks": blocks}
+    if callback_id:  # a modal with an input block must have a submit button, and its submission an ack
+        view.update(callback_id=callback_id, submit={"type": "plain_text", "text": "Done"})
+    return view
+
+
+def _address_blocks(address: str) -> tuple[list[dict], str | None]:
+    """The address where it can be copied, and the modal's callback id if it needs one.
+
+    Slack's mobile apps don't let people select text in a view, code blocks included, but they do in a
+    text field. So the address goes in a text input when the plugin can ack the modal's submission.
+    """
+    if not _live["views"]:
+        return [_section(f"```{address}```")], None
+    return [{"type": "input", "block_id": VIEW_ADDRESS, "optional": True,
+             "label": {"type": "plain_text", "text": "Address"},
+             "element": {"type": "plain_text_input", "action_id": "address", "initial_value": address},
+             "hint": {"type": "plain_text", "text": "Select it to copy. Editing it here changes nothing."}}], VIEW_ADDRESS
 
 
 def build_fund_modal(address: str | None) -> dict:
     if not address:
         return _modal("Fund wallet", [_section("The wallet address could not be read. Try Refresh.")])
+    field, callback_id = _address_blocks(address)
     return _modal("Fund wallet", [
         _section("Send funds to the agent's address. It is the same address on every network."),
-        _section(f"```{address}```"),
+        *field,
         _section("*What to send*", [
             "USDC on Base\nfor Base payments", "SBC on Radius\nfor Radius payments and gas",
             "ETH on Base\nfor Base gas", "Testnet tokens\nnot real money"]),
         _context("Check the network before you send: funds sent on another chain are not shown here. "
                  "Nothing on this tab can move funds."),
-    ])
+    ], callback_id=callback_id)
 
 
 def build_address_modal(address: str | None) -> dict:
     if not address:
         return _modal("Wallet address", [_section("The wallet address could not be read. Try Refresh.")])
-    return _modal("Wallet address", [_section(f"```{address}```"),
-                                     _context("The same address on every network. Select it to copy.")])
+    field, callback_id = _address_blocks(address)
+    return _modal("Wallet address", [*field, _context("The same address on every network.")], callback_id=callback_id)
 
 
 def build_payments_modal(rows: list[dict], environment: str) -> dict:
@@ -669,6 +698,10 @@ def wire_slack(app, adapter=None) -> bool:
     if getattr(app, "_radius_slack_home_wired", False):
         return False
     use(_home_middleware)
+    view = getattr(app, "view", None)
+    if callable(view):  # Hermes registers no view listeners, so this callback id is ours alone
+        view(VIEW_ADDRESS)(on_address_done)
+    _live["views"] = callable(view)
     try:
         app._radius_slack_home_wired = True
     except Exception:  # pragma: no cover - slotted app objects
@@ -714,6 +747,11 @@ async def on_wallet(ack, body, action):
     selected = action.get("selected_option") if isinstance(action, dict) else None
     if isinstance(selected, dict) and selected.get("value") == "address":
         await _open_modal(body, lambda: build_address_modal(_cache["address"]))
+
+
+async def on_address_done(ack):
+    """The Done button on a modal that shows the address. Nothing is read from it; edits are dropped."""
+    await ack()
 
 
 async def on_link(ack, body, action):

@@ -76,10 +76,13 @@ class FakeClient:
 
 class FakeApp:
     def __init__(self):
-        self.client, self.middleware = FakeClient(), []
+        self.client, self.middleware, self.views = FakeClient(), [], {}
 
     def use(self, fn):
         self.middleware.append(fn)
+
+    def view(self, callback_id):
+        return lambda fn: self.views.setdefault(callback_id, fn)
 
 
 class FakeAdapter:
@@ -292,8 +295,14 @@ class HomeViewTests(Base):
     def test_endpoints_are_shortened(self):
         self.assertEqual(sh.short_endpoint("https://x402scan.com/api/x402/merchants/0xff30" + "ab" * 18 + "?q=1"),
                          "x402scan.com/api/x402/merchants/0xff30…")
+        # the end of the path is what tells two calls apart, so it is the part that is kept
         self.assertEqual(sh.short_endpoint("https://api.example.com/v1/some/very/long/path/to/a/resource/weather"),
-                         "api.example.com/…/weather")
+                         "api.example.com/…/to/a/resource/weather")
+        stats = [sh.short_endpoint(f"https://www.x402scan.com/api/x402/merchants/0x{i}f30" + "ab" * 18 + "/stats")
+                 for i in "ef"]
+        self.assertEqual(stats, ["x402scan.com/…/merchants/0xef30…/stats", "x402scan.com/…/merchants/0xff30…/stats"])
+        self.assertEqual(sh.short_endpoint("https://www.grug402.dev/weather"), "grug402.dev/weather")
+        self.assertLessEqual(len(sh.short_endpoint("https://a.example/" + "p" * 300 + "/" + "q" * 300)), 40)
         self.assertEqual(sh.short_endpoint("https://grug402.dev/"), "grug402.dev")
         self.assertEqual(len(sh.short_endpoint("https://grug402.dev/" + "p" * 300)), 40)
         for bad in ("", None, "not a url", "http://[bad"):
@@ -332,6 +341,26 @@ class HomeViewTests(Base):
         self.assertLessEqual(len(menu["options"]), 5)
         no_ids = sh.build_home(snapshot(), now=NOW)
         self.assertNotIn("slack_home_link_ask", text_of(no_ids))
+
+    def test_the_payments_button_only_says_all_when_the_modal_holds_them_all(self):
+        def label(count):
+            rows = [row(str(i), ts=f"2026-11-20T09:{i % 60:02d}:00+00:00") for i in range(count)]
+            view = self.view(snapshot(ledger=rows))
+            return next(e["text"]["text"] for b in view["blocks"] if b["type"] == "actions"
+                        for e in b["elements"] if e["action_id"] == sh.ACTION_PAYMENTS)
+        self.assertEqual(label(sh.MODAL_ROWS), "All payments")
+        self.assertEqual(label(sh.MODAL_ROWS + 1), f"Latest {sh.MODAL_ROWS} payments")
+
+    def test_the_address_is_in_a_text_field_when_the_modal_can_be_submitted(self):
+        sh._live["views"] = True
+        for view in (sh.build_address_modal(ADDRESS), sh.build_fund_modal(ADDRESS)):
+            field = next(b for b in view["blocks"] if b["type"] == "input")
+            self.assertEqual(field["element"]["initial_value"], ADDRESS)
+            self.assertEqual(field["element"]["type"], "plain_text_input")
+            self.assertEqual((view["callback_id"], view["submit"]["text"]), (sh.VIEW_ADDRESS, "Done"))
+            self.assertNotIn("```", text_of(view))
+        for view in (sh.build_address_modal(None), sh.build_fund_modal(None)):
+            self.assertNotIn("submit", view)  # no input block, so no submit button
 
     def test_missing_data_is_shown_as_unavailable_not_zero(self):
         partial = snapshot(balances={**BALANCES, ("radius-mainnet", "token"): None, ("base-mainnet", "native"): None},
@@ -518,11 +547,31 @@ class SlackTests(Base):
             self.assertEqual(self.run_action(sh.on_wallet, body), [True])
         self.assertEqual(len(self.app.client.opened), 1)
 
+    def test_a_real_slack_app_acks_the_address_modal(self):
+        from slack_bolt.async_app import AsyncApp
+        from slack_bolt.authorization import AuthorizeResult
+        from slack_bolt.request.async_request import AsyncBoltRequest
+
+        async def authorize(**_kwargs):
+            return AuthorizeResult(enterprise_id=None, team_id=TEAM, bot_token="xoxb-test", bot_id="B1", bot_user_id="U1")
+
+        async def go():
+            app = AsyncApp(signing_secret="secret", authorize=authorize)
+            self.assertTrue(sh.wire_slack(app, self.adapter))
+            body = {"type": "view_submission", "team": {"id": TEAM}, "user": {"id": USER, "team_id": TEAM},
+                    "api_app_id": APP, "view": {"type": "modal", "callback_id": sh.VIEW_ADDRESS,
+                                                "state": {"values": {sh.VIEW_ADDRESS: {"address": {"value": "edited"}}}}}}
+            return await app.async_dispatch(AsyncBoltRequest(body=body, mode="socket_mode"))
+        response = asyncio.run(go())
+        self.assertEqual((response.status, response.body), (200, ""))
+
     def test_wiring_adds_the_middleware_once_per_app(self):
         app = FakeApp()
         self.assertTrue(sh.wire_slack(app, self.adapter))
         self.assertFalse(sh.wire_slack(app, self.adapter))
         self.assertEqual(app.middleware, [sh._home_middleware])
+        self.assertEqual(app.views, {sh.VIEW_ADDRESS: sh.on_address_done})
+        self.assertIs(sh._live["views"], True)
         self.assertIs(sh._live["app"], app)
         with self.assertLogs(sh.logger, "WARNING"):
             self.assertFalse(sh.wire_slack(object()))
