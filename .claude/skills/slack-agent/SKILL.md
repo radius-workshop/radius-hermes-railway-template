@@ -1,0 +1,88 @@
+---
+name: slack-agent
+description: What we learned building this repo's Slack features on the pinned Hermes — plugins that hook into Slack (slack-react, slack-home, feedback-ledger), App Home and Block Kit design limits, Slack app configuration, and emoji reactions including custom emoji. Use before changing anything under plugins/slack-*, plugins/feedback-ledger, slack/manifest.json, the Slack parts of HERMES.md or skills/slack-*.md, or when someone reports that the bot can't do something in Slack.
+---
+
+# Working on the Slack agent
+
+Notes for whoever changes the Slack side of this repo next. Each point was checked against Hermes `v2026.9.24` (the `HERMES_GIT_REF` pin) or seen on the live app in November 2026. Hermes line numbers move; re-check before relying on one. When the pin changes, re-run the contract tests below.
+
+This file is for people and coding agents working on the repo. What the deployed agent should know goes in `HERMES.md` and `skills/*.md`.
+
+## How to extend Slack without patching Hermes
+
+Don't fork or patch Hermes. Write a bundled plugin under `plugins/<name>/`. `plugins/feedback-ledger`, `plugins/slack-react` and `plugins/slack-home` are the patterns to copy.
+
+- **Get the Slack app.** `ctx.register_platform_handler("slack", factory)` calls `factory(app, adapter)` with the live slack_bolt `AsyncApp`. It runs again for every new app, because a reconnect builds a new one. Mark the app once wired (`app._radius_<plugin>_wired`) so middleware isn't added twice, and keep the newest `app`, `adapter` and running loop.
+- **slack_bolt runs only the first matching listener.** Hermes already listens for `app_home_opened` (it uses it for the Messages tab) and for the `hermes_feedback` action. A second listener for either never runs. Add a global middleware with `app.use(...)` instead: it sees every request first. It must filter narrowly, do no slow work, and always `await next()`.
+- **Buttons.** `ctx.register_slack_action_handler(action_id, cb)` with `async def cb(ack, body, action)`. No client is passed in; use the app you kept. Ack within 3 seconds. A `trigger_id` for `views.open` also expires after 3 seconds, so build modals from cached data. A link button (`url`) still sends a click that needs an ack; register a handler for it.
+- **Tools that call Slack.** Register with `is_async=True`. Hermes runs the handler on a different event loop from the gateway's, so send the Slack call to the loop you saved with `asyncio.run_coroutine_threadsafe` (see `_call` in `plugins/slack-react`).
+- **Who and where.** Read the conversation from `gateway.session_context.get_session_env`: `HERMES_SESSION_PLATFORM`, `_CHAT_ID`, `_THREAD_ID`, `_MESSAGE_ID` (the message that started the turn), `_USER_ID`, `_SCOPE_ID` (team). Never take a channel from the model. A tool that acts in Slack should act only in the conversation the turn came from.
+- **Hooks.** `ctx.register_hook("post_tool_call", cb)` gets `tool_name` and no user id; read the session variables above inside the hook. It runs on a worker thread, so don't block in it.
+- **Authorization.** Outside a turn (Home tab opens, button clicks) use `adapter._is_interactive_user_authorized(user_id, channel_id=..., team_id=...)`. It applies `SLACK_ALLOWED_USERS`, `SLACK_ALLOW_ALL_USERS` and the gateway rules. If the check can't run, show nothing sensitive.
+- **Multi-workspace.** `adapter._get_client(channel, team_id=...)` picks the workspace's client; fall back to `app.client`.
+- **Private Hermes methods.** Every private name a plugin depends on needs two guards: a check in `scripts/smoke_image.py` (runs in CI's `container` job) and a `PinnedHermesContractTests` test that skips when Hermes isn't importable.
+- **Plugin loading.** `scripts/entrypoint.sh` enables every `plugins/*/plugin.yaml` on boot and enables a toolset named after the plugin, so name the toolset the same as the plugin.
+
+## Testing
+
+- Load a plugin in tests with `importlib` (see the top of `tests/test_slack_react.py`). Plugin directories have hyphens and aren't importable by name.
+- To run the contract tests, or to drive a plugin through the real adapter, fetch the pinned Hermes and put it on `PYTHONPATH`:
+
+  ```sh
+  git init hermes-src && cd hermes-src
+  git remote add origin https://github.com/NousResearch/hermes-agent.git
+  git fetch --depth 1 origin v2026.9.24 && git checkout FETCH_HEAD
+  PYTHONPATH=$PWD python -m pytest /path/to/repo/tests/test_slack_home.py -k Pinned
+  ```
+
+  Run Python from outside the repo root when importing Hermes: the repo's own `plugins/` directory shadows Hermes' `plugins` package.
+- A real `AsyncApp` can be dispatched offline: build it with a fake `authorize`, call `adapter._register_bolt_handlers()`, then `app.async_dispatch(AsyncBoltRequest(body=..., mode="socket_mode"))`. `tests/test_feedback_ledger.py` does this.
+- None of this proves how Slack renders a view. Check on the live app.
+
+## Reactions and custom emoji ("slackmojis")
+
+- The 👀 on a message addressed to the bot, and the ✅ or ❌ that replaces it, are added by the Hermes Slack adapter, not by the model. `SLACK_REACTIONS=false` turns them off. The model can't see them, so without a note in `HERMES.md` it denies having added them.
+- Hermes gives the model no way to react in Slack. `send_message` has a `react` action, but the Slack adapter has no `add_reaction` method, and `ctx.platform_actions.add_reaction` covers Telegram and Discord only. `plugins/slack-react` adds the `slack_react` tool.
+- `reactions.add` takes the emoji **name** without colons. A workspace custom emoji works exactly like a standard one. A pasted emoji character is not a name.
+- Useful error codes: `invalid_name` (no emoji with that name here), `already_reacted` and `no_reaction` (treat as success), `missing_scope` (needs `reactions:write`, already in the manifest).
+- The bot can remove only its own reactions.
+- The bot can't list the workspace's custom emoji. That needs the `emoji:read` scope, which the manifest doesn't request. Until it does, the bot must be told the exact name.
+- The thread context Hermes gives the model has no message timestamps. The model knows the triggering message and the thread parent; for any other message it needs a link. The `p1760649990000200` at the end of a Slack message link is the timestamp `1760649990.000200`.
+- In a reply, `:name:` in the text renders the emoji, custom ones included. That needs no tool.
+
+## Slack app configuration
+
+- `slack/manifest.json` describes the app, but changing the file does not change an installed app. Apply the change in the app's settings at api.slack.com/apps, or push the manifest with the Slack CLI (README, "Slack app from code").
+- **Find the right app.** There can be several apps with the same name. In Slack open the app, go to **About**, and follow the settings link from there.
+- **Home tab.** App settings → **App Home** → **Show Tabs** → **Home Tab**. Then reload Slack (Cmd+R). The tab appears first, before Messages, About and Tasks. `views.publish` needs no scope. Until the toggle is on, the plugin receives no Home events and logs nothing.
+- The app uses `agent_view` (Slack's agent layout). It still has a Home tab. `app_home_opened` arrives for both the Home and Messages tabs; check `event.tab`.
+- Scopes already in the manifest that these plugins use: `reactions:write`, `reactions:read`, `chat:write`, `assistant:write`.
+- A deploy restarts the gateway and interrupts anyone talking to the bot. Ask the operator first. The service may be running a tree that is ahead of `main`; check what is live before deploying, or you roll changes back.
+- After a deploy, the boot log should show, per plugin, `[Slack] Wired native handlers from plugin '<name>'`, then `[slack-react] ready to add reactions`, `[slack-home] publishing the App Home tab` and `✓ slack connected`. About 30 seconds of `JWT verification failed` on `/health` before that is the entrypoint's wait loop, not a fault.
+
+## Designing for the Home tab
+
+What Block Kit did on the live Home tab, desktop, November 2026:
+
+- **No large type.** A `header` block is the biggest text there is, and it renders only slightly larger than bold body text. A design with a 40px headline number can't be matched.
+- **`section` fields are two columns across the full width.** On a wide window the second column starts at the middle of the pane, far from the first. There is no three- or four-column layout, and a section holds at most 10 fields.
+- **Slack auto-links anything that looks like a URL**, including a bare `host/path` in mrkdwn. Long endpoints become long blue links. Shorten them, or expect links.
+- **Date tokens work.** `<!date^{unix}^{date_short_pretty} {time}|fallback>` shows in the reader's own time zone ("Yesterday 3:13 PM").
+- **`table` and `alert` blocks are untested on the Home tab.** `slack-home` uses sections instead. If you try them, test on the live app and keep the fallback.
+- **Limits.** 100 blocks per view, 3000 characters per section text, 25 elements per actions block, 24 characters for a modal title.
+- **Ledger text is untrusted.** `url`, `requested_by` and similar fields come from sellers or the model. Escape `&`, `<`, `>`, strip mrkdwn markers and truncate before putting them in a view. `requested_by` is free text and usually a display name, not a user id; render a mention only when it matches a user id.
+- **Show "Unavailable", never zero,** when a balance can't be read, and leave it out of a total with a note.
+- **Don't draw limits the code doesn't have.** The first design showed a daily budget and a reset time; the template has only `X402_MAX_PER_CALL`.
+- **No copy button, no QR code.** Block Kit can't copy to the clipboard. Put a full address in a code block so it can be selected. A QR code would mean sending the address to an image service.
+
+Open at the time of writing:
+
+- The operator said the first Home tab build was not quite the design they wanted, and had not yet said which parts. Ask before reworking it.
+- The "Ask the agent" button uses `slack://app?team=<T>&id=<A>&tab=messages`. It renders; nobody has confirmed that clicking it opens the Messages tab.
+- How the Home tab looks on mobile in the agent layout.
+
+## Replies in channels and threads
+
+- The model writes markdown and Hermes converts it. It cannot send Block Kit itself; `skills/slack-card.md` covers "cards". Don't teach it to post through the Slack API from a terminal (`HERMES.md` forbids that).
+- When someone reports "the bot says it can't do X in Slack", check three things in order: whether Hermes exposes a tool for X on Slack at the pinned version, whether the app has the scope, and whether `HERMES.md` tells the model the tool exists. The reaction problem was the first and the third; the scope was already there.
