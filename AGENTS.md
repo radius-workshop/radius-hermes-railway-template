@@ -28,6 +28,15 @@ The Helm chart is in `deploy/helm/hermes-agent`. `tests/test_helm_chart.py`
 renders it when `helm` is installed. CI's `container` job also runs
 `scripts/test_helm_chart.sh`, which installs the chart on a kind cluster.
 
+## Slack work
+
+Before changing a Slack plugin (`plugins/slack-*`, `plugins/feedback-ledger`),
+`slack/manifest.json` or the Slack parts of `HERMES.md`, read
+[.claude/skills/slack-agent/SKILL.md](.claude/skills/slack-agent/SKILL.md). It
+records how to hook into Slack without patching Hermes, what the App Home tab
+can and can't render, how the Slack app is configured, and how reactions and
+custom emoji work. Claude Code loads it as the `slack-agent` skill.
+
 ## Commits and pull requests
 
 CI's `PR conventions` workflow fails a PR that breaks these; details are in
