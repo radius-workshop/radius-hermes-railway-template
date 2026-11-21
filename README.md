@@ -510,7 +510,7 @@ The bundled `slack-home` plugin fills the agent's **Home** tab in Slack with a w
 | Wallet | The short address, with a **⋯** menu: show the full address, open the Radius or Base explorer | `radius_wallet_address` tool |
 | ETH for gas | ETH on Base. A dollar value only when `SLACK_HOME_ETH_USD` is set. Never part of the total | `eth_getBalance` |
 | Spending | `X402_MAX_PER_CALL`, today's settled payments (UTC), `X402_ALLOWED_HOSTS`, `X402_PAID_NETWORKS` | environment and the x402 ledger |
-| Recent x402 payments | The latest five priced attempts as a table (time, endpoint, chain, paid, status), with an **All payments** modal for the latest 25 | `${HERMES_HOME}/x402/ledger.jsonl` |
+| Recent x402 payments | The latest five priced attempts as a table (time, endpoint, chain, paid, status), with a modal for the latest 25 (the button says **All payments** only when there are 25 or fewer) | `${HERMES_HOME}/x402/ledger.jsonl` |
 | Feedback, last 7 days | 👍 and 👎 counts | `feedback_ledger` tool |
 | Testnet | SBC on Radius Testnet and USDC on Base Sepolia, in small print, not counted | same RPC calls |
 
@@ -518,7 +518,7 @@ The bundled `slack-home` plugin fills the agent's **Home** tab in Slack with a w
 
 **Who sees it.** Hermes' own check decides (`SLACK_ALLOWED_USERS`, `SLACK_ALLOW_ALL_USERS`, gateway rules). Anyone else gets a short notice with no balances or payments. If the check can't be run, nobody sees balances.
 
-**Payments shown.** Mainnet payments when `X402_PAID_NETWORKS` has a mainnet network, otherwise testnet ones. Rows come from the local attempt ledger and are not reconciled with the chain. There is no daily spending limit in this template, so the tab shows what was spent today, not a budget. Endpoints are shortened (`host/…/last-part`, long hex ids cut to `0x1234…`) and who asked for a payment is not shown, because the model writes that field. Slack has no table block in modals, so **All payments** lists text lines; the Home tab uses the same lines if Slack refuses the table.
+**Payments shown.** Mainnet payments when `X402_PAID_NETWORKS` has a mainnet network, otherwise testnet ones. Rows come from the local attempt ledger and are not reconciled with the chain. There is no daily spending limit in this template, so the tab shows what was spent today, not a budget. Endpoints are shortened (no `www.`, long hex ids cut to `0x1234…`, and the start of a long path replaced by `…` so its end stays readable) and who asked for a payment is not shown, because the model writes that field. Slack has no table block in modals, so the payments modal lists text lines; the Home tab uses the same lines if Slack refuses the table.
 
 **Turn it on in Slack.** `slack/manifest.json` sets `features.app_home.home_tab_enabled` to `true`. An app that is already installed needs that change too: in the app's settings, open **App Home** and switch on **Home Tab**, or push the manifest with the [Slack CLI](#slack-app-from-code-slack-cli). `views.publish` needs no extra scope, and `app_home_opened` is already subscribed.
 
@@ -529,7 +529,7 @@ SLACK_HOME_ETH_FLOOR=          # warn when ETH on Base is below this amount, e.g
 SLACK_HOME_CACHE_SECONDS=60    # 5-3600
 ```
 
-**Limits.** `SLACK_HOME_ETH_USD` is a number you keep up to date, so the ETH dollar value is only as fresh as that. A balance that can't be read shows as "Unavailable" and is left out of the total, with a note. Only USDC on Base and SBC on Radius are counted; anything else the wallet holds is not shown. **Fund wallet** shows the address to copy; there is no QR code.
+**Limits.** `SLACK_HOME_ETH_USD` is a number you keep up to date, so the ETH dollar value is only as fresh as that. A balance that can't be read shows as "Unavailable" and is left out of the total, with a note. Only USDC on Base and SBC on Radius are counted; anything else the wallet holds is not shown. **Fund wallet** and the wallet menu show the address in a text field, because Slack's mobile apps don't let people select other text in a view; editing the field changes nothing. There is no QR code.
 
 **How it is wired.** Hermes v2026.9.24 already owns the one `app_home_opened` listener (it uses it for the Messages tab), and slack_bolt runs only the first matching listener. So the plugin adds a slack_bolt global middleware through `register_platform_handler("slack", ...)`, as the feedback ledger does. It reacts only to `tab == "home"` and always passes the event on. Buttons use `register_slack_action_handler`, and the refresh after a payment is a `post_tool_call` hook.
 
