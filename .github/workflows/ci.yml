@@ -42,6 +42,8 @@ jobs:
         run: |
           uv pip install --system -r requirements-dev.txt
           python -m pip check
+      - name: Install cf_x402_proxy dependencies (its Node tests run in the suite)
+        run: npm ci --prefix scripts/cf_x402_proxy --no-fund --no-audit
       - uses: azure/setup-helm@v4
         with:
           version: v3.17.2
