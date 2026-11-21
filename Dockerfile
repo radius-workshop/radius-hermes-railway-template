@@ -93,14 +93,6 @@ ENV FOUNDRY_DIR=/opt/foundry
 RUN curl -fsSL https://foundry.paradigm.xyz | bash \
   && /opt/foundry/bin/foundryup --install "${FOUNDRY_VERSION}"
 
-# Install ByteRover before HOME is remapped to /data so it lands in /root/.local/bin.
-# /root is made traversable (not listable) so a non-root UID can run it. The
-# install's exit status is not checked (no pipefail), so tolerate a missing
-# /root/.local rather than fail the build differently from before.
-RUN curl -fsSL https://byterover.dev/install.sh | sh \
-  && chmod 0711 /root \
-  && if [ -d /root/.local ]; then chmod -R go+rX /root/.local; fi
-
 # The container runs as this unprivileged user, never root. /data is created
 # owned by it so new Docker volumes inherit that ownership; a volume mounted
 # root-owned must be handed to uid 10001 (Kubernetes: fsGroup).
@@ -110,7 +102,7 @@ RUN groupadd --system --gid 10001 hermes \
   && mkdir -p /data \
   && chown 10001:10001 /data
 
-ENV PATH="/root/.local/bin:/opt/foundry/bin:/opt/venv/bin:${PATH}" \
+ENV PATH="/opt/foundry/bin:/opt/venv/bin:${PATH}" \
   PYTHONUNBUFFERED=1 \
   HERMES_HOME=/data/.hermes \
   HOME=/data

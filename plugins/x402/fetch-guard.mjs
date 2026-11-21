@@ -6,14 +6,24 @@ import { request as httpsRequest } from 'node:https';
 import { createGunzip, createInflate, createBrotliDecompress } from 'node:zlib';
 
 const target = new URL(process.env.HERMES_X402_TARGET);
-const rpc = new URL('https://rpc.testnet.radiustech.xyz');
-const permitted = new Set([target.origin, rpc.origin]);
 const maxBytes = 1_048_576;
 
 const expectedOffer = JSON.parse(process.env.HERMES_X402_EXPECTED_OFFER || 'null');
 if (!expectedOffer || typeof expectedOffer !== 'object' || Array.isArray(expectedOffer)) {
   throw new Error('x402 validated payment offer is required');
 }
+// Only the selected chain's canonical RPC is reachable. Neither ambient RPC
+// overrides nor seller-provided URLs can expand this subprocess boundary.
+const rpcByNetwork = new Map([
+  ['eip155:72344', 'https://rpc.testnet.radiustech.xyz'],
+  ['eip155:723487', 'https://rpc.radiustech.xyz'],
+  ['eip155:84532', 'https://sepolia.base.org'],
+  ['eip155:8453', 'https://mainnet.base.org'],
+]);
+const rpcUrl = rpcByNetwork.get(expectedOffer.network);
+if (!rpcUrl) throw new Error('x402 payment network is unsupported');
+const rpc = new URL(rpcUrl);
+const permitted = new Set([target.origin, rpc.origin]);
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical);
   if (value && typeof value === 'object') {

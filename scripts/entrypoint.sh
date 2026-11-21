@@ -266,11 +266,11 @@ for key in \
   SLACK_BOT_TOKEN SLACK_APP_TOKEN SLACK_ALLOWED_USERS SLACK_ALLOW_ALL_USERS SLACK_HOME_CHANNEL SLACK_HOME_CHANNEL_NAME SLACK_ALLOWED_CHANNELS SLACK_STRICT_MENTION SLACK_IGNORE_OTHER_USER_MENTIONS SLACK_ALLOW_BOTS SLACK_REQUIRE_MENTION SLACK_REACTION_TRIGGERS WHATSAPP_ENABLED WHATSAPP_ALLOWED_USERS \
   GATEWAY_ALLOW_ALL_USERS \
   FIRECRAWL_API_KEY NOUS_API_KEY BROWSERBASE_API_KEY BROWSERBASE_PROJECT_ID BROWSERBASE_PROXIES BROWSERBASE_ADVANCED_STEALTH BROWSER_SESSION_TIMEOUT BROWSER_INACTIVITY_TIMEOUT FAL_KEY ELEVENLABS_API_KEY VOICE_TOOLS_OPENAI_KEY \
-  TINKER_API_KEY WANDB_API_KEY RL_API_URL GITHUB_TOKEN BYTEROVER_API_KEY BYTEROVER_LOCAL LINEAR_API_KEY LINEAR_TEAM_ID LINEAR_PROJECT_ID \
+  TINKER_API_KEY WANDB_API_KEY RL_API_URL GITHUB_TOKEN LINEAR_API_KEY LINEAR_TEAM_ID LINEAR_PROJECT_ID \
   TERMINAL_BACKEND TERMINAL_DOCKER_IMAGE TERMINAL_SINGULARITY_IMAGE TERMINAL_MODAL_IMAGE TERMINAL_CWD TERMINAL_TIMEOUT TERMINAL_LIFETIME_SECONDS TERMINAL_CONTAINER_CPU TERMINAL_CONTAINER_MEMORY TERMINAL_CONTAINER_DISK TERMINAL_CONTAINER_PERSISTENT TERMINAL_SANDBOX_DIR TERMINAL_SSH_HOST TERMINAL_SSH_USER TERMINAL_SSH_PORT TERMINAL_SSH_KEY SUDO_PASSWORD \
   WEB_TOOLS_DEBUG VISION_TOOLS_DEBUG MOA_TOOLS_DEBUG IMAGE_TOOLS_DEBUG CONTEXT_COMPRESSION_ENABLED CONTEXT_COMPRESSION_THRESHOLD CONTEXT_COMPRESSION_MODEL HERMES_MAX_ITERATIONS HERMES_TOOL_PROGRESS HERMES_TOOL_PROGRESS_MODE \
   RADIUS_HOME RADIUS_WALLET_ADDRESS RADIUS_NETWORK RADIUS_RPC_URL RADIUS_SBC_ADDRESS RADIUS_CHAIN_ID RADIUS_EXPLORER_URL RADIUS_CLI_BIN RADIUS_AUTO_FUND RADIUS_FAUCET_URL \
-  X402_MAX_PER_CALL X402_ALLOWED_HOSTS X402_DEMO_BASE_URL X402_LEDGER_PATH \
+  X402_MAX_PER_CALL X402_ALLOWED_HOSTS X402_DEMO_BASE_URL X402_LEDGER_PATH X402_PAID_NETWORKS \
   ERC8004_NETWORK ERC8004_TESTNET_RPC_URL ERC8004_TESTNET_REGISTRY ERC8004_TESTNET_EXPLORER_URL ERC8004_TESTNET_CHAIN_ID ERC8004_MAINNET_RPC_URL ERC8004_MAINNET_REGISTRY ERC8004_MAINNET_EXPLORER_URL ERC8004_MAINNET_CHAIN_ID ERC8004_GAS_LIMIT ERC8004_MAX_AGENT_URI_BYTES \
   AGENT_NAME AGENT_DESCRIPTION AGENT_IMAGE AGENT_ACTIVE AGENT_X402_SUPPORT AGENT_SUPPORTED_TRUST AGENT_A2A_VERSION AGENT_ERC8004_ID AGENT_ERC8004_REGISTRY AGENT_ANS_NAME AGENT_ANS_AGENT_ID AGENT_ANS_HOST AGENT_ANS_STATUS AGENT_WALLET AGENT_EMAIL AGENT_ENS \
   WEBHOOK_PORT WEBHOOK_SECRET DEBUG_SKILLS \
@@ -499,40 +499,36 @@ else
   echo "[bootstrap] Radius wallet already initialized: ${RADIUS_WALLET_ADDRESS:-unknown}"
 fi
 
-# === ByteRover: configure memory provider (one-time) ===
+# === memory: ByteRover is no longer installed ===
+# Earlier releases wrote this marker after setting memory.provider to byterover.
+# The CLI is gone, so reset that one value to the built-in memory (""), then drop
+# the marker so this runs once. If the reset fails the marker stays and it retries.
 BYTEROVER_MARKER="${HERMES_HOME}/.byterover/initialized"
-mkdir -p "${HERMES_HOME}/.byterover"
-if [[ -n "${BYTEROVER_API_KEY:-}" ]] || is_true "${BYTEROVER_LOCAL:-}"; then
-  if [[ ! -f "$BYTEROVER_MARKER" ]]; then
-    if [[ -n "${BYTEROVER_API_KEY:-}" ]]; then
-      # Cloud mode: authenticate with API key
-      export BRV_API_KEY="${BYTEROVER_API_KEY}"
-      echo "[bootstrap] Authenticating ByteRover CLI..."
-      if brv login -k "$BRV_API_KEY" 2>/dev/null || brv login --api-key "$BRV_API_KEY" 2>/dev/null; then
-        echo "[bootstrap] ByteRover authenticated."
-      else
-        echo "[bootstrap] WARNING: brv login failed — check BYTEROVER_API_KEY." >&2
-      fi
-    else
-      echo "[bootstrap] ByteRover local mode — skipping cloud authentication."
-    fi
-    echo "[bootstrap] Configuring Hermes to use ByteRover memory provider..."
-    if hermes config set memory.provider byterover; then
-      date -u +"%Y-%m-%dT%H:%M:%SZ" > "$BYTEROVER_MARKER"
-      echo "[bootstrap] ByteRover memory provider configured."
-    else
-      echo "[bootstrap] WARNING: Failed to configure ByteRover. Will retry on next boot." >&2
-    fi
-  else
-    echo "[bootstrap] ByteRover already configured."
-    if [[ -n "${BYTEROVER_API_KEY:-}" ]]; then
-      # Re-authenticate on every boot (token may have expired)
-      export BRV_API_KEY="${BYTEROVER_API_KEY}"
-      brv login -k "$BRV_API_KEY" 2>/dev/null || brv login --api-key "$BRV_API_KEY" 2>/dev/null || true
-    fi
+if [[ -f "$BYTEROVER_MARKER" ]]; then
+  if python3 - <<'PYEOF'
+import os
+import sys
+from pathlib import Path
+
+import yaml
+
+cfg_file = Path(os.environ["HERMES_HOME"]) / "config.yaml"
+try:
+    with cfg_file.open() as f:
+        cfg = yaml.safe_load(f) or {}
+    memory = cfg.get("memory")
+    if isinstance(memory, dict) and str(memory.get("provider", "")).strip().lower() == "byterover":
+        memory["provider"] = ""
+        with cfg_file.open("w") as f:
+            yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        print("[bootstrap] Reset memory.provider from byterover to the built-in memory.")
+except Exception as exc:
+    print(f"[bootstrap] WARNING: could not reset memory.provider: {exc}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+  then
+    rm -rf "${HERMES_HOME}/.byterover"
   fi
-else
-  echo "[bootstrap] BYTEROVER_API_KEY not set and BYTEROVER_LOCAL not enabled — skipping ByteRover setup."
 fi
 
 # === bundled plugins: ensure plugins and their toolsets are enabled in config.yaml ===

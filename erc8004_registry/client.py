@@ -99,7 +99,6 @@ def _cast_bin() -> str:
     if discovered:
         return discovered
     for candidate in (
-        "/root/.foundry/bin/cast",
         "/usr/local/bin/cast",
         "/opt/foundry/bin/cast",
         str(_repo_root() / ".foundry" / "bin" / "cast"),
