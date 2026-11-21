@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: pr-conventions-${{ github.event.pull_request.number }}
@@ -35,16 +36,20 @@ jobs:
       - name: Commit messages follow Conventional Commits
         # The checkout is GitHub's merge commit: its first parent is the base branch, its second the PR head.
         run: bunx --bun commitlint --from HEAD^1 --to HEAD^2 --verbose
+      # Read the title and description now, not from the event: a push and an edit made together start
+      # two runs, one is cancelled, and the survivor's event may hold the text from before the edit.
       - name: PR title follows Conventional Commits
         if: ${{ !cancelled() }}
         env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        run: printf '%s\n' "$PR_TITLE" | bunx --bun commitlint --verbose
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .title | bunx --bun commitlint --verbose
       - name: PR description has a summary, risks and how to revert
         if: ${{ !cancelled() }}
         env:
-          PR_BODY: ${{ github.event.pull_request.body }}
-        run: bun run check-pr-body.ts
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: PR_BODY="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '.body // ""')" bun run check-pr-body.ts
       - name: Test the checks themselves
         if: ${{ !cancelled() }}
         run: bun test
