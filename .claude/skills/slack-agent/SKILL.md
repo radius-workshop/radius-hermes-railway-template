@@ -63,7 +63,7 @@ Don't fork or patch Hermes. Write a bundled plugin under `plugins/<name>/`. `plu
 
 ## Designing for the Home tab
 
-What Block Kit did on the live Home tab, desktop, November 2026:
+What Block Kit did on the live Home tab in November 2026, on desktop and on the iOS app:
 
 - **No large type.** A `header` block is the biggest text there is, and it renders only slightly larger than bold body text. A design with a 40px headline number can't be matched.
 - **`section` fields are two columns across the full width.** On a wide window the second column starts at the middle of the pane, far from the first. There is no three- or four-column layout, and a section holds at most 10 fields.
@@ -76,13 +76,34 @@ What Block Kit did on the live Home tab, desktop, November 2026:
 - **Ledger text is untrusted.** `url`, `requested_by` and similar fields come from sellers or the model. Escape `&`, `<`, `>`, strip mrkdwn markers and truncate before putting them in a view. `requested_by` is free text and usually a display name, not a user id; render a mention only when it matches a user id.
 - **Show "Unavailable", never zero,** when a balance can't be read, and leave it out of a total with a note.
 - **Don't draw limits the code doesn't have.** The first design showed a daily budget and a reset time; the template has only `X402_MAX_PER_CALL`.
-- **No copy button, no QR code.** Block Kit can't copy to the clipboard. Put a full address in a code block in a modal so it can be selected ("Show full address" in the wallet menu). A QR code would mean sending the address to an image service.
+- **No copy button, no QR code.** Block Kit can't copy to the clipboard.
+- **On mobile, text in a view can't be selected**, code blocks included. Seen on iOS: the address in a code block in a modal could not be copied. A text field can be selected, so put a value people must copy in a `plain_text_input` with `initial_value`. That has two costs. A modal with an input block must have a `submit` button, and the submission needs an ack: register `app.view(callback_id)` on the app you were handed (Hermes registers no view listeners, so your own callback id is safe). And the field is editable, so say that editing changes nothing and read nothing from it. Desktop can select a code block, which hides the problem.
+- **A label promises what the control does.** The first table build had an "All payments" button that opened the latest 25. Name the limit ("Latest 25 payments"), or page through everything.
+- **Shortening must keep the part that differs.** `host/…/last-segment` turned five calls to five merchants into five identical `www.x402scan.com/…/stats` rows. Keep the end of the path, cut long ids rather than dropping them, and drop `www.`. Check shortened text against real ledger rows; the test fixtures had short URLs and showed nothing wrong.
+- **What a table looks like on a phone.** About two columns fit; the rest scroll sideways, so put the columns people need first. The first row is drawn as a header. A `date` element with `{date_short_pretty} {time}` reads "Nov 19 3:13 PM". Buttons in an actions block stack full-width, one per row, and section fields stack in one column. A QR code would mean sending the address to an image service.
 
 Open at the time of writing:
 
-- The second Home tab layout (payments table, wallet menu) is deployed, but nobody has confirmed how Slack draws the table, on desktop or mobile.
+- Whether the address in a text field can be copied on iOS and Android. It is built on that expectation and not yet checked on a phone.
+- How the table looks on desktop. Only mobile screenshots have been seen.
 - The "Ask the agent" button uses `slack://app?team=<T>&id=<A>&tab=messages`. It renders; nobody has confirmed that clicking it opens the Messages tab.
 - How the Home tab looks on mobile in the agent layout.
+
+## How to run a design iteration
+
+Both Home tab rounds went wrong in ways no test could see, and both were caught from a screenshot. So:
+
+1. **Start from what Slack can draw.** Mock the view with Block Kit's real blocks at Slack's real sizes, for desktop and for a phone. A free-form mockup gets built as something else and the difference reads as a bug.
+2. **Check each block against each surface** in Slack's reference before building: Home tab, modal and message support different blocks (tables: not in modals).
+3. **Build with a fallback** for any block that is new to the app, so a refused view degrades instead of leaving the tab blank, and log when the fallback is used.
+4. **Deploy, then look at it on desktop and on a phone**, with real data. Try every control: open each modal, each menu item, each link, and try to copy anything meant to be copied.
+5. **Write down what you saw here**, including what is still unchecked. Move a line out of "Open" only when someone has seen it work.
+
+Ask the operator before each deploy; it restarts the gateway.
+
+## Keeping this skill current
+
+Add to it when Slack surprises you: a block that renders differently than its reference suggests, a limit you hit, a setting that had to be changed in the app's settings, a Hermes method a plugin now depends on. Say how you know (docs, test, or seen live, with client and month), because the three age differently. Delete a line when the code or Slack has moved on.
 
 ## Replies in channels and threads
 
