@@ -55,9 +55,28 @@ element = SlackAdapter._feedback_block(None)["elements"][0]
 assert element["type"] == "feedback_buttons" and element["action_id"] == "hermes_feedback", element
 assert element["positive_button"]["value"] == "positive", element
 assert element["negative_button"]["value"] == "negative", element
+# plugins/slack-react reads the conversation and the triggering message from these session variables.
+from gateway import session_context
+names = {var.name for var in session_context._SESSION_VARS}
+for name in ("HERMES_SESSION_PLATFORM", "HERMES_SESSION_CHAT_ID", "HERMES_SESSION_THREAD_ID",
+             "HERMES_SESSION_MESSAGE_ID", "HERMES_SESSION_SCOPE_ID"):
+    assert name in names, name + " missing; update plugins/slack-react"
+assert callable(session_context.get_session_env), "get_session_env missing"
 """
 contract = subprocess.run([sys.executable, "-c", FEEDBACK_CONTRACT], cwd="/", capture_output=True, text=True)
 assert contract.returncode == 0, "Hermes Slack feedback contract changed; update plugins/feedback-ledger:\n" + contract.stderr
+
+# plugins/slack-home publishes the Slack App Home tab through these pinned Hermes details.
+HOME_CONTRACT = """
+from hermes_cli import plugins
+from plugins.platforms.slack.adapter import SlackAdapter
+for name in ("register_platform_handler", "register_slack_action_handler", "register_hook", "dispatch_tool"):
+    assert callable(getattr(plugins.PluginContext, name, None)), name + " missing"
+assert "post_tool_call" in plugins.VALID_HOOKS, "post_tool_call hook missing"
+assert callable(getattr(SlackAdapter, "_is_interactive_user_authorized", None)), "Slack authorization check missing"
+"""
+home_contract = subprocess.run([sys.executable, "-c", HOME_CONTRACT], cwd="/", capture_output=True, text=True)
+assert home_contract.returncode == 0, "Hermes Slack home contract changed; update plugins/slack-home:\n" + home_contract.stderr
 
 # The egress role's rendered config must load in the bundled iron-proxy.
 import socket

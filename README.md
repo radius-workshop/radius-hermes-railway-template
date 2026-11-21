@@ -89,7 +89,7 @@ That clears the persisted Railway volume paths used by Hermes before deploying:
 - `/data/workspace`
 - `/data/.claude`
 
-This resets agent memory, sessions, pairing state, ByteRover state, workspace files, and the persisted Radius wallet.
+This resets agent memory, sessions, pairing state, workspace files, and the persisted Radius wallet.
 
 ## Example prompts
 
@@ -177,6 +177,26 @@ If `LINEAR_API_KEY` is set, these are useful immediately:
 - *"Show my current Linear projects."*
 - *"Create a Linear issue for improving Railway observability."*
 - *"Summarize open issues related to A2A or logging."*
+
+## Kubernetes (Helm)
+
+The same image also runs on any Kubernetes cluster through the chart in
+[deploy/helm/hermes-agent](deploy/helm/hermes-agent/README.md). The chart
+deploys a single-replica StatefulSet with a persistent `/data` volume, an
+optional egress proxy, an optional Ingress and optional NetworkPolicies. It
+uses core Kubernetes objects only. Pods run as uid 10001 with a read-only root
+filesystem and pass the `restricted` Pod Security Standard. Credentials come
+from a Secret you provide, so any secret manager works.
+
+```sh
+kubectl create secret generic hermes-agent \
+  --from-literal=OPENROUTER_API_KEY=... --from-literal=TELEGRAM_BOT_TOKEN=...
+helm install hermes deploy/helm/hermes-agent -f deploy/helm/hermes-agent/examples/minimal.yaml \
+  --set image.repository=<registry>/radius-hermes --set image.tag=<tag>
+```
+
+`scripts/test_helm_chart.sh` installs the chart on a local kind cluster and
+checks it end to end.
 
 ## Railway deploy instructions
 
@@ -329,7 +349,7 @@ A variable replaces any value written into `config.yaml` by hand, and removing t
 
 ### Opening the bot to a whole workspace
 
-The agent has shell and file tools and runs as root, and `/data/.hermes/.env` holds the wallet key and API keys. Before allowing everyone (`SLACK_ALLOW_ALL_USERS=true`), turn those tools off. The wallet, x402, A2A, and ERC-8004 tools are plugins and keep working:
+The agent has shell and file tools (it runs as uid 10001, not root), and `/data/.hermes/.env` holds the wallet key and API keys. Before allowing everyone (`SLACK_ALLOW_ALL_USERS=true`), turn those tools off. The wallet, x402, A2A, and ERC-8004 tools are plugins and keep working:
 
 ```
 HERMES_DISABLED_TOOLSETS=terminal,file,code_execution,delegation,cronjob
@@ -436,8 +456,28 @@ agent service (tokens only) ──HTTPS_PROXY──▶ egress service (real secr
 
 ### Set it up on Railway
 
+For a value-free terminal diagnosis, run `python3.11 scripts/agent0_setup.py setup`.
+The guide discovers the linked Railway project and offers numbered service choices
+when needed. `doctor` and `status` perform the same fresh, read-only inspection;
+`--json` produces a report for automation. Supply `--project`, `--environment`,
+`--agent`, and `--egress` to target services explicitly. This checks configuration,
+not provider authentication, deployed connectivity, or wallet isolation.
+
+Enter rotated credentials from your own terminal with hidden input:
+
+```sh
+python3.11 scripts/egress/set_credential.py \
+  --project YOUR_PROJECT_ID --environment production --service egress \
+  --name OPENROUTER_API_KEY
+```
+
+Repeat for each managed credential. The helper passes the value to Railway through
+stdin and skips deployment; it never prints the value or puts it in command-line
+arguments. Keep credentials out of chat and shell commands. A sealed Railway
+variable is already configured, but its validity still needs a runtime check.
+
 1. Generate the CA and seed locally: `python3 scripts/egress/iron_egress.py gen-ca`. The output is ready for Railway's raw variable editor. Keep `EGRESS_CA_KEY` off the agent service.
-2. Add a second service from this repo, named `egress`. In its Settings, set **Railway Config File** to `/railway.egress.toml`. Give it no volume and no public domain.
+2. Add a second service from this repo, named `egress`, with no volume and no public domain. New Railway services require [Infrastructure as Code](https://docs.railway.com/infrastructure-as-code); the legacy `/railway.egress.toml` describes the intended settings but cannot be selected for a new service. `deploy/railway/egress.ts` is scoped to agent0's production project: inspect `railway config plan --file deploy/railway/egress.ts --environment production` before applying it. Other projects must adapt its project/environment guards. Install the `railway` TypeScript SDK to evaluate this file. Existing legacy deployments can retain their config during migration.
 3. On **both** services (shared variables work well): `EGRESS_SECRETS`, `EGRESS_TOKEN_SEED`, `EGRESS_CA_CERT`.
 4. On **egress** only: `EGRESS_CA_KEY` and the real value of each name in `EGRESS_SECRETS`. Railway sealed variables are a good fit.
 5. On the **agent** service: `EGRESS_PROXY_URL=http://egress.railway.internal:9090`, then **delete** the real values of the managed secrets.
@@ -497,17 +537,71 @@ Use the built-in wallet tools (`radius_wallet_address`, `radius_balance`, `radiu
 
 ## x402 payments
 
-The bundled `x402` plugin supports bounded Radius Testnet SBC payments through the installed `radius-cli` 0.5.0 `wallet pay` command. Base and mainnet paid execution are deferred. No private key is exported by this plugin.
+The bundled `x402` plugin supports exact-scheme x402 v2 payments through the installed `radius-cli` 0.5.0 `wallet pay` command on four networks. No private key is exported by this plugin.
 
-Before using it, configure exact trusted seller hostnames in `X402_ALLOWED_HOSTS` (for example `grug402.dev`) and optionally lower `X402_MAX_PER_CALL` (default `0.01` SBC). An empty host list disables all requests, including catalog lookup and quotes. Requests require HTTPS on port 443 and public DNS addresses. Both discovery requests and the payment subprocess connect to a checked public IP while retaining hostname TLS verification; redirects cannot change the destination. Seller responses remain untrusted.
+| `X402_PAID_NETWORKS` name | CAIP network | Asset | Decimals |
+|---|---|---|---|
+| `radius-testnet` | `eip155:72344` | SBC | 6 |
+| `radius-mainnet` | `eip155:723487` | SBC | 6 |
+| `base-sepolia` | `eip155:84532` | USDC | 6 |
+| `base-mainnet` | `eip155:8453` | USDC | 6 |
 
-Use `x402_catalog` to inspect demo metadata, then `x402_request` with `dry_run: true` to quote an endpoint. Obtain operator approval for the destination and amount before paying. `max_amount` can only lower the configured per-call cap. The CLI validates its own challenge and uses a threshold no greater than the quoted price. The plugin never authorizes an unlimited Permit2 approval; an approval requirement must be handled separately by the operator.
+Set `X402_PAID_NETWORKS` to a comma-separated list; `base-testnet` is accepted as an alias for `base-sepolia`. Existing installs with no setting retain `radius-testnet` only. Agent0's all-network configuration explicitly sets `X402_PAID_NETWORKS=radius-testnet,radius-mainnet,base-sepolia,base-mainnet`. A request's optional `network` pins an enabled network by name or CAIP ID. Without a pin, the plugin selects the first supported seller offer among enabled networks. The wallet must hold the selected asset on that network.
 
-`x402_ledger` reads persistent attempts from `${HERMES_HOME}/x402/ledger.jsonl`. A durable intent is written before network activity and before signing; unavailable storage blocks payment. Final write errors are returned explicitly. Protected content and URL query strings are excluded from the ledger. Up to 32 offers from each 402 response's `accepts` list (network, asset and symbol, amount, scheme, `pay_to` per offer, read from the v2 `PAYMENT-REQUIRED` header or the v1/v2 JSON body) are stored as bounded scalar values in an additive `accepts` field next to the Radius rail that was quoted or paid, so you can report on which chains and tokens sellers offer; `x402_ledger` returns an `accepts_summary` with per-network and per-token request counts. Token counts use the network and asset identifier; seller-provided symbols are display metadata. Observed offers do not enable payments on those networks. Capture is best-effort (`null` if unparseable, absent on older rows) and never affects a payment. Requester labels are caller-supplied annotations, not authenticated attribution. This local ledger is not tamper-proof.
+`x402_wallet_status` reports the actual `paid_networks` and structured `networks` details. Its singular `network` is null when multiple networks are enabled; `mainnet_enabled` is derived from whether either mainnet is enabled. These settings are independent of the Radius wallet tools' `RADIUS_NETWORK` default.
 
-A successful HTTP response describes delivery. `settlement_reported` requires a matching CLI payment report and transaction hash; on-chain reconciliation remains unverified. `payment_unknown` or a pending ledger entry may represent a charge: inspect transaction status before retrying. `x402_benchmark` runs at most 20 sequential requests through the same controls, reserves a fixed per-call share of its maximum 0.05 SBC run budget, and stops on unknown outcomes. There is no cumulative wallet spending limit. Use a dedicated testnet wallet and restrict who can invoke payment tools; opening a workspace bot also opens its enabled wallet tools.
+Set `X402_ALLOWED_HOSTS=*` to discover, quote, and pay any public HTTPS seller without registering its hostname first. To restrict destinations instead, set exact seller hostnames (for example `grug402.dev`). An empty host list disables all requests, including catalog lookup and quotes. There is no default per-call spending cap: unset/empty `X402_MAX_PER_CALL` or `unlimited` disables the operator ceiling. Set a positive numeric value to opt into a cap. A request's `max_amount`, when supplied, is still enforced (alongside any numeric operator cap). The wallet must be able to fund the quoted payment; there is no cumulative spending budget. In either host mode, requests require HTTPS on port 443 and public DNS addresses. Both discovery requests and the payment subprocess connect to a checked public IP while retaining hostname TLS verification; redirects cannot change the destination. Seller responses remain untrusted.
 
-Try: *"Show me three Radius Testnet x402 demo APIs"*, *"Quote this approved endpoint without paying"*, *"Show the x402 ledger"*.
+Use `x402_catalog` to inspect demo metadata, optionally filtering by `network` across enabled networks, then `x402_request` with `dry_run: true` to quote an endpoint. Pay within the user’s authorized task and honor any supplied `max_amount` or numeric operator cap. Separate manual approval is not required for each endpoint within that authorization; public-host mode does not require hostname approval. Amount limits use the selected six-decimal USD token: SBC on Radius or USDC on Base. The CLI validates its repeated challenge against the selected offer, including network, asset and recipient, and uses a threshold no greater than the quoted price. The plugin never authorizes an unlimited Permit2 approval; an allowance refusal must be handled separately by the operator.
+
+`x402_ledger` reads persistent attempts from `${HERMES_HOME}/x402/ledger.jsonl`. A durable intent is written before network activity and before signing; unavailable storage blocks payment. Final write errors are returned explicitly. Protected content and URL query strings are excluded from the ledger. Up to 32 offers from each 402 response's `accepts` list (network, asset and symbol, amount, scheme, `pay_to` per offer, read from the v2 `PAYMENT-REQUIRED` header or the v1/v2 JSON body) are stored as bounded scalar values in an additive `accepts` field next to the network that was quoted or paid, so you can report on which chains and tokens sellers offer; `x402_ledger` returns an `accepts_summary` with per-network and per-token request counts. Token counts use the network and asset identifier; seller-provided symbols are display metadata. Observed offers do not enable payments on those networks. Capture is best-effort (`null` if unparseable, absent on older rows) and never affects a payment. Requester labels are caller-supplied annotations, not authenticated attribution. This local ledger is not tamper-proof.
+
+A successful HTTP response describes delivery. `settlement_reported` requires a matching CLI payment report and transaction hash; on-chain reconciliation remains unverified. `payment_unknown` or a pending ledger entry may represent a charge: inspect transaction status before retrying. Pass an explicit `network` to each `x402_benchmark` run. It runs at most 20 sequential requests through the same controls, reserves a fixed per-call share of its maximum 0.05 USD-token run budget (SBC on Radius, USDC on Base), and stops on unknown outcomes. Compare networks using separate runs; these timings include CLI startup and response delivery and do not measure chain finality. There is no cumulative wallet spending limit. Restrict who can invoke payment tools; opening a workspace bot also opens its enabled wallet tools.
+
+Try: *"Show me x402 APIs on my enabled networks"*, *"Quote this endpoint on Base Sepolia without paying"*, *"Show the x402 ledger"*.
+
+## Slack Home tab
+
+The bundled `slack-home` plugin fills the agent's **Home** tab in Slack with a wallet dashboard. It is read-only: nothing on the tab can move funds.
+
+| Section | What it shows | Source |
+|---|---|---|
+| Stablecoin total | USDC on Base plus SBC on Radius, mainnet, each valued at $1.00 | `balanceOf` on each chain's public RPC |
+| Wallet | The short address, with a **⋯** menu: show the full address, open the Radius or Base explorer | `radius_wallet_address` tool |
+| ETH for gas | ETH on Base. A dollar value only when `SLACK_HOME_ETH_USD` is set. Never part of the total | `eth_getBalance` |
+| Spending | `X402_MAX_PER_CALL`, today's settled payments (UTC), `X402_ALLOWED_HOSTS`, `X402_PAID_NETWORKS` | environment and the x402 ledger |
+| Recent x402 payments | The latest five priced attempts as a table (time, endpoint, chain, paid, status), with an **All payments** modal for the latest 25 | `${HERMES_HOME}/x402/ledger.jsonl` |
+| Feedback, last 7 days | 👍 and 👎 counts | `feedback_ledger` tool |
+| Testnet | SBC on Radius Testnet and USDC on Base Sepolia, in small print, not counted | same RPC calls |
+
+**When it updates.** When someone opens the tab, when they click **Refresh**, and after the agent finishes an `x402_request` they asked for. Balances are reused for `SLACK_HOME_CACHE_SECONDS` (default 60); Refresh reads again, at most once every 5 seconds.
+
+**Who sees it.** Hermes' own check decides (`SLACK_ALLOWED_USERS`, `SLACK_ALLOW_ALL_USERS`, gateway rules). Anyone else gets a short notice with no balances or payments. If the check can't be run, nobody sees balances.
+
+**Payments shown.** Mainnet payments when `X402_PAID_NETWORKS` has a mainnet network, otherwise testnet ones. Rows come from the local attempt ledger and are not reconciled with the chain. There is no daily spending limit in this template, so the tab shows what was spent today, not a budget. Endpoints are shortened (`host/…/last-part`, long hex ids cut to `0x1234…`) and who asked for a payment is not shown, because the model writes that field. Slack has no table block in modals, so **All payments** lists text lines; the Home tab uses the same lines if Slack refuses the table.
+
+**Turn it on in Slack.** `slack/manifest.json` sets `features.app_home.home_tab_enabled` to `true`. An app that is already installed needs that change too: in the app's settings, open **App Home** and switch on **Home Tab**, or push the manifest with the [Slack CLI](#slack-app-from-code-slack-cli). `views.publish` needs no extra scope, and `app_home_opened` is already subscribed.
+
+```env
+SLACK_HOME=true                # false stops publishing the Home tab
+SLACK_HOME_ETH_USD=            # ETH price in USD that you maintain; there is no price feed
+SLACK_HOME_ETH_FLOOR=          # warn when ETH on Base is below this amount, e.g. 0.03
+SLACK_HOME_CACHE_SECONDS=60    # 5-3600
+```
+
+**Limits.** `SLACK_HOME_ETH_USD` is a number you keep up to date, so the ETH dollar value is only as fresh as that. A balance that can't be read shows as "Unavailable" and is left out of the total, with a note. Only USDC on Base and SBC on Radius are counted; anything else the wallet holds is not shown. **Fund wallet** shows the address to copy; there is no QR code.
+
+**How it is wired.** Hermes v2026.9.24 already owns the one `app_home_opened` listener (it uses it for the Messages tab), and slack_bolt runs only the first matching listener. So the plugin adds a slack_bolt global middleware through `register_platform_handler("slack", ...)`, as the feedback ledger does. It reacts only to `tab == "home"` and always passes the event on. Buttons use `register_slack_action_handler`, and the refresh after a payment is a `post_tool_call` hook.
+
+## Slack reactions
+
+The bundled `slack-react` plugin gives the agent a `slack_react` tool, so it can react to a message when asked: `slack_react({emoji, target, message_ts, remove})`. `emoji` is a name, with or without colons, and workspace custom emoji work the same way as standard ones.
+
+Hermes at v2026.9.24 only reacts by itself: 👀 while it works on a message addressed to it, then ✅ or ❌. Its `send_message` tool has a `react` action, but the Slack adapter doesn't implement it. The plugin uses the public `register_platform_handler("slack", ...)` plugin API to keep a reference to the connected Slack app, and calls Slack's `reactions.add` and `reactions.remove` with it.
+
+- **Scope.** The channel always comes from the session, so the agent can only react in the conversation the current turn came from. `target` is `message` (the message that started the turn, the default) or `thread_parent`. `message_ts` names another message in the same conversation.
+- **Permissions.** It needs the `reactions:write` bot scope, which `slack/manifest.json` already has. No setting turns it on; `SLACK_REACTIONS=false` only turns off Hermes' automatic 👀/✅/❌.
+- **Limits.** Thread context that Hermes gives the agent has no timestamps, so for an older message the agent has to ask for a link. The agent can't list the workspace's custom emoji (that needs `emoji:read`), so a wrong name comes back as `invalid_name`. It can only remove its own reactions.
 
 ## Feedback ledger
 
@@ -598,7 +692,7 @@ radius-cli wallet pay post https://<agent>/a2a \
   --protocol x402 --networks radius --threshold 0.01
 ```
 
-Another agent built from this template can use `x402_request` with the agent host in its `X402_ALLOWED_HOSTS`.
+Another agent built from this template can use `x402_request` with `X402_ALLOWED_HOSTS=*` or with the agent host explicitly listed in `X402_ALLOWED_HOSTS`.
 
 This is a testnet demo. The seller has no cumulative cap, rate limit, refund path, or delivery ledger. Its replay guard is per process. The facilitator checks signatures, balances, and settlement; retain its receipts and reconcile unknown outcomes before retrying.
 
@@ -909,12 +1003,6 @@ The webhook itself returns `202 Accepted` because sync happens asynchronously af
 - `skills.sync` for final success/error
 
 `GET /internal/skills/status` also exposes the latest delivery id, seen ref/SHAs, active ref, sync start/completion times, last result, manifest root list, and skill counts.
-
-The template also includes an opinionated ByteRover memory skill and project instructions. When ByteRover is enabled, the intended usage is:
-
-- organize memory by session date
-- save only top-level, durable topics
-- track wallet addresses, descriptions, and important transactions as structured long-term memory
 
 ### Context files and cross-agent compatibility
 

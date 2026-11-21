@@ -47,9 +47,7 @@ FROM python:3.11-slim-trixie
 # radius-cli (npm, from radiustechsystems/tools) is the wallet: keystore,
 # balances, transfers, receipts, signing. Pin it so boots are reproducible.
 ARG RADIUS_CLI_VERSION=0.5.0
-ARG VCS_REF=unknown
-LABEL org.opencontainers.image.source="https://github.com/radius-workshop/radius-hermes-railway-template" \
-      org.opencontainers.image.revision="${VCS_REF}"
+LABEL org.opencontainers.image.source="https://github.com/radius-workshop/radius-hermes-railway-template"
 
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
@@ -93,10 +91,16 @@ ENV FOUNDRY_DIR=/opt/foundry
 RUN curl -fsSL https://foundry.paradigm.xyz | bash \
   && /opt/foundry/bin/foundryup --install "${FOUNDRY_VERSION}"
 
-# Install ByteRover before HOME is remapped to /data so it lands in /root/.local/bin
-RUN curl -fsSL https://byterover.dev/install.sh | sh
+# The container runs as this unprivileged user, never root. /data is created
+# owned by it so new Docker volumes inherit that ownership; a volume mounted
+# root-owned must be handed to uid 10001 (Kubernetes: fsGroup).
+RUN groupadd --system --gid 10001 hermes \
+  && useradd --system --uid 10001 --gid 10001 --home-dir /data --no-create-home \
+    --shell /usr/sbin/nologin hermes \
+  && mkdir -p /data \
+  && chown 10001:10001 /data
 
-ENV PATH="/root/.local/bin:/opt/foundry/bin:/opt/venv/bin:${PATH}" \
+ENV PATH="/opt/foundry/bin:/opt/venv/bin:${PATH}" \
   PYTHONUNBUFFERED=1 \
   HERMES_HOME=/data/.hermes \
   HOME=/data
@@ -151,8 +155,14 @@ COPY plugins /app/plugins
 # Preserve the actual build inputs so operators can inspect a deployed image.
 COPY scripts/build_info.py /app/scripts/build_info.py
 COPY scripts/smoke_image.py /app/scripts/smoke_image.py
+# VCS_REF changes on every commit. Declare it here, after everything else, so the layers above
+# stay cached from one commit to the next.
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.revision="${VCS_REF}"
 RUN python /app/scripts/build_info.py --revision "${VCS_REF}" \
   --radius-cli-version "${RADIUS_CLI_VERSION}" > /app/build-info.json
+
+USER 10001:10001
 
 ENTRYPOINT ["tini", "--"]
 CMD ["/app/scripts/entrypoint.sh"]

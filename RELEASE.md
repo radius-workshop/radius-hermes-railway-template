@@ -59,8 +59,8 @@ Dockerfile; override the build arg to test an upgrade.
 commits and installed Python package versions. CI attaches this manifest to every
 release; it contains no credentials.
 
-Some external installers (the ByteRover install script and the Foundry bootstrap
-script) and transitive dependencies remain mutable. The manifest
+Some external installers (the Foundry bootstrap script) and transitive
+dependencies remain mutable. The manifest
 records a build's inputs; it does not guarantee byte-for-byte rebuilds. CI builds
 and tests an image but does not publish a container image or deploy Railway.
 Deploy the desired tag/commit through the Railway workflow or service settings,

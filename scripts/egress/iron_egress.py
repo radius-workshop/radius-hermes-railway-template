@@ -212,7 +212,8 @@ def _http_proxy_url(https_url: str) -> str:
     from urllib.parse import urlsplit, urlunsplit
     parts = urlsplit(https_url)
     if parts.scheme != "http" or not parts.hostname:
-        raise EgressError(f"EGRESS_PROXY_URL must look like http://egress.railway.internal:{DEFAULT_PORT}")
+        raise EgressError(f"EGRESS_PROXY_URL must look like http://<egress-host>:{DEFAULT_PORT}, "
+                          f"e.g. http://egress.railway.internal:{DEFAULT_PORT}")
     port = (parts.port or DEFAULT_PORT) + 1
     host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
     return urlunsplit((parts.scheme, f"{host}:{port}", "", "", ""))
@@ -264,7 +265,9 @@ def client_env(env: Mapping[str, str], state_dir: Path) -> Tuple[Dict[str, str],
 
     # Radius RPC and faucet carry no managed secret, and some chain tools (Foundry)
     # may not trust a MITM CA, so they connect directly.
-    no_proxy = ",".join(dict.fromkeys(["localhost", "127.0.0.1", "::1", ".railway.internal", ".radiustech.xyz",
+    # .railway.internal and .svc.cluster.local are the Railway and Kubernetes private networks.
+    no_proxy = ",".join(dict.fromkeys(["localhost", "127.0.0.1", "::1", ".railway.internal", ".svc.cluster.local",
+                                       ".radiustech.xyz",
                                        *_csv(env.get("EGRESS_NO_PROXY"))]))
     http_proxy = _http_proxy_url(proxy_url)
     for key, value in {

@@ -207,7 +207,6 @@ class AgentGraphTests(unittest.TestCase):
                 "TELEGRAM_BOT_TOKEN": "123:abc",
                 "DISCORD_ALLOWED_USERS": "111,222",
                 "WEBHOOK_SECRET": "secret-hook",
-                "BYTEROVER_API_KEY": "memory-key",
             },
             clear=False,
         ), patch.object(

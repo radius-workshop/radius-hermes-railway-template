@@ -1,0 +1,11 @@
+# Telegram + OpenRouter, no egress proxy: the agent's Secret holds the real keys,
+# as on Railway.
+#
+#   kubectl create secret generic hermes-agent \
+#     --from-literal=OPENROUTER_API_KEY=sk-or-v1-... \
+#     --from-literal=TELEGRAM_BOT_TOKEN=123456:...
+#   helm install hermes deploy/helm/hermes-agent -f deploy/helm/hermes-agent/examples/minimal.yaml
+agent:
+  existingSecret: hermes-agent
+  config:
+    TELEGRAM_ALLOWED_USERS: "123456789"

@@ -133,7 +133,7 @@ if [[ "$RESET_STATE" == "true" ]]; then
   echo "  • /data/workspace"
   echo "  • /data/.claude"
   echo ""
-  warn "This resets agent memory, sessions, pairing state, ByteRover state, workspace files, and the persisted Radius wallet."
+  warn "This resets agent memory, sessions, pairing state, workspace files, and the persisted Radius wallet."
   echo "[deploy] Resetting persisted state over Railway SSH..."
   railway ssh rm -rf /data/.hermes /data/workspace /data/.claude
   railway ssh mkdir -p /data /data/workspace
