@@ -1,0 +1,50 @@
+name: PR conventions
+
+# Commit messages, PR title and PR description. Separate from CI so that editing
+# a description re-runs only this (a few seconds), not the tests and image build.
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-conventions-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  conventions:
+    # Bots (Dependabot) write their own commits and descriptions.
+    if: github.event.pull_request.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: tools/pr-checks
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.1"
+      - run: bun install --frozen-lockfile
+      - name: Commit messages follow Conventional Commits
+        # The checkout is GitHub's merge commit: its first parent is the base branch, its second the PR head.
+        run: bunx --bun commitlint --from HEAD^1 --to HEAD^2 --verbose
+      - name: PR title follows Conventional Commits
+        if: ${{ !cancelled() }}
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: printf '%s\n' "$PR_TITLE" | bunx --bun commitlint --verbose
+      - name: PR description has a summary, risks and how to revert
+        if: ${{ !cancelled() }}
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: bun run check-pr-body.ts
+      - name: Test the checks themselves
+        if: ${{ !cancelled() }}
+        run: bun test

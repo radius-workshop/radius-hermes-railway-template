@@ -28,6 +28,17 @@ The Helm chart is in `deploy/helm/hermes-agent`. `tests/test_helm_chart.py`
 renders it when `helm` is installed. CI's `container` job also runs
 `scripts/test_helm_chart.sh`, which installs the chart on a kind cluster.
 
+## Commits and pull requests
+
+CI's `PR conventions` workflow fails a PR that breaks these; details are in
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
+- Commit messages and PR titles follow Conventional Commits:
+  `type(optional scope): summary`, for example
+  `fix(slack-react): accept emoji names with a skin tone`.
+- A PR description keeps the template's three headings: `## Summary` (a few
+  bullets), `## Risks` and `## How to revert`.
+
 ## Rules
 
 - This file is for agents working on the repo. The deployed Hermes agent reads
