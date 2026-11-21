@@ -507,9 +507,10 @@ The bundled `slack-home` plugin fills the agent's **Home** tab in Slack with a w
 | Section | What it shows | Source |
 |---|---|---|
 | Stablecoin total | USDC on Base plus SBC on Radius, mainnet, each valued at $1.00 | `balanceOf` on each chain's public RPC |
+| Wallet | The short address, with a **⋯** menu: show the full address, open the Radius or Base explorer | `radius_wallet_address` tool |
 | ETH for gas | ETH on Base. A dollar value only when `SLACK_HOME_ETH_USD` is set. Never part of the total | `eth_getBalance` |
 | Spending | `X402_MAX_PER_CALL`, today's settled payments (UTC), `X402_ALLOWED_HOSTS`, `X402_PAID_NETWORKS` | environment and the x402 ledger |
-| Recent x402 payments | The latest five priced attempts, with an **All payments** modal for the latest 25 | `${HERMES_HOME}/x402/ledger.jsonl` |
+| Recent x402 payments | The latest five priced attempts as a table (time, endpoint, chain, paid, status), with an **All payments** modal for the latest 25 | `${HERMES_HOME}/x402/ledger.jsonl` |
 | Feedback, last 7 days | 👍 and 👎 counts | `feedback_ledger` tool |
 | Testnet | SBC on Radius Testnet and USDC on Base Sepolia, in small print, not counted | same RPC calls |
 
@@ -517,7 +518,7 @@ The bundled `slack-home` plugin fills the agent's **Home** tab in Slack with a w
 
 **Who sees it.** Hermes' own check decides (`SLACK_ALLOWED_USERS`, `SLACK_ALLOW_ALL_USERS`, gateway rules). Anyone else gets a short notice with no balances or payments. If the check can't be run, nobody sees balances.
 
-**Payments shown.** Mainnet payments when `X402_PAID_NETWORKS` has a mainnet network, otherwise testnet ones. Rows come from the local attempt ledger and are not reconciled with the chain. There is no daily spending limit in this template, so the tab shows what was spent today, not a budget.
+**Payments shown.** Mainnet payments when `X402_PAID_NETWORKS` has a mainnet network, otherwise testnet ones. Rows come from the local attempt ledger and are not reconciled with the chain. There is no daily spending limit in this template, so the tab shows what was spent today, not a budget. Endpoints are shortened (`host/…/last-part`, long hex ids cut to `0x1234…`) and who asked for a payment is not shown, because the model writes that field. Slack has no table block in modals, so **All payments** lists text lines; the Home tab uses the same lines if Slack refuses the table.
 
 **Turn it on in Slack.** `slack/manifest.json` sets `features.app_home.home_tab_enabled` to `true`. An app that is already installed needs that change too: in the app's settings, open **App Home** and switch on **Home Tab**, or push the manifest with the [Slack CLI](#slack-app-from-code-slack-cli). `views.publish` needs no extra scope, and `app_home_opened` is already subscribed.
 
