@@ -39,6 +39,10 @@ jobs:
 
   checks:
     needs: validate
+    # ci.yml's `changes` job asks for pull-requests: read; a called workflow can't have more than its caller grants.
+    permissions:
+      contents: read
+      pull-requests: read
     uses: ./.github/workflows/ci.yml
     with:
       ref: ${{ needs.validate.outputs.tag }}

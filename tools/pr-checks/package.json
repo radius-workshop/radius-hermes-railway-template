@@ -1,0 +1,13 @@
+{
+  "name": "pr-checks",
+  "private": true,
+  "type": "module",
+  "description": "Checks run by .github/workflows/pr.yml: commit messages, PR title, PR description.",
+  "scripts": {
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "21.2.4",
+    "@commitlint/config-conventional": "21.2.4"
+  }
+}
