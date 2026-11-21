@@ -396,14 +396,16 @@ agent service (tokens only) ──HTTPS_PROXY──▶ egress service (real secr
 
 ### Set it up on Railway
 
-For a value-free terminal diagnosis, run `python3.11 scripts/agent0_setup.py setup`.
-The guide discovers the linked Railway project and offers numbered service choices
-when needed. `doctor` and `status` perform the same fresh, read-only inspection;
-`--json` produces a report for automation. Supply `--project`, `--environment`,
-`--agent`, and `--egress` to target services explicitly. This checks configuration,
-not provider authentication, deployed connectivity, or wallet isolation.
+To check an existing setup, run `python3.11 scripts/egress/doctor.py doctor`. It
+reads the variables of the linked Railway project's agent and egress services and
+reports what is missing, mismatched or misplaced, without printing any value. It
+offers numbered choices when a project has several services; pass `--project`,
+`--environment`, `--agent` and `--egress` to name them, and `--json` for a report
+a script can read. It checks configuration only: it doesn't test provider
+authentication or the deployed proxy path.
 
-Enter rotated credentials from your own terminal with hidden input:
+To set or rotate a real credential on the egress service, run this in your own
+terminal:
 
 ```sh
 python3.11 scripts/egress/set_credential.py \
@@ -411,10 +413,9 @@ python3.11 scripts/egress/set_credential.py \
   --name OPENROUTER_API_KEY
 ```
 
-Repeat for each managed credential. The helper passes the value to Railway through
-stdin and skips deployment; it never prints the value or puts it in command-line
-arguments. Keep credentials out of chat and shell commands. A sealed Railway
-variable is already configured, but its validity still needs a runtime check.
+It asks you to confirm the service, reads the value with hidden input, and passes
+it to `railway variable set` on stdin, so the value never appears on screen, in
+shell history or in command-line arguments. It doesn't trigger a deployment.
 
 1. Generate the CA and seed locally: `python3 scripts/egress/iron_egress.py gen-ca`. The output is ready for Railway's raw variable editor. Keep `EGRESS_CA_KEY` off the agent service.
 2. Add a second service from this repo, named `egress`, with no volume and no public domain. New Railway services require [Infrastructure as Code](https://docs.railway.com/infrastructure-as-code); the legacy `/railway.egress.toml` describes the intended settings but cannot be selected for a new service. `deploy/railway/egress.ts` is scoped to agent0's production project: inspect `railway config plan --file deploy/railway/egress.ts --environment production` before applying it. Other projects must adapt its project/environment guards. Install the `railway` TypeScript SDK to evaluate this file. Existing legacy deployments can retain their config during migration.

@@ -9,8 +9,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-import agent0_setup as setup  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "egress"))
+import doctor as setup  # noqa: E402
 
 
 def fixtures():
@@ -98,7 +98,7 @@ class RecoveryGuideTests(unittest.TestCase):
         output = io.StringIO()
         with patch.object(setup.subprocess, "run", side_effect=results) as run:
             with contextlib.redirect_stdout(output):
-                code = setup.main(["setup", "--project", "p", "--environment", "production", "--agent", "agent0", "--egress", "egress", "--json"])
+                code = setup.main(["setup", "--project", "p", "--environment", "production", "--agent", "agent", "--egress", "egress", "--json"])
         self.assertEqual(code, 0)
         report = json.loads(output.getvalue())
         self.assertTrue(report["read_only"])
@@ -126,7 +126,7 @@ class RecoveryGuideTests(unittest.TestCase):
     def test_discovery_selects_unambiguous_project_environment_and_services(self):
         data = {"id": "p", "environments": {"edges": [{"node": {
             "id": "e", "name": "production", "serviceInstances": {"edges": [
-                {"node": {"serviceId": "a", "serviceName": "agent0"}},
+                {"node": {"serviceId": "a", "serviceName": "agent"}},
                 {"node": {"serviceId": "x", "serviceName": "egress"}},
             ]},
         }}]}}
@@ -138,7 +138,7 @@ class RecoveryGuideTests(unittest.TestCase):
     def test_absent_egress_is_actionable_and_agent_inspection_continues(self):
         data = {"id": "p", "environments": {"edges": [{"node": {
             "id": "e", "name": "production", "serviceInstances": {"edges": [
-                {"node": {"serviceId": "a", "serviceName": "agent0"}},
+                {"node": {"serviceId": "a", "serviceName": "agent"}},
             ]},
         }}]}}
         agent, _ = fixtures()
