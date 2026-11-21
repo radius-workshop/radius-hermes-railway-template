@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only, secret-safe Railway recovery guide. Requires Python 3.11."""
+"""Read-only, value-free check of a Railway agent and egress service pair. Requires Python 3.11."""
 from __future__ import annotations
 
 import argparse
@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
-sys.path.insert(0, str(Path(__file__).resolve().parent / "egress"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import iron_egress as egress  # noqa: E402
 
 
@@ -139,7 +139,7 @@ def diagnose(agent: dict[str, str | None], proxy: dict[str, str | None]) -> list
                 "Preserve sealed values; verify matching configuration through a runtime proxy check.")
         elif agent[name] != proxy[name]:
             add("Proxy", "shared_mismatch", "blocked", f"{name} differs between services.",
-                "Reconcile the shared setting before restarting agent0.")
+                "Reconcile the shared setting before restarting the agent.")
         else:
             add("Proxy", "shared_matches", "configured", f"{name} matches between services.",
                 "Verify the deployed proxy path; matching variables alone are not runtime proof.")
@@ -257,7 +257,7 @@ def render(report: dict, as_json: bool = False):
     if as_json:
         print(json.dumps(report, indent=2))
         return
-    print("\nagent0 · recovery guide\n")
+    print("\nEgress setup check\n")
     if report.get("target"):
         for name, value in report["target"].items():
             print(f"{name.capitalize()}: {json.dumps(value) if value is not None else 'not deployed'}")
@@ -309,7 +309,7 @@ def main(argv=None) -> int:
                 stage="Deployment", code="egress_not_deployed" if absent_proxy else "egress_unavailable",
                 status="blocked" if absent_proxy else "unknown",
                 detail="No egress service was found in the selected environment." if absent_proxy else "The egress service could not be inspected; absence is not confirmed.",
-                action="Create a private egress service using the repository's Railway IaC configuration (deploy/railway/egress.ts); no public domain or volume." if absent_proxy else "Check the egress service target and account access, then rerun diagnosis.",
+                action="Create a private egress service as the README's egress setup steps describe; no public domain or volume." if absent_proxy else "Check the egress service target and account access, then rerun diagnosis.",
             ))
     except InspectionError as exc:
         report["error"] = str(exc)
