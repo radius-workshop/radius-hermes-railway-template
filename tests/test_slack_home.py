@@ -63,10 +63,10 @@ def text_of(view) -> str:
 
 class FakeClient:
     def __init__(self, fail=None):
-        self.published, self.opened, self.fail = [], [], fail
+        self.published, self.opened, self.fail, self.fail_tables_only = [], [], fail, False
 
     async def views_publish(self, **kwargs):
-        if self.fail:
+        if self.fail and (not self.fail_tables_only or '"table"' in json.dumps(kwargs["view"])):
             raise self.fail
         self.published.append(kwargs)
 
@@ -218,7 +218,7 @@ class HomeViewTests(Base):
         text = text_of(view)
         for expected in ("USDC · Base\\n*$812.40*", "SBC · Radius\\n*$402.10*", "*0.0214 ETH*", "Paid in SBC",
                          "SBC · Radius Testnet 412.50", "USDC · Base Sepolia 18.20", "not counted in the total",
-                         "`0x3f2a…9a2c`", "Stablecoins valued at $1.00", "Helpful\\n*18*", "Not helpful\\n*3*"):
+                         "*Wallet* 0x3f2a…9a2c", "Total value · stablecoins", "Stablecoins valued at $1.00", "Helpful\\n*18*", "Not helpful\\n*3*"):
             self.assertIn(expected, text)
         self.assertNotIn(ADDRESS[10:30], text.replace(f"/address/{ADDRESS}", ""))
 
@@ -242,46 +242,94 @@ class HomeViewTests(Base):
             text = text_of(self.view())
         for expected in ("*$1.00 max*", "*2 hosts*", "*Radius Testnet*", "Testnet only"):
             self.assertIn(expected, text)
+        with patch.dict(os.environ, {"X402_PAID_NETWORKS": "radius-testnet,base-mainnet,radius-mainnet,base-sepolia"}):
+            self.assertIn("*Base, Radius (+ 2 testnets)*", text_of(self.view()))
         with patch.dict(os.environ, {"X402_PAID_NETWORKS": "", "X402_ALLOWED_HOSTS": "", "X402_MAX_PER_CALL": "unlimited"}):
             text = text_of(self.view())
         self.assertIn("None, payments are off", text)
         self.assertIn("Approved hosts\\n*None*", text)
 
-    def test_recent_payments(self):
+    def table(self, view):
+        tables = [b for b in view["blocks"] if b["type"] == "table"]
+        self.assertEqual(len(tables), 1)
+        return tables[0]
+
+    def test_recent_payments_are_a_table(self):
         view = self.view()
+        table = self.table(view)
+        cells = [[c.get("text") or c["elements"][0]["elements"][0] for c in r] for r in table["rows"]]
+        self.assertEqual([c["text"] for c in cells[0]], ["Time", "Endpoint", "Chain", "Paid", "Status"])
+        self.assertEqual(len(cells), 5)
+        self.assertEqual(cells[1][0]["type"], "date")
+        self.assertEqual(cells[1][0]["timestamp"], int(datetime(2026, 11, 20, 9, 12, tzinfo=timezone.utc).timestamp()))
+        self.assertEqual(cells[1][1:4], ["grug402.dev/weather", "Radius", "0.05 SBC"])
+        self.assertEqual(cells[1][4], {"type": "link", "url": f"https://network.radiustech.xyz/tx/{TX}", "text": "Settled"})
+        self.assertEqual(cells[2][1:], ["grug402.dev/joke", "Base", "0.01 USDC", "Settled"])
+        self.assertEqual(cells[3][3:], ["2 SBC", "Refused, over the cap"])
+        self.assertEqual(cells[4][4], "Quote only")
+        self.assertEqual(table["column_settings"][3], {"align": "right"})
+        self.assertTrue(all(len(r) == 5 for r in table["rows"]))
+        text = text_of(view)
+        self.assertNotIn(USER, text)  # who asked is model-written free text; it is not shown
+        self.assertIn("Mainnet only · from the local attempt ledger, not chain-reconciled", text)
+        self.assertNotIn("showing", text)
+        many = snapshot(ledger=[row(str(i), ts=f"2026-11-20T09:{i:02d}:00+00:00") for i in range(12)])
+        self.assertIn("showing 5 of 12", text_of(self.view(many)))
+        self.assertEqual(len(self.table(self.view(many))["rows"]), 1 + sh.HOME_ROWS)
+
+    def test_recent_payments_as_text_lines(self):
+        view = self.view(table=False)
+        self.assertFalse([b for b in view["blocks"] if b["type"] == "table"])
+        lines = next(b for b in view["blocks"] if b["type"] == "section" and "grug402.dev/weather" in b["text"]["text"])
+        self.assertIs(lines["text"]["verbatim"], True)
         text = text_of(view)
         self.assertIn("grug402.dev/weather · Radius · *0.05 SBC*", text)
         self.assertIn(f"<https://network.radiustech.xyz/tx/{TX}|Settled>", text)
         self.assertIn("grug402.dev/joke · Base · *0.01 USDC* · Settled", text)
         self.assertIn("*2 SBC* · Refused, over the cap", text)
-        self.assertIn("Quote only", text)
-        self.assertIn(f"<@{USER}>", text)
-        self.assertIn("Mainnet only · from the local attempt ledger, not chain-reconciled", text)
-        self.assertNotIn("showing", text)
-        many = snapshot(ledger=[row(str(i), ts=f"2026-11-20T09:{i:02d}:00+00:00") for i in range(12)])
-        self.assertIn("showing 5 of 12", text_of(self.view(many)))
+        self.assertNotIn(USER, text)
+
+    def test_endpoints_are_shortened(self):
+        self.assertEqual(sh.short_endpoint("https://x402scan.com/api/x402/merchants/0xff30" + "ab" * 18 + "?q=1"),
+                         "x402scan.com/api/x402/merchants/0xff30…")
+        self.assertEqual(sh.short_endpoint("https://api.example.com/v1/some/very/long/path/to/a/resource/weather"),
+                         "api.example.com/…/weather")
+        self.assertEqual(sh.short_endpoint("https://grug402.dev/"), "grug402.dev")
+        self.assertEqual(len(sh.short_endpoint("https://grug402.dev/" + "p" * 300)), 40)
+        for bad in ("", None, "not a url", "http://[bad"):
+            self.assertEqual(sh.short_endpoint(bad), "unknown endpoint")
 
     def test_ledger_text_cannot_inject_markup_or_links(self):
         hostile = snapshot(ledger=[row(
             "x", url="https://evil.example/<!channel>*bold*`code`", requested_by="<!here> <https://evil.example|click>",
             explorer_url="https://evil.example/tx/" + TX)])
-        text = text_of(self.view(hostile))
+        row_ = self.table(self.view(hostile))["rows"][1]
+        # raw_text cells are shown as typed, and a link to anything but the network's explorer is dropped
+        self.assertEqual(row_[1], {"type": "raw_text", "text": "evil.example/<!channel>*bold*`code`"})
+        self.assertEqual(row_[4], {"type": "raw_text", "text": "Settled"})
+        for view in (self.view(hostile), self.view(hostile, table=False)):
+            self.assertNotIn("<!here>", text_of(view))
+            self.assertNotIn("click", text_of(view))
+            self.assertNotIn("evil.example/tx", text_of(view))
+        text = text_of(self.view(hostile, table=False))
         self.assertNotIn("<!channel>", text)
-        self.assertNotIn("<!here>", text)
-        self.assertNotIn("<https://evil.example", text)
         self.assertIn("evil.example/&lt;!channel&gt;boldcode", text)
 
-    def test_buttons(self):
+    def test_buttons_and_wallet_menu(self):
         view = self.view()
+        rows = [[e["action_id"] for e in b["elements"]] for b in view["blocks"] if b["type"] == "actions"]
+        self.assertEqual(rows, [[sh.ACTION_REFRESH, sh.ACTION_FUND], [sh.ACTION_PAYMENTS, "slack_home_link_ask"]])
         buttons = {e["action_id"]: e for b in view["blocks"] if b["type"] == "actions" for e in b["elements"]}
-        self.assertEqual(set(buttons), {sh.ACTION_REFRESH, sh.ACTION_FUND, sh.ACTION_PAYMENTS, "slack_home_link_radius",
-                                        "slack_home_link_base", "slack_home_link_ask"})
-        self.assertEqual(buttons["slack_home_link_base"]["url"], f"https://basescan.org/address/{ADDRESS}")
         self.assertEqual(buttons["slack_home_link_ask"]["url"], f"slack://app?team={TEAM}&id={APP}&tab=messages")
+        self.assertTrue(sh.ACTION_LINK.fullmatch("slack_home_link_ask"))
         self.assertNotIn("url", buttons[sh.ACTION_REFRESH])
-        for action_id in buttons:
-            self.assertTrue(action_id in {sh.ACTION_REFRESH, sh.ACTION_FUND, sh.ACTION_PAYMENTS}
-                            or sh.ACTION_LINK.fullmatch(action_id), action_id)
+        menu = next(b["accessory"] for b in view["blocks"] if b.get("accessory"))
+        self.assertEqual((menu["type"], menu["action_id"]), ("overflow", sh.ACTION_WALLET))
+        self.assertEqual([(o["text"]["text"], o["value"], o.get("url")) for o in menu["options"]], [
+            ("Show full address", "address", None),
+            ("Radius explorer", "radius-mainnet", f"https://network.radiustech.xyz/address/{ADDRESS}"),
+            ("Base explorer", "base-mainnet", f"https://basescan.org/address/{ADDRESS}")])
+        self.assertLessEqual(len(menu["options"]), 5)
         no_ids = sh.build_home(snapshot(), now=NOW)
         self.assertNotIn("slack_home_link_ask", text_of(no_ids))
 
@@ -301,6 +349,8 @@ class HomeViewTests(Base):
         self.assertIn("wallet address could not be read", text)
         self.assertIn("No payments yet", text)
         self.assertNotIn(sh.ACTION_FUND, text)
+        self.assertNotIn(sh.ACTION_WALLET, text)
+        self.assertNotIn('"table"', text)
         self.assertNotIn("$0.00*\"", text.split("Spent today")[0])
 
     def test_views_fit_slack_limits(self):
@@ -308,7 +358,11 @@ class HomeViewTests(Base):
                                    ts=f"2026-11-20T09:{i % 60:02d}:00+00:00") for i in range(60)])
         home = self.view(big)
         modal = sh.build_payments_modal(sh.payments(big["ledger"], "mainnet"), "mainnet")
-        for view in (home, modal, sh.build_fund_modal(ADDRESS), sh.build_limited_home(team_id=TEAM, app_id=APP)):
+        table = next(b for b in home["blocks"] if b["type"] == "table")
+        self.assertLessEqual(len(json.dumps(table["rows"])), 10000)
+        self.assertNotIn('"table"', text_of(modal))  # Slack has no table block in modals
+        for view in (home, self.view(big, table=False), modal, sh.build_fund_modal(ADDRESS),
+                     sh.build_address_modal(ADDRESS), sh.build_limited_home(team_id=TEAM, app_id=APP)):
             self.assertLessEqual(len(view["blocks"]), 100)
             for block in view["blocks"]:
                 if block["type"] == "section":
@@ -317,7 +371,8 @@ class HomeViewTests(Base):
                 if block["type"] == "actions":
                     self.assertLessEqual(len(block["elements"]), 25)
         self.assertIn("latest 25 of 60", text_of(modal))
-        self.assertLessEqual(len(modal["title"]["text"]), 24)
+        for view in (modal, sh.build_fund_modal(ADDRESS), sh.build_address_modal(ADDRESS)):
+            self.assertLessEqual(len(view["title"]["text"]), 24)
 
     def test_limited_view_and_fund_modal(self):
         limited = text_of(sh.build_limited_home(team_id=TEAM, app_id=APP))
@@ -327,6 +382,8 @@ class HomeViewTests(Base):
         self.assertIn(f"```{ADDRESS}```", fund)
         self.assertIn("Nothing on this tab can move funds", fund)
         self.assertIn("could not be read", text_of(sh.build_fund_modal(None)))
+        self.assertIn(f"```{ADDRESS}```", text_of(sh.build_address_modal(ADDRESS)))
+        self.assertIn("could not be read", text_of(sh.build_address_modal(None)))
 
 
 class SlackTests(Base):
@@ -341,10 +398,10 @@ class SlackTests(Base):
         return {"type": "event_callback", "team_id": TEAM, "api_app_id": APP,
                 "event": {"type": "app_home_opened", "user": user, "tab": tab, "channel": "D0123456789"}}
 
-    def click(self, action_id, user=USER):
+    def click(self, action_id, user=USER, **action):
         return {"type": "block_actions", "user": {"id": user, "team_id": TEAM}, "team": {"id": TEAM},
                 "api_app_id": APP, "trigger_id": "123.456.abc", "view": {"type": "home"},
-                "actions": [{"action_id": action_id, "type": "button"}]}
+                "actions": [{"action_id": action_id, "type": "button", **action}]}
 
     def run_middleware(self, body):
         passed = []
@@ -404,6 +461,29 @@ class SlackTests(Base):
         with patch.object(sh, "home_opened", side_effect=RuntimeError("bug")), self.assertLogs(sh.logger, "ERROR"):
             self.assertEqual(self.run_middleware(self.opened()), [True])
 
+    def test_falls_back_to_text_lines_if_slack_refuses_the_table(self):
+        error = RuntimeError("invalid")
+        error.response = {"ok": False, "error": "invalid_arguments"}
+        self.app.client.fail, self.app.client.fail_tables_only = error, True
+        with self.assertLogs(sh.logger, "WARNING") as logs:
+            self.run_middleware(self.opened())
+        self.assertIn("refused the payments table (invalid_arguments)", "".join(logs.output))
+        view = text_of(self.app.client.published[0]["view"])
+        self.assertNotIn('"table"', view)
+        self.assertIn("grug402.dev/weather · Radius", view)
+        self.assertIs(sh._live["tables"], False)
+        self.run_middleware(self.opened())  # no second refusal: the table is not tried again
+        self.assertEqual(len(self.app.client.published), 2)
+
+    def test_other_slack_errors_do_not_turn_tables_off(self):
+        error = RuntimeError("limited")
+        error.response = {"ok": False, "error": "ratelimited"}
+        self.app.client.fail = error
+        with self.assertLogs(sh.logger, "WARNING"):
+            self.run_middleware(self.opened())
+        self.assertEqual(self.app.client.published, [])
+        self.assertIs(sh._live["tables"], True)
+
     def test_switched_off(self):
         with patch.dict(os.environ, {"SLACK_HOME": "false"}):
             self.assertEqual(self.run_middleware(self.opened()), [True])
@@ -427,7 +507,16 @@ class SlackTests(Base):
         self.run_action(sh.on_fund, self.click(sh.ACTION_FUND, user="U999STRANGER"))
         self.run_action(sh.on_payments, self.click(sh.ACTION_PAYMENTS, user="U999STRANGER"))
         self.assertEqual(len(self.app.client.opened), 2)
-        self.assertEqual(self.run_action(sh.on_link, self.click("slack_home_link_base")), [True])
+        self.assertEqual(self.run_action(sh.on_link, self.click("slack_home_link_ask")), [True])
+
+    def test_wallet_menu(self):
+        sh._cache["address"] = ADDRESS
+        pick = lambda value, **kw: self.click(sh.ACTION_WALLET, selected_option={"value": value}, **kw)  # noqa: E731
+        self.assertEqual(self.run_action(sh.on_wallet, pick("address")), [True])
+        self.assertIn(f"```{ADDRESS}```", text_of(self.app.client.opened[0]["view"]))
+        for body in (pick("base-mainnet"), pick("address", user="U999STRANGER"), self.click(sh.ACTION_WALLET)):
+            self.assertEqual(self.run_action(sh.on_wallet, body), [True])
+        self.assertEqual(len(self.app.client.opened), 1)
 
     def test_wiring_adds_the_middleware_once_per_app(self):
         app = FakeApp()
@@ -485,7 +574,8 @@ class RegistrationTests(Base):
         sh.register(ctx)
         self.assertEqual(ctx.factories, [("slack", sh.wire_slack)])
         self.assertEqual(dict(ctx.actions), {sh.ACTION_REFRESH: sh.on_refresh, sh.ACTION_FUND: sh.on_fund,
-                                             sh.ACTION_PAYMENTS: sh.on_payments, sh.ACTION_LINK: sh.on_link})
+                                             sh.ACTION_PAYMENTS: sh.on_payments, sh.ACTION_WALLET: sh.on_wallet,
+                                             sh.ACTION_LINK: sh.on_link})
         self.assertEqual(ctx.hooks, [("post_tool_call", sh.after_tool_call)])
         self.assertFalse(hasattr(ctx, "register_tool"))
 
