@@ -1,44 +1,58 @@
-# Radius Hermes Railway Template 0.1.0
+# Radius Hermes Railway Template 0.2.0
 
 Deploy a persistent Hermes agent with Radius wallet tools, public discovery,
 trusted A2A communication, optional KYA signed claims, and Slack app setup.
 
-- **Know what is running.** The agent card and `/livez` report the template version.
-  Release validation builds and checks the container and attaches its dependency
-  inventory. Hermes and the Radius CLI have tested defaults.
-- **Control remote access.** A2A now requires explicitly trusted peer DIDs by
-  default. JWTs must expire, and outbound tokens cannot be replayed against their
-  issuer. For upgrades, configure `TRUSTED_DIDS` and exchange fresh local tokens
-  through `/token`. Existing self-issued tokens are revoked.
-- **Try bounded x402 payments.** Approve seller hostnames with `X402_ALLOWED_HOSTS`
-  before using the Radius Testnet buyer. Requests have finite per-call caps and a
-  durable intent log. Delivery, reported settlement, and unknown payment outcomes
-  are distinct; receipts still need independent reconciliation. Base and mainnet
-  payments are excluded from this release.
-- **Inspect seller payment offers.** The buyer ledger captures up to 32 advertised
-  offers per 402 response and summarizes offered networks and tokens. These are
-  seller advertisements; paid execution remains limited to Radius Testnet.
-- **Offer optional paid A2A access.** Enable prepaid Radius Testnet requests while
-  authenticated peers remain free. Payment admits public callers without DID/KYA,
-  including required KYA modes, to the full configured Hermes backend. Use a
-  dedicated deployment with restricted tools and plugins. Payment precedes
-  execution; later failures have no automatic refund. See [Paid A2A setup](README.md#paid-a2a-x402-seller)
-  for access controls, receipts, and unknown settlement outcomes.
-- **Verify optional identity claims.** KYA verification requires trusted HTTPS
-  issuers, checks audience and expiration, and prevents replay within one process.
-  Signed claims do not certify regulatory compliance or settle a payment.
-- **Operate from a known revision.** Manual Railway deployment supports explicit
-  projects, environments and services. Bootstrap tests run offline against the
-  actual skill registration code and bundled wallet tools.
+This release adds mainnet x402 payments, a Kubernetes chart, an egress proxy
+that keeps credentials out of the agent, and three Slack features. Read
+"Upgrading from 0.1.0" before you deploy it over an existing agent.
+
+## New
+
+- **Pay x402 sellers on Radius and Base, testnet and mainnet.** `X402_PAID_NETWORKS`
+  chooses among Radius Testnet and Mainnet (SBC) and Base Sepolia and Mainnet
+  (USDC). `X402_ALLOWED_HOSTS=*` allows any public HTTPS seller without approving
+  each hostname first. Receipts still need independent reconciliation with the chain.
+- **Run on Kubernetes.** A Helm chart in `deploy/helm/hermes-agent` deploys the
+  same image as a single-replica StatefulSet with a persistent volume, an optional
+  egress proxy, Ingress and NetworkPolicies. It passes the `restricted` Pod
+  Security Standard.
+- **Keep credentials out of the agent.** An optional egress service (iron-proxy)
+  holds provider credentials and injects them into outbound requests, so the agent
+  holds only tokens. `scripts/egress/doctor.py` checks a Railway setup without
+  printing any value, and `scripts/egress/set_credential.py` sets a credential
+  with hidden input.
+- **See the wallet in Slack.** The agent's Home tab shows stablecoin balances,
+  ETH for gas, spending settings and recent x402 payments. It is read-only, and
+  is shown only to people allowed to talk to the agent. Switch on **Home Tab** in
+  the Slack app's settings; `SLACK_HOME=false` turns it off.
+- **React to Slack messages.** The `slack_react` tool lets the agent add or remove
+  an emoji reaction, custom emoji included, in the conversation it is in.
+- **Read the feedback people give.** 👍/👎 clicks on the agent's Slack replies are
+  stored in a local ledger that the `feedback_ledger` tool reports on.
+- **Slack experience settings.** Railway variables control rich blocks, feedback
+  buttons and related Slack behaviour.
+
+## Upgrading from 0.1.0
+
+- **The container runs as uid 10001, not root.** The `/data` volume must be
+  writable by that user, or the agent stops at boot with a message saying so. On
+  Kubernetes set `fsGroup: 10001` (the chart does); for Docker, `chown` the volume
+  to `10001:10001`.
+- **x402 has no default per-call cap.** 0.1.0 capped a payment at 0.01 SBC unless
+  you set `X402_MAX_PER_CALL`. Now an unset or empty value means no cap. Set a
+  positive number to keep one. There is no cumulative budget.
+- **x402 networks.** An install with no `X402_PAID_NETWORKS` keeps paying on Radius
+  Testnet only. Mainnet payments happen only if you enable a mainnet network.
 - **ByteRover is removed.** The image no longer installs the ByteRover CLI, and
   `BYTEROVER_API_KEY` and `BYTEROVER_LOCAL` are ignored. On first boot after an
   upgrade, an existing volume's `memory.provider: byterover` is reset to Hermes'
   built-in memory. Memories already stored in ByteRover are not migrated.
+- **radius-cli is 0.5.0 and needs Node.js 22**, which the image provides.
 
-Telegram, Discord and Slack chat are supported. Optional Discord voice-channel
-support is excluded to avoid an unsafe dependency constraint.
+## Unchanged
 
-This template remains demo software. Automated checks cover repository tests,
-container construction, HTTP discovery, liveness and authentication. They do not
-certify a production deployment or execute external paid transactions. The
-container retains terminal access and should not be entrusted with real funds.
+A2A requires explicitly trusted peer DIDs by default, JWTs must expire, and KYA
+verification requires trusted HTTPS issuers. Paid A2A access remains optional and
+on Radius Testnet. Telegram, Discord and Slack chat are supported; optional
+Discord voice-channel support is excluded to avoid an unsafe dependency constraint.

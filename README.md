@@ -1,6 +1,6 @@
 # Hermes Agent Railway Template
 
-[Release v0.1.0](https://github.com/radius-workshop/radius-hermes-railway-template/releases/tag/v0.1.0) · [Release process](RELEASE.md)
+[Release v0.2.0](https://github.com/radius-workshop/radius-hermes-railway-template/releases/tag/v0.2.0) · [Release process](RELEASE.md)
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/hermes-railway-template?referralCode=uTN7AS&utm_medium=integration&utm_source=template&utm_campaign=generic)
 
