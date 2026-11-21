@@ -11,6 +11,7 @@ import subprocess
 parser = argparse.ArgumentParser()
 parser.add_argument("--revision", required=True)
 parser.add_argument("--radius-cli-version", required=True)
+parser.add_argument("--sbc-cli-version", required=True)
 args = parser.parse_args()
 
 
@@ -33,6 +34,9 @@ def hermes_dependency_overrides() -> dict:
 actual_cli_version = subprocess.check_output(["radius-cli", "--version"], text=True).strip()
 if actual_cli_version != args.radius_cli_version:
     raise SystemExit("Installed Radius CLI version differs from the requested build version")
+actual_sbc_cli_version = subprocess.check_output(["sbc", "--version"], text=True).strip()
+if actual_sbc_cli_version != args.sbc_cli_version:
+    raise SystemExit("Installed SBC CLI version differs from the requested build version")
 
 print(json.dumps({
     "version": (Path(__file__).resolve().parents[1] / "VERSION").read_text().strip(),
@@ -42,6 +46,7 @@ print(json.dumps({
     "linear_skill_commit": commit("/app/scripts/linear-skill"),
     "radius_skills_commit": commit("/app/vendor/radius-skills"),
     "radius_cli_version": actual_cli_version,
+    "sbc_cli_version": actual_sbc_cli_version,
     "node_version": subprocess.check_output(["node", "--version"], text=True).strip(),
     "python_packages": {
         package.metadata["Name"]: package.version for package in distributions()

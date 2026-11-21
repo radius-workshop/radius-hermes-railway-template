@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Check the built HTTP server with an isolated, unfunded fixture identity."""
+import json
 import os
 from pathlib import Path
 import sys
@@ -77,6 +78,12 @@ assert callable(getattr(SlackAdapter, "_is_interactive_user_authorized", None)),
 """
 home_contract = subprocess.run([sys.executable, "-c", HOME_CONTRACT], cwd="/", capture_output=True, text=True)
 assert home_contract.returncode == 0, "Hermes Slack home contract changed; update plugins/slack-home:\n" + home_contract.stderr
+
+# `sbc` is the wrapper around the pinned SBC CLI; it must start as the runtime user.
+build_info = json.loads(Path("/app/build-info.json").read_text())
+sbc_version = subprocess.run(["sbc", "--version"], capture_output=True, text=True)
+assert sbc_version.returncode == 0, "sbc did not start:\n" + sbc_version.stderr
+assert sbc_version.stdout.strip() == build_info["sbc_cli_version"], sbc_version.stdout
 
 # The egress role's rendered config must load in the bundled iron-proxy.
 import socket
