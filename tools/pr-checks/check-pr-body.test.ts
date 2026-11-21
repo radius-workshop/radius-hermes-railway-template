@@ -47,5 +47,6 @@ test("the summary must be a short bulleted list", () => {
 
 test("a section holding only a comment is empty", () => {
   expect(problems(GOOD.replace("Revert this PR.", "<!-- how? -->"))).toEqual(['"## How to revert" is empty.']);
+  expect(problems(GOOD.replace("Revert this PR.", "<!-<!-- a -->- b -->"))).toEqual(['"## How to revert" is empty.']);
   expect(problems(GOOD.replace("## Risks", "## Risk"))).toEqual(['Missing the "## Risks" section.']);
 });

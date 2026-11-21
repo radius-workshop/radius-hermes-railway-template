@@ -7,7 +7,12 @@ const TEMPLATE = ".github/pull_request_template.md";
 
 /** The text under each `## Heading`, with HTML comments (the template's hints) removed. */
 export function sections(body: string): Map<string, string> {
-  const text = body.replace(/\r\n/g, "\n").replace(/<!--[\s\S]*?-->/g, "");
+  let text = body.replace(/\r\n/g, "\n");
+  // Repeat until nothing changes, so "<!-<!-- x -->- y -->" can't leave a comment behind.
+  for (let previous = ""; previous !== text; ) {
+    previous = text;
+    text = text.replace(/<!--[\s\S]*?-->/g, "");
+  }
   const found = new Map<string, string>();
   let current: string | null = null;
   for (const line of text.split("\n")) {
