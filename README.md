@@ -500,6 +500,38 @@ A successful HTTP response describes delivery. `settlement_reported` requires a 
 
 Try: *"Show me x402 APIs on my enabled networks"*, *"Quote this endpoint on Base Sepolia without paying"*, *"Show the x402 ledger"*.
 
+## Slack Home tab
+
+The bundled `slack-home` plugin fills the agent's **Home** tab in Slack with a wallet dashboard. It is read-only: nothing on the tab can move funds.
+
+| Section | What it shows | Source |
+|---|---|---|
+| Stablecoin total | USDC on Base plus SBC on Radius, mainnet, each valued at $1.00 | `balanceOf` on each chain's public RPC |
+| ETH for gas | ETH on Base. A dollar value only when `SLACK_HOME_ETH_USD` is set. Never part of the total | `eth_getBalance` |
+| Spending | `X402_MAX_PER_CALL`, today's settled payments (UTC), `X402_ALLOWED_HOSTS`, `X402_PAID_NETWORKS` | environment and the x402 ledger |
+| Recent x402 payments | The latest five priced attempts, with an **All payments** modal for the latest 25 | `${HERMES_HOME}/x402/ledger.jsonl` |
+| Feedback, last 7 days | 👍 and 👎 counts | `feedback_ledger` tool |
+| Testnet | SBC on Radius Testnet and USDC on Base Sepolia, in small print, not counted | same RPC calls |
+
+**When it updates.** When someone opens the tab, when they click **Refresh**, and after the agent finishes an `x402_request` they asked for. Balances are reused for `SLACK_HOME_CACHE_SECONDS` (default 60); Refresh reads again, at most once every 5 seconds.
+
+**Who sees it.** Hermes' own check decides (`SLACK_ALLOWED_USERS`, `SLACK_ALLOW_ALL_USERS`, gateway rules). Anyone else gets a short notice with no balances or payments. If the check can't be run, nobody sees balances.
+
+**Payments shown.** Mainnet payments when `X402_PAID_NETWORKS` has a mainnet network, otherwise testnet ones. Rows come from the local attempt ledger and are not reconciled with the chain. There is no daily spending limit in this template, so the tab shows what was spent today, not a budget.
+
+**Turn it on in Slack.** `slack/manifest.json` sets `features.app_home.home_tab_enabled` to `true`. An app that is already installed needs that change too: in the app's settings, open **App Home** and switch on **Home Tab**, or push the manifest with the [Slack CLI](#slack-app-from-code-slack-cli). `views.publish` needs no extra scope, and `app_home_opened` is already subscribed.
+
+```env
+SLACK_HOME=true                # false stops publishing the Home tab
+SLACK_HOME_ETH_USD=            # ETH price in USD that you maintain; there is no price feed
+SLACK_HOME_ETH_FLOOR=          # warn when ETH on Base is below this amount, e.g. 0.03
+SLACK_HOME_CACHE_SECONDS=60    # 5-3600
+```
+
+**Limits.** `SLACK_HOME_ETH_USD` is a number you keep up to date, so the ETH dollar value is only as fresh as that. A balance that can't be read shows as "Unavailable" and is left out of the total, with a note. Only USDC on Base and SBC on Radius are counted; anything else the wallet holds is not shown. **Fund wallet** shows the address to copy; there is no QR code.
+
+**How it is wired.** Hermes v2026.9.24 already owns the one `app_home_opened` listener (it uses it for the Messages tab), and slack_bolt runs only the first matching listener. So the plugin adds a slack_bolt global middleware through `register_platform_handler("slack", ...)`, as the feedback ledger does. It reacts only to `tab == "home"` and always passes the event on. Buttons use `register_slack_action_handler`, and the refresh after a payment is a `post_tool_call` hook.
+
 ## Feedback ledger
 
 The bundled `feedback-ledger` plugin stores each 👍/👎 click on an agent reply in Slack (`SLACK_FEEDBACK_BUTTONS=true`) in `${HERMES_HOME}/feedback/ledger.jsonl`, and the agent reads it back with the `feedback_ledger` tool. Hermes still acks the click and logs `Feedback button clicked` as before; capture is added alongside it.

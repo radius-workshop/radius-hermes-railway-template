@@ -1,0 +1,3 @@
+name: slack-home
+version: "1.0.0"
+description: "Slack App Home tab showing the agent's wallet balances, recent x402 payments and feedback"
