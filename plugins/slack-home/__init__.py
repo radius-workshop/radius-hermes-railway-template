@@ -3,6 +3,10 @@
 One Block Kit view per person, published with ``views.publish`` when they open the Home tab,
 click Refresh, or the agent finishes an ``x402_request`` they asked for.
 
+Recent payments are a ``table`` block. Slack allows tables on Home tabs but not in modals, so the
+"All payments" modal lists them as text lines, and the Home tab falls back to the same lines if
+Slack refuses the table.
+
 Everything here is read-only. Balances come from ``eth_getBalance`` / ``balanceOf`` calls to
 the chains' public RPC endpoints, payments from the x402 plugin's local ledger file, and feedback
 from the ``feedback_ledger`` tool. Nothing on the tab can move funds.
@@ -51,6 +55,7 @@ GAS_NETWORK = "base-mainnet"  # the one chain where gas is paid in ETH; Radius g
 ACTION_REFRESH = "slack_home_refresh"
 ACTION_FUND = "slack_home_fund"
 ACTION_PAYMENTS = "slack_home_payments"
+ACTION_WALLET = "slack_home_wallet"  # the overflow menu beside the wallet address
 ACTION_LINK = re.compile(r"slack_home_link_\w+")  # link buttons still send a click that needs an ack
 
 RPC_TIMEOUT = 6
@@ -65,7 +70,7 @@ OUTCOMES = {
 }
 
 # The live Slack app and the snapshot cache. Process-local, like the gateway itself.
-_live: dict = {"app": None, "adapter": None, "loop": None, "dispatch": None}
+_live: dict = {"app": None, "adapter": None, "loop": None, "dispatch": None, "tables": True}
 _cache: dict = {"snapshot": None, "address": None}
 _cache_lock = threading.Lock()
 _dm_channels: dict = {}  # Slack user id -> their DM channel with the app, for the authorization check
@@ -298,10 +303,15 @@ def _mrkdwn(text: str) -> dict:
     return {"type": "mrkdwn", "text": text}
 
 
-def _section(text: str, fields: list[str] | None = None) -> dict:
+def _section(text: str, fields: list[str] | None = None, *, verbatim: bool = False,
+             accessory: dict | None = None) -> dict:
     block: dict = {"type": "section", "text": _mrkdwn(text)}
+    if verbatim:  # stops Slack turning a bare host/path into a link
+        block["text"]["verbatim"] = True
     if fields:
         block["fields"] = [_mrkdwn(field) for field in fields]
+    if accessory:
+        block["accessory"] = accessory
     return block
 
 
@@ -318,27 +328,74 @@ def _button(text: str, action_id: str, *, url: str | None = None, primary: bool 
     return button
 
 
-def payment_line(row: dict) -> str:
-    spec = NETWORKS[BY_CAIP[row["network"]]]
-    parsed = urlsplit(str(row.get("url") or ""))
-    endpoint = _text((parsed.hostname or "") + (parsed.path if parsed.path != "/" else ""), 48) or "unknown endpoint"
-    status = OUTCOMES[row["outcome"]]
+def short_endpoint(url, limit: int = 40) -> str:
+    """``host/path`` with long hex ids cut to ``0x1234…`` and, if still long, the middle of the path dropped."""
+    try:
+        parsed = urlsplit(str(url or ""))
+        host = parsed.hostname or ""
+    except ValueError:
+        host = ""
+    if not host:
+        return "unknown endpoint"
+    path = re.sub(r"0x([0-9a-fA-F]{4})[0-9a-fA-F]{5,}", "0x\\1…", parsed.path if parsed.path != "/" else "")
+    text = " ".join((host + path).split())
+    if len(text) > limit and path.count("/") > 1:
+        text = " ".join(f"{host}/…/{path.rsplit('/', 1)[1]}".split())
+    if len(text) > limit:
+        text = text[: limit - 1] + "…"
+    return text or "unknown endpoint"
+
+
+def _paid(row: dict, spec: dict) -> str:
+    return f"{_amount(row).normalize():f} {spec['symbol']}"
+
+
+def _receipt(row: dict, spec: dict) -> str | None:
+    """The explorer link of a settled payment, only when it points at that network's own explorer."""
     link = str(row.get("explorer_url") or "")
     if row["outcome"] == "settlement_reported" and re.fullmatch(re.escape(spec["explorer"]) + r"/tx/0x[0-9a-fA-F]{64}", link):
-        status = f"<{link}|{status}>"
-    parts = [_date(_when(row).timestamp(), "{date_short_pretty} {time}"), endpoint, spec["label"],
-             f"*{_amount(row).normalize():f} {spec['symbol']}*", status]
-    asked_by = str(row.get("requested_by") or "").strip().lstrip("@<").rstrip(">")
-    if _SLACK_USER.fullmatch(asked_by):
-        parts.append(f"<@{asked_by}>")
-    elif asked_by:
-        parts.append(_text(asked_by, 24))
-    return " · ".join(parts)
+        return link
+    return None
+
+
+def payment_line(row: dict) -> str:
+    spec = NETWORKS[BY_CAIP[row["network"]]]
+    status, link = OUTCOMES[row["outcome"]], _receipt(row, spec)
+    return " · ".join([_date(_when(row).timestamp(), "{date_short_pretty} {time}"), _text(short_endpoint(row.get("url"))),
+                       spec["label"], f"*{_paid(row, spec)}*", f"<{link}|{status}>" if link else status])
 
 
 def _payment_blocks(rows: list[dict]) -> list[dict]:
     # A section holds 3000 characters; five rows stay well under it.
-    return [_section("\n".join(payment_line(row) for row in rows[i:i + 5])) for i in range(0, len(rows), 5)]
+    return [_section("\n".join(payment_line(row) for row in rows[i:i + 5]), verbatim=True)
+            for i in range(0, len(rows), 5)]
+
+
+def _raw(text: str) -> dict:
+    return {"type": "raw_text", "text": text}  # shown as typed: no mrkdwn, no auto-links
+
+
+def _rich(element: dict) -> dict:
+    return {"type": "rich_text", "elements": [{"type": "rich_text_section", "elements": [element]}]}
+
+
+def payments_table(rows: list[dict]) -> dict:
+    """A ``table`` block: Time, Endpoint, Chain, Paid, Status. Keep it small; a table holds 10,000 characters."""
+    table = [[_rich({"type": "text", "text": title, "style": {"bold": True}})
+              for title in ("Time", "Endpoint", "Chain", "Paid", "Status")]]
+    for row in rows:
+        spec = NETWORKS[BY_CAIP[row["network"]]]
+        stamp, status, link = _when(row), OUTCOMES[row["outcome"]], _receipt(row, spec)
+        table.append([
+            _rich({"type": "date", "timestamp": int(stamp.timestamp()), "format": "{date_short_pretty} {time}",
+                   "fallback": stamp.astimezone(timezone.utc).strftime("%b %d %H:%M UTC")}),
+            _raw(short_endpoint(row.get("url"))),
+            _raw(spec["label"]),
+            _raw(_paid(row, spec)),
+            _rich({"type": "link", "url": link, "text": status}) if link else _raw(status),
+        ])
+    return {"type": "table", "rows": table, "column_settings": [
+        {"align": "left"}, {"align": "left"}, {"align": "left"}, {"align": "right"}, {"align": "left"}]}
 
 
 def messages_tab_url(team_id: str, app_id: str) -> str | None:
@@ -349,7 +406,8 @@ def messages_tab_url(team_id: str, app_id: str) -> str | None:
 
 # --------------------------------------------------------------------------- views
 
-def build_home(snapshot: dict, *, team_id: str = "", app_id: str = "", now: datetime | None = None) -> dict:
+def build_home(snapshot: dict, *, team_id: str = "", app_id: str = "", now: datetime | None = None,
+               table: bool = True) -> dict:
     now = now or datetime.now(timezone.utc)
     address, balances = snapshot.get("address"), snapshot.get("balances") or {}
     blocks: list[dict] = []
@@ -358,7 +416,7 @@ def build_home(snapshot: dict, *, team_id: str = "", app_id: str = "", now: date
     known = [value for value in stable.values() if value is not None]
     missing = [f"{NETWORKS[n]['symbol']} on {NETWORKS[n]['label']}" for n, v in stable.items() if v is None]
     total = usd(sum(known, Decimal(0))) if known else "Unavailable"
-    blocks.append(_context("Agent wallet · stablecoin total"))
+    blocks.append(_context("Total value · stablecoins"))
     blocks.append({"type": "header", "text": {"type": "plain_text", "text": total}})
     note = "Mainnet · Radius and Base · updated " + _date(snapshot["taken_at"])
     if not address:
@@ -372,7 +430,11 @@ def build_home(snapshot: dict, *, team_id: str = "", app_id: str = "", now: date
         return f"{NETWORKS[name]['symbol']} · {NETWORKS[name]['label']}\n*{usd(value) if value is not None else 'Unavailable'}*"
 
     if address:
-        blocks.append(_section(f"*Address* `{_short(address)}`"))
+        menu = [{"text": {"type": "plain_text", "text": "Show full address"}, "value": "address"}]
+        menu += [{"text": {"type": "plain_text", "text": f"{NETWORKS[name]['label']} explorer"}, "value": name,
+                  "url": f"{NETWORKS[name]['explorer']}/address/{address}"} for name in ("radius-mainnet", "base-mainnet")]
+        blocks.append(_section(f"*Wallet* {_short(address)}",
+                               accessory={"type": "overflow", "action_id": ACTION_WALLET, "options": menu}))
         blocks.append(_section("*Stablecoins*", [money("base-mainnet"), money("radius-mainnet")]))
         eth, price, floor = balances.get((GAS_NETWORK, "native")), eth_usd(), eth_floor()
         eth_text = "Unavailable" if eth is None else f"{eth:.4f} ETH"
@@ -385,9 +447,6 @@ def build_home(snapshot: dict, *, team_id: str = "", app_id: str = "", now: date
         blocks.append({"type": "actions", "elements": [
             _button("Refresh", ACTION_REFRESH, primary=True),
             _button("Fund wallet", ACTION_FUND),
-            _button("Radius explorer", "slack_home_link_radius",
-                    url=f"{NETWORKS['radius-mainnet']['explorer']}/address/{address}"),
-            _button("Base explorer", "slack_home_link_base", url=f"{NETWORKS['base-mainnet']['explorer']}/address/{address}"),
         ]})
     else:
         blocks.append({"type": "actions", "elements": [_button("Refresh", ACTION_REFRESH, primary=True)]})
@@ -397,7 +456,11 @@ def build_home(snapshot: dict, *, team_id: str = "", app_id: str = "", now: date
     cap = _positive("X402_MAX_PER_CALL") if os.environ.get("X402_MAX_PER_CALL", "").strip().lower() != "unlimited" else None
     hosts = [h for h in (s.strip() for s in os.environ.get("X402_ALLOWED_HOSTS", "").split(",")) if h]
     host_text = "Any public host" if "*" in hosts else f"{len(hosts)} host{'s' if len(hosts) != 1 else ''}" if hosts else "None"
-    networks = ", ".join(NETWORKS[n]["label"] for n in paid_networks()) or "None, payments are off"
+    paid = {env: [NETWORKS[n]["label"] for n in paid_networks() if NETWORKS[n]["environment"] == env]
+            for env in ("mainnet", "testnet")}
+    networks = ", ".join(paid["mainnet"] or paid["testnet"]) or "None, payments are off"
+    if paid["mainnet"] and paid["testnet"]:
+        networks += f" (+ {len(paid['testnet'])} testnet{'s' if len(paid['testnet']) != 1 else ''})"
     blocks.append({"type": "divider"})
     blocks.append(_section("*Spending*", [
         f"Per-call cap\n*{usd(cap) + ' max' if cap else 'No cap'}*",
@@ -408,7 +471,12 @@ def build_home(snapshot: dict, *, team_id: str = "", app_id: str = "", now: date
 
     blocks.append({"type": "divider"})
     blocks.append(_section("*Recent x402 payments*"))
-    blocks.extend(_payment_blocks(rows[:HOME_ROWS]) if rows else [_section("_No payments yet._")])
+    if not rows:
+        blocks.append(_section("_No payments yet._"))
+    elif table:
+        blocks.append(payments_table(rows[:HOME_ROWS]))
+    else:
+        blocks.extend(_payment_blocks(rows[:HOME_ROWS]))
     caption = f"{'Mainnet' if environment == 'mainnet' else 'Testnet'} only · from the local attempt ledger, not chain-reconciled"
     if len(rows) > HOME_ROWS:
         caption += f" · showing {HOME_ROWS} of {len(rows)}"
@@ -469,6 +537,13 @@ def build_fund_modal(address: str | None) -> dict:
     ])
 
 
+def build_address_modal(address: str | None) -> dict:
+    if not address:
+        return _modal("Wallet address", [_section("The wallet address could not be read. Try Refresh.")])
+    return _modal("Wallet address", [_section(f"```{address}```"),
+                                     _context("The same address on every network. Select it to copy.")])
+
+
 def build_payments_modal(rows: list[dict], environment: str) -> dict:
     shown = rows[:MODAL_ROWS]
     blocks = _payment_blocks(shown) if shown else [_section("_No payments yet._")]
@@ -505,6 +580,12 @@ def authorized(user_id: str, team_id: str = "") -> bool:
         return False
 
 
+def _error_code(err: Exception) -> str:
+    response = getattr(err, "response", None)
+    code = response.get("error") if response is not None and hasattr(response, "get") else None
+    return code if isinstance(code, str) else ""
+
+
 async def publish(user_id: str, team_id: str = "", app_id: str = "", *, force: bool = False) -> bool:
     """Build this person's view and publish it. Never raises."""
     try:
@@ -512,13 +593,21 @@ async def publish(user_id: str, team_id: str = "", app_id: str = "", *, force: b
             view = build_limited_home(team_id=team_id, app_id=app_id)
         else:
             snapshot = await asyncio.get_running_loop().run_in_executor(None, take_snapshot, force)
-            view = build_home(snapshot, team_id=team_id, app_id=app_id)
-        await _client(team_id).views_publish(user_id=user_id, view=view)
+            view = build_home(snapshot, team_id=team_id, app_id=app_id, table=_live["tables"])
+        try:
+            await _client(team_id).views_publish(user_id=user_id, view=view)
+        except Exception as err:
+            if not any(block["type"] == "table" for block in view["blocks"]) or not _error_code(err).startswith("invalid"):
+                raise
+            # Slack refused the view and it holds a table: publish the text-line version instead.
+            view = build_home(snapshot, team_id=team_id, app_id=app_id, table=False)
+            await _client(team_id).views_publish(user_id=user_id, view=view)
+            _live["tables"] = False
+            logger.warning("[slack-home] Slack refused the payments table (%s); using text lines from now on",
+                           _error_code(err))
         return True
     except Exception as err:
-        code = getattr(err, "response", None)
-        code = code.get("error") if code is not None and hasattr(code, "get") else None
-        logger.warning("[slack-home] could not publish the Home tab: %s", code or type(err).__name__)
+        logger.warning("[slack-home] could not publish the Home tab: %s", _error_code(err) or type(err).__name__)
         return False
 
 
@@ -619,6 +708,14 @@ async def on_payments(ack, body, action):
     await _open_modal(body, lambda: build_payments_modal(rows, environment))
 
 
+async def on_wallet(ack, body, action):
+    """The wallet menu. The explorer options are links, which Slack opens itself."""
+    await ack()
+    selected = action.get("selected_option") if isinstance(action, dict) else None
+    if isinstance(selected, dict) and selected.get("value") == "address":
+        await _open_modal(body, lambda: build_address_modal(_cache["address"]))
+
+
 async def on_link(ack, body, action):
     await ack()
 
@@ -655,5 +752,6 @@ def register(ctx):
     ctx.register_slack_action_handler(ACTION_REFRESH, on_refresh)
     ctx.register_slack_action_handler(ACTION_FUND, on_fund)
     ctx.register_slack_action_handler(ACTION_PAYMENTS, on_payments)
+    ctx.register_slack_action_handler(ACTION_WALLET, on_wallet)
     ctx.register_slack_action_handler(ACTION_LINK, on_link)
     ctx.register_hook("post_tool_call", after_tool_call)
