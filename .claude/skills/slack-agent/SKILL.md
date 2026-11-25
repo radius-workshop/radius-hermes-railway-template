@@ -82,12 +82,15 @@ What Block Kit did on the live Home tab in November 2026, on desktop and on the 
 - **Shortening must keep the part that differs.** `host/…/last-segment` turned five calls to five merchants into five identical `www.x402scan.com/…/stats` rows. Keep the end of the path, cut long ids rather than dropping them, and drop `www.`. Check shortened text against real ledger rows; the test fixtures had short URLs and showed nothing wrong.
 - **What a table looks like on a phone.** About two columns fit; the rest scroll sideways, so put the columns people need first. The first row is drawn as a header. A `date` element with `{date_short_pretty} {time}` reads "Nov 19 3:13 PM". Buttons in an actions block stack full-width, one per row, and section fields stack in one column. A QR code would mean sending the address to an image service.
 
+- **Keep the phone's first screen for the total and recent payments.** Seen on iOS, November 2026: with the stablecoin and ETH sections on the tab, recent payments started below the fold. The breakdown is now a **Balances** button (a section accessory beside the "updated" line, so it doesn't add a full-width button row) that opens a modal from the cached snapshot.
+
 Open at the time of writing:
 
 - Whether the address in a text field can be copied on iOS and Android. It is built on that expectation and not yet checked on a phone.
 - How the table looks on desktop. Only mobile screenshots have been seen.
 - The "Ask the agent" button uses `slack://app?team=<T>&id=<A>&tab=messages`. It renders; nobody has confirmed that clicking it opens the Messages tab.
 - How the Home tab looks on mobile in the agent layout.
+- Whether recent payments now show above the fold on a phone, and how the Balances accessory button sits beside the "updated" line.
 
 ## How to run a design iteration
 
