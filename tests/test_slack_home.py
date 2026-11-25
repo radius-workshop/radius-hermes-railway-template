@@ -219,11 +219,23 @@ class HomeViewTests(Base):
         header = next(b for b in view["blocks"] if b["type"] == "header")
         self.assertEqual(header["text"]["text"], "$1,214.50")
         text = text_of(view)
-        for expected in ("USDC · Base\\n*$812.40*", "SBC · Radius\\n*$402.10*", "*0.0214 ETH*", "Paid in SBC",
-                         "SBC · Radius Testnet 412.50", "USDC · Base Sepolia 18.20", "not counted in the total",
-                         "*Wallet* 0x3f2a…9a2c", "Total value · stablecoins", "Stablecoins valued at $1.00", "Helpful\\n*18*", "Not helpful\\n*3*"):
+        for expected in ("*Wallet* 0x3f2a…9a2c", "Total value · stablecoins", "Stablecoins valued at $1.00",
+                         "Helpful\\n*18*", "Not helpful\\n*3*"):
             self.assertIn(expected, text)
         self.assertNotIn(ADDRESS[10:30], text.replace(f"/address/{ADDRESS}", ""))
+        # the per-token breakdown is in the Balances modal, not on the tab
+        for moved in ("$812.40", "$402.10", "ETH for gas", "Pays on", "Radius Testnet", "Base Sepolia"):
+            self.assertNotIn(moved, text)
+        modal = text_of(sh.build_balances_modal(snapshot()))
+        for expected in ("USDC · Base\\n*$812.40*", "SBC · Radius\\n*$402.10*", "*0.0214 ETH*", "Paid in SBC",
+                         "SBC · Radius Testnet 412.50", "USDC · Base Sepolia 18.20", "not counted in the total",
+                         "*Radius, Base*"):
+            self.assertIn(expected, modal)
+
+    def test_recent_payments_come_before_spending(self):
+        texts = [b.get("text", {}).get("text", "") for b in self.view()["blocks"]]
+        self.assertLess(texts.index("*Recent x402 payments*"), texts.index("*Spending*"))
+        self.assertLess(texts.index("*Wallet* 0x3f2a…9a2c"), texts.index("*Recent x402 payments*"))
 
     def test_eth_price_and_floor_are_operator_settings(self):
         self.assertNotIn("about $", text_of(self.view()))
@@ -231,25 +243,30 @@ class HomeViewTests(Base):
         with patch.dict(os.environ, {"SLACK_HOME_ETH_USD": "3000", "SLACK_HOME_ETH_FLOOR": "0.03"}):
             view = self.view()
         text = text_of(view)
-        self.assertIn("0.0214 ETH (about $64.20)", text)
+        with patch.dict(os.environ, {"SLACK_HOME_ETH_USD": "3000"}):
+            self.assertIn("0.0214 ETH (about $64.20)", text_of(sh.build_balances_modal(snapshot())))
         self.assertIn("ETH on Base is low", text)
         self.assertIn("under the 0.03 ETH floor", text)
         self.assertEqual(next(b for b in view["blocks"] if b["type"] == "header")["text"]["text"], "$1,214.50")
 
     def test_spending_reflects_the_x402_settings(self):
         text = text_of(self.view())
-        for expected in ("Per-call cap\\n*No cap*", "Spent today (UTC)\\n*$0.06*", "*Any public host*", "*Radius, Base*"):
+        for expected in ("Per-call cap\\n*No cap*", "Spent today (UTC)\\n*$0.06*", "*Any public host*"):
             self.assertIn(expected, text)
+        pays_on = lambda: text_of(sh.build_balances_modal(snapshot()))  # noqa: E731
+        self.assertIn("*Radius, Base*", pays_on())
         with patch.dict(os.environ, {"X402_MAX_PER_CALL": "1", "X402_ALLOWED_HOSTS": "grug402.dev, api.example.com",
                                      "X402_PAID_NETWORKS": "radius-testnet"}):
             text = text_of(self.view())
-        for expected in ("*$1.00 max*", "*2 hosts*", "*Radius Testnet*", "Testnet only"):
+            modal = pays_on()
+        for expected in ("*$1.00 max*", "*2 hosts*", "Testnet only"):
             self.assertIn(expected, text)
+        self.assertIn("*Radius Testnet*", modal)
         with patch.dict(os.environ, {"X402_PAID_NETWORKS": "radius-testnet,base-mainnet,radius-mainnet,base-sepolia"}):
-            self.assertIn("*Base, Radius (+ 2 testnets)*", text_of(self.view()))
+            self.assertIn("*Base, Radius (+ 2 testnets)*", pays_on())
         with patch.dict(os.environ, {"X402_PAID_NETWORKS": "", "X402_ALLOWED_HOSTS": "", "X402_MAX_PER_CALL": "unlimited"}):
-            text = text_of(self.view())
-        self.assertIn("None, payments are off", text)
+            text, modal = text_of(self.view()), pays_on()
+        self.assertIn("None, payments are off", modal)
         self.assertIn("Approved hosts\\n*None*", text)
 
     def table(self, view):
@@ -332,7 +349,10 @@ class HomeViewTests(Base):
         self.assertEqual(buttons["slack_home_link_ask"]["url"], f"slack://app?team={TEAM}&id={APP}&tab=messages")
         self.assertTrue(sh.ACTION_LINK.fullmatch("slack_home_link_ask"))
         self.assertNotIn("url", buttons[sh.ACTION_REFRESH])
-        menu = next(b["accessory"] for b in view["blocks"] if b.get("accessory"))
+        accessories = [b["accessory"] for b in view["blocks"] if b.get("accessory")]
+        self.assertEqual((accessories[0]["type"], accessories[0]["action_id"]), ("button", sh.ACTION_BALANCES))
+        self.assertEqual(accessories[0]["text"]["text"], "Balances")
+        menu = accessories[1]
         self.assertEqual((menu["type"], menu["action_id"]), ("overflow", sh.ACTION_WALLET))
         self.assertEqual([(o["text"]["text"], o["value"], o.get("url")) for o in menu["options"]], [
             ("Show full address", "address", None),
@@ -369,8 +389,9 @@ class HomeViewTests(Base):
         text = text_of(view)
         self.assertEqual(next(b for b in view["blocks"] if b["type"] == "header")["text"]["text"], "$812.40")
         self.assertIn("not included: SBC on Radius (could not be read)", text)
-        self.assertIn("SBC · Radius\\n*Unavailable*", text)
-        self.assertIn("ETH · Base\\n*Unavailable*", text)
+        modal = text_of(sh.build_balances_modal(partial))
+        self.assertIn("SBC · Radius\\n*Unavailable*", modal)
+        self.assertIn("ETH · Base\\n*Unavailable*", modal)
         self.assertIn("_Unavailable._", text)
         none = self.view(snapshot(address=None, balances={}, ledger=[]))
         text = text_of(none)
@@ -379,6 +400,9 @@ class HomeViewTests(Base):
         self.assertIn("No payments yet", text)
         self.assertNotIn(sh.ACTION_FUND, text)
         self.assertNotIn(sh.ACTION_WALLET, text)
+        self.assertNotIn(sh.ACTION_BALANCES, text)
+        for empty in (None, snapshot(address=None, balances={})):
+            self.assertIn("not been read yet", text_of(sh.build_balances_modal(empty)))
         self.assertNotIn('"table"', text)
         self.assertNotIn("$0.00*\"", text.split("Spent today")[0])
 
@@ -391,7 +415,8 @@ class HomeViewTests(Base):
         self.assertLessEqual(len(json.dumps(table["rows"])), 10000)
         self.assertNotIn('"table"', text_of(modal))  # Slack has no table block in modals
         for view in (home, self.view(big, table=False), modal, sh.build_fund_modal(ADDRESS),
-                     sh.build_address_modal(ADDRESS), sh.build_limited_home(team_id=TEAM, app_id=APP)):
+                     sh.build_address_modal(ADDRESS), sh.build_balances_modal(big),
+                     sh.build_limited_home(team_id=TEAM, app_id=APP)):
             self.assertLessEqual(len(view["blocks"]), 100)
             for block in view["blocks"]:
                 if block["type"] == "section":
@@ -400,7 +425,7 @@ class HomeViewTests(Base):
                 if block["type"] == "actions":
                     self.assertLessEqual(len(block["elements"]), 25)
         self.assertIn("latest 25 of 60", text_of(modal))
-        for view in (modal, sh.build_fund_modal(ADDRESS), sh.build_address_modal(ADDRESS)):
+        for view in (modal, sh.build_fund_modal(ADDRESS), sh.build_address_modal(ADDRESS), sh.build_balances_modal(big)):
             self.assertLessEqual(len(view["title"]["text"]), 24)
 
     def test_limited_view_and_fund_modal(self):
@@ -528,14 +553,20 @@ class SlackTests(Base):
         sh._cache["address"] = ADDRESS
         self.assertEqual(self.run_action(sh.on_fund, self.click(sh.ACTION_FUND)), [True])
         self.assertEqual(self.run_action(sh.on_payments, self.click(sh.ACTION_PAYMENTS)), [True])
-        fund, pay = self.app.client.opened
+        self.assertEqual(self.run_action(sh.on_balances, self.click(sh.ACTION_BALANCES)), [True])
+        fund, pay, bal = self.app.client.opened
+        self.assertIn("not been read yet", text_of(bal["view"]))  # nothing cached yet; never reads in the 3 s window
         self.assertEqual(fund["trigger_id"], "123.456.abc")
         self.assertIn(ADDRESS, text_of(fund["view"]))
         self.assertIn("grug402.dev/weather", text_of(pay["view"]))
         self.assertNotIn("Radius Testnet", text_of(pay["view"]))
         self.run_action(sh.on_fund, self.click(sh.ACTION_FUND, user="U999STRANGER"))
         self.run_action(sh.on_payments, self.click(sh.ACTION_PAYMENTS, user="U999STRANGER"))
-        self.assertEqual(len(self.app.client.opened), 2)
+        self.run_action(sh.on_balances, self.click(sh.ACTION_BALANCES, user="U999STRANGER"))
+        self.assertEqual(len(self.app.client.opened), 3)
+        sh._cache["snapshot"] = snapshot()
+        self.run_action(sh.on_balances, self.click(sh.ACTION_BALANCES))
+        self.assertIn("SBC · Radius\\n*$402.10*", text_of(self.app.client.opened[-1]["view"]))
         self.assertEqual(self.run_action(sh.on_link, self.click("slack_home_link_ask")), [True])
 
     def test_wallet_menu(self):
@@ -623,7 +654,8 @@ class RegistrationTests(Base):
         sh.register(ctx)
         self.assertEqual(ctx.factories, [("slack", sh.wire_slack)])
         self.assertEqual(dict(ctx.actions), {sh.ACTION_REFRESH: sh.on_refresh, sh.ACTION_FUND: sh.on_fund,
-                                             sh.ACTION_PAYMENTS: sh.on_payments, sh.ACTION_WALLET: sh.on_wallet,
+                                             sh.ACTION_PAYMENTS: sh.on_payments, sh.ACTION_BALANCES: sh.on_balances,
+                                             sh.ACTION_WALLET: sh.on_wallet,
                                              sh.ACTION_LINK: sh.on_link})
         self.assertEqual(ctx.hooks, [("post_tool_call", sh.after_tool_call)])
         self.assertFalse(hasattr(ctx, "register_tool"))

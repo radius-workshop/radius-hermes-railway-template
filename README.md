@@ -507,13 +507,12 @@ The bundled `slack-home` plugin fills the agent's **Home** tab in Slack with a w
 
 | Section | What it shows | Source |
 |---|---|---|
-| Stablecoin total | USDC on Base plus SBC on Radius, mainnet, each valued at $1.00 | `balanceOf` on each chain's public RPC |
+| Stablecoin total | USDC on Base plus SBC on Radius, mainnet, each valued at $1.00. A **Balances** button beside it opens the breakdown | `balanceOf` on each chain's public RPC |
 | Wallet | The short address, with a **⋯** menu: show the full address, open the Radius or Base explorer | `radius_wallet_address` tool |
-| ETH for gas | ETH on Base. A dollar value only when `SLACK_HOME_ETH_USD` is set. Never part of the total | `eth_getBalance` |
-| Spending | `X402_MAX_PER_CALL`, today's settled payments (UTC), `X402_ALLOWED_HOSTS`, `X402_PAID_NETWORKS` | environment and the x402 ledger |
 | Recent x402 payments | The latest five priced attempts as a table (time, endpoint, chain, paid, status), with a modal for the latest 25 (the button says **All payments** only when there are 25 or fewer) | `${HERMES_HOME}/x402/ledger.jsonl` |
+| Spending | `X402_MAX_PER_CALL`, today's settled payments (UTC), `X402_ALLOWED_HOSTS` | environment and the x402 ledger |
 | Feedback, last 7 days | 👍 and 👎 counts | `feedback_ledger` tool |
-| Testnet | SBC on Radius Testnet and USDC on Base Sepolia, in small print, not counted | same RPC calls |
+| Balances modal | Each stablecoin, ETH for gas on Base (a dollar value only when `SLACK_HOME_ETH_USD` is set, never part of the total), the networks it pays on (`X402_PAID_NETWORKS`), and testnet balances, which are not counted | same RPC calls, environment |
 
 **When it updates.** When someone opens the tab, when they click **Refresh**, and after the agent finishes an `x402_request` they asked for. Balances are reused for `SLACK_HOME_CACHE_SECONDS` (default 60); Refresh reads again, at most once every 5 seconds.
 

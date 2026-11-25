@@ -1,4 +1,4 @@
-"""Slack App Home tab for the agent: wallet balances, recent x402 payments and feedback.
+"""Slack App Home tab for the agent: the stablecoin total, recent x402 payments and feedback.
 
 One Block Kit view per person, published with ``views.publish`` when they open the Home tab,
 click Refresh, or the agent finishes an ``x402_request`` they asked for.
@@ -55,6 +55,7 @@ GAS_NETWORK = "base-mainnet"  # the one chain where gas is paid in ETH; Radius g
 ACTION_REFRESH = "slack_home_refresh"
 ACTION_FUND = "slack_home_fund"
 ACTION_PAYMENTS = "slack_home_payments"
+ACTION_BALANCES = "slack_home_balances"  # opens the per-token breakdown behind the headline total
 ACTION_WALLET = "slack_home_wallet"  # the overflow menu beside the wallet address
 VIEW_ADDRESS = "slack_home_address"  # callback id of the modals that hold the address in a text field
 ACTION_LINK = re.compile(r"slack_home_link_\w+")  # link buttons still send a click that needs an ack
@@ -415,13 +416,28 @@ def messages_tab_url(team_id: str, app_id: str) -> str | None:
 
 # --------------------------------------------------------------------------- views
 
+def _stablecoins(balances: dict) -> dict:
+    return {name: balances.get((name, "token")) for name in ("base-mainnet", "radius-mainnet")}
+
+
+def _pays_on() -> str:
+    paid = {env: [NETWORKS[n]["label"] for n in paid_networks() if NETWORKS[n]["environment"] == env]
+            for env in ("mainnet", "testnet")}
+    networks = ", ".join(paid["mainnet"] or paid["testnet"]) or "None, payments are off"
+    if paid["mainnet"] and paid["testnet"]:
+        networks += f" (+ {len(paid['testnet'])} testnet{'s' if len(paid['testnet']) != 1 else ''})"
+    return networks
+
+
 def build_home(snapshot: dict, *, team_id: str = "", app_id: str = "", now: datetime | None = None,
                table: bool = True) -> dict:
+    """The headline total, the wallet, then recent payments high enough to show on a phone without scrolling.
+    The per-token breakdown, ETH for gas, networks and testnet balances are in the Balances modal."""
     now = now or datetime.now(timezone.utc)
     address, balances = snapshot.get("address"), snapshot.get("balances") or {}
     blocks: list[dict] = []
 
-    stable = {name: balances.get((name, "token")) for name in ("base-mainnet", "radius-mainnet")}
+    stable = _stablecoins(balances)
     known = [value for value in stable.values() if value is not None]
     missing = [f"{NETWORKS[n]['symbol']} on {NETWORKS[n]['label']}" for n, v in stable.items() if v is None]
     total = usd(sum(known, Decimal(0))) if known else "Unavailable"
@@ -429,14 +445,11 @@ def build_home(snapshot: dict, *, team_id: str = "", app_id: str = "", now: date
     blocks.append({"type": "header", "text": {"type": "plain_text", "text": total}})
     note = "Mainnet · Radius and Base · updated " + _date(snapshot["taken_at"])
     if not address:
-        note = "The wallet address could not be read, so no balances are shown."
-    elif missing and known:
-        note += " · not included: " + ", ".join(missing) + " (could not be read)"
-    blocks.append(_context(note))
-
-    def money(name: str) -> str:
-        value = stable[name]
-        return f"{NETWORKS[name]['symbol']} · {NETWORKS[name]['label']}\n*{usd(value) if value is not None else 'Unavailable'}*"
+        blocks.append(_context("The wallet address could not be read, so no balances are shown."))
+    else:
+        if missing and known:
+            note += " · not included: " + ", ".join(missing) + " (could not be read)"
+        blocks.append(_section(note, accessory=_button("Balances", ACTION_BALANCES)))
 
     if address:
         menu = [{"text": {"type": "plain_text", "text": "Show full address"}, "value": "address"}]
@@ -444,12 +457,7 @@ def build_home(snapshot: dict, *, team_id: str = "", app_id: str = "", now: date
                   "url": f"{NETWORKS[name]['explorer']}/address/{address}"} for name in ("radius-mainnet", "base-mainnet")]
         blocks.append(_section(f"*Wallet* {_short(address)}",
                                accessory={"type": "overflow", "action_id": ACTION_WALLET, "options": menu}))
-        blocks.append(_section("*Stablecoins*", [money("base-mainnet"), money("radius-mainnet")]))
-        eth, price, floor = balances.get((GAS_NETWORK, "native")), eth_usd(), eth_floor()
-        eth_text = "Unavailable" if eth is None else f"{eth:.4f} ETH"
-        if eth is not None and price:
-            eth_text += f" (about {usd(eth * price)})"
-        blocks.append(_section("*ETH for gas*", [f"ETH · Base\n*{eth_text}*", "Gas on Radius\n*Paid in SBC*"]))
+        eth, floor = balances.get((GAS_NETWORK, "native")), eth_floor()
         if eth is not None and floor and eth < floor:
             blocks.append(_section(f":warning: *ETH on Base is low.* {eth:.4f} ETH, under the {floor.normalize():f} ETH "
                                    "floor. Base payments fail once gas runs out."))
@@ -462,22 +470,6 @@ def build_home(snapshot: dict, *, team_id: str = "", app_id: str = "", now: date
 
     environment = payment_environment()
     rows = payments(snapshot.get("ledger") or [], environment)
-    cap = _positive("X402_MAX_PER_CALL") if os.environ.get("X402_MAX_PER_CALL", "").strip().lower() != "unlimited" else None
-    hosts = [h for h in (s.strip() for s in os.environ.get("X402_ALLOWED_HOSTS", "").split(",")) if h]
-    host_text = "Any public host" if "*" in hosts else f"{len(hosts)} host{'s' if len(hosts) != 1 else ''}" if hosts else "None"
-    paid = {env: [NETWORKS[n]["label"] for n in paid_networks() if NETWORKS[n]["environment"] == env]
-            for env in ("mainnet", "testnet")}
-    networks = ", ".join(paid["mainnet"] or paid["testnet"]) or "None, payments are off"
-    if paid["mainnet"] and paid["testnet"]:
-        networks += f" (+ {len(paid['testnet'])} testnet{'s' if len(paid['testnet']) != 1 else ''})"
-    blocks.append({"type": "divider"})
-    blocks.append(_section("*Spending*", [
-        f"Per-call cap\n*{usd(cap) + ' max' if cap else 'No cap'}*",
-        f"Spent today (UTC)\n*{usd(spent_today(rows, now))}*",
-        f"Approved hosts\n*{host_text}*",
-        f"Pays on\n*{networks}*",
-    ]))
-
     blocks.append({"type": "divider"})
     blocks.append(_section("*Recent x402 payments*"))
     if not rows:
@@ -499,6 +491,16 @@ def build_home(snapshot: dict, *, team_id: str = "", app_id: str = "", now: date
     if actions:
         blocks.append({"type": "actions", "elements": actions})
 
+    cap = _positive("X402_MAX_PER_CALL") if os.environ.get("X402_MAX_PER_CALL", "").strip().lower() != "unlimited" else None
+    hosts = [h for h in (s.strip() for s in os.environ.get("X402_ALLOWED_HOSTS", "").split(",")) if h]
+    host_text = "Any public host" if "*" in hosts else f"{len(hosts)} host{'s' if len(hosts) != 1 else ''}" if hosts else "None"
+    blocks.append({"type": "divider"})
+    blocks.append(_section("*Spending*", [
+        f"Per-call cap\n*{usd(cap) + ' max' if cap else 'No cap'}*",
+        f"Spent today (UTC)\n*{usd(spent_today(rows, now))}*",
+        f"Approved hosts\n*{host_text}*",
+    ]))
+
     feedback = snapshot.get("feedback")
     blocks.append({"type": "divider"})
     if feedback:
@@ -507,12 +509,6 @@ def build_home(snapshot: dict, *, team_id: str = "", app_id: str = "", now: date
     else:
         blocks.append(_section("*Feedback, last 7 days*\n_Unavailable._"))
 
-    if address:
-        testnet = [f"{NETWORKS[n]['symbol']} · {NETWORKS[n]['label']} "
-                   + (f"{balances[(n, 'token')]:,.2f}" if balances.get((n, "token")) is not None else "unavailable")
-                   for n in ("radius-testnet", "base-sepolia")]
-        blocks.append({"type": "divider"})
-        blocks.append(_context("*Testnet · not real money* · " + " · ".join(testnet) + " · not counted in the total"))
     version = template_version()
     blocks.append(_context(" · ".join(filter(None, [
         f"Template {version}" if version else "", "Stablecoins valued at $1.00", "ETH is not in the total"]))))
@@ -571,6 +567,34 @@ def build_address_modal(address: str | None) -> dict:
         return _modal("Wallet address", [_section("The wallet address could not be read. Try Refresh.")])
     field, callback_id = _address_blocks(address)
     return _modal("Wallet address", [*field, _context("The same address on every network.")], callback_id=callback_id)
+
+
+def build_balances_modal(snapshot: dict | None) -> dict:
+    """The breakdown behind the headline total, from the cached snapshot (a trigger id lasts three seconds)."""
+    if not snapshot or not snapshot.get("address"):
+        return _modal("Balances", [_section("Balances have not been read yet. Try Refresh.")])
+    balances = snapshot.get("balances") or {}
+    stable = _stablecoins(balances)
+
+    def money(name: str) -> str:
+        value = stable[name]
+        return f"{NETWORKS[name]['symbol']} · {NETWORKS[name]['label']}\n*{usd(value) if value is not None else 'Unavailable'}*"
+
+    eth, price = balances.get((GAS_NETWORK, "native")), eth_usd()
+    eth_text = "Unavailable" if eth is None else f"{eth:.4f} ETH"
+    if eth is not None and price:
+        eth_text += f" (about {usd(eth * price)})"
+    testnet = [f"{NETWORKS[n]['symbol']} · {NETWORKS[n]['label']} "
+               + (f"{balances[(n, 'token')]:,.2f}" if balances.get((n, "token")) is not None else "unavailable")
+               for n in ("radius-testnet", "base-sepolia")]
+    return _modal("Balances", [
+        _section("*Stablecoins*", [money("base-mainnet"), money("radius-mainnet")]),
+        _section("*ETH for gas*", [f"ETH · Base\n*{eth_text}*", "Gas on Radius\n*Paid in SBC*"]),
+        _section("*Pays on*", [f"x402 networks\n*{_pays_on()}*"]),
+        {"type": "divider"},
+        _context("*Testnet · not real money* · " + " · ".join(testnet) + " · not counted in the total"),
+        _context("Updated " + _date(snapshot["taken_at"]) + " · stablecoins valued at $1.00 · ETH is not in the total"),
+    ])
 
 
 def build_payments_modal(rows: list[dict], environment: str) -> dict:
@@ -741,6 +765,11 @@ async def on_payments(ack, body, action):
     await _open_modal(body, lambda: build_payments_modal(rows, environment))
 
 
+async def on_balances(ack, body, action):
+    await ack()
+    await _open_modal(body, lambda: build_balances_modal(_cache["snapshot"]))
+
+
 async def on_wallet(ack, body, action):
     """The wallet menu. The explorer options are links, which Slack opens itself."""
     await ack()
@@ -790,6 +819,7 @@ def register(ctx):
     ctx.register_slack_action_handler(ACTION_REFRESH, on_refresh)
     ctx.register_slack_action_handler(ACTION_FUND, on_fund)
     ctx.register_slack_action_handler(ACTION_PAYMENTS, on_payments)
+    ctx.register_slack_action_handler(ACTION_BALANCES, on_balances)
     ctx.register_slack_action_handler(ACTION_WALLET, on_wallet)
     ctx.register_slack_action_handler(ACTION_LINK, on_link)
     ctx.register_hook("post_tool_call", after_tool_call)
